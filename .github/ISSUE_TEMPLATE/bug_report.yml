@@ -1,0 +1,43 @@
+name: Bug report
+description: Report a reproducible Moonshine defect
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, private host information, model weights,
+        or unredacted security vulnerabilities.
+  - type: input
+    id: revision
+    attributes:
+      label: Moonshine revision
+      placeholder: Commit SHA or release tag
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Hardware, OS/kernel, ROCm, filesystem, context, and model revision
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Minimal commands and inputs needed to reproduce the problem
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior and logs
+    validations:
+      required: true

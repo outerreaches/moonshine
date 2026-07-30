@@ -1,0 +1,17 @@
+Moonshine
+Copyright (c) 2026 The Moonshine authors
+
+This standalone source tree was extracted from K3 development performed in
+the MIT-licensed DwarfStar / ds4 repository:
+https://github.com/antirez/ds4
+
+Extraction source:
+  base:       0a7ad776b9068348e6cb09df8cafa9cadd285298
+  checkpoint: 22c99021b54735b589b55485a945e8154a94224f
+
+The retained MIT license includes notices for the ds4.c and GGML authors.
+See docs/provenance.md for source lineage, design influences, validation
+oracles, model references, and the development disclosure.
+
+Kimi K3 model weights are not included and are governed separately by their
+publisher's terms.

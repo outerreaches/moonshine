@@ -1,0 +1,14 @@
+*.o
+*.a
+*.dSYM/
+core
+core.*
+/moonshine-chat
+/moonshine-server
+tests/test_k3_*
+!tests/test_k3_*.c
+!tests/test_k3_*.cu
+__pycache__/
+*.pyc
+.DS_Store
+.*.swp
