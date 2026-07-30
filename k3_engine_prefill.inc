@@ -1597,7 +1597,7 @@ extern "C" bool k3_engine_plan_prefill(
         plan, error, error_size);
 }
 
-extern "C" bool k3_engine_forward_range_with_projection_backend(
+static bool k3_engine_forward_range_impl(
         k3_engine *engine,
         const uint32_t *input_tokens,
         uint32_t token_count,
@@ -1605,6 +1605,8 @@ extern "C" bool k3_engine_forward_range_with_projection_backend(
         uint32_t *next_token,
         float *token_value,
         k3_engine_prefill_stats *stats,
+        k3_engine_prefill_progress_callback progress_callback,
+        void *progress_data,
         char *error,
         size_t error_size) {
     if (error && error_size) error[0] = '\0';
@@ -1670,6 +1672,9 @@ extern "C" bool k3_engine_forward_range_with_projection_backend(
     clock_gettime(CLOCK_MONOTONIC, &phase_end);
     measured.layer0_seconds =
         elapsed_seconds(phase_start, phase_end);
+    if (ok && progress_callback) {
+        progress_callback(1u, K3_ENGINE_LAYERS, progress_data);
+    }
     void *input = workspace.hidden[1];
     void *output = workspace.hidden[0];
     for (uint32_t layer = 1u;
@@ -1683,6 +1688,11 @@ extern "C" bool k3_engine_forward_range_with_projection_backend(
             void *swap = input;
             input = output;
             output = swap;
+            if (progress_callback) {
+                progress_callback(
+                    layer + 1u, K3_ENGINE_LAYERS,
+                    progress_data);
+            }
         }
     }
     if (ok &&
@@ -1754,6 +1764,41 @@ extern "C" bool k3_engine_forward_range_with_projection_backend(
     return ok;
 }
 
+extern "C" bool k3_engine_forward_range_with_projection_backend(
+        k3_engine *engine,
+        const uint32_t *input_tokens,
+        uint32_t token_count,
+        k3_prefill_projection_backend backend,
+        uint32_t *next_token,
+        float *token_value,
+        k3_engine_prefill_stats *stats,
+        char *error,
+        size_t error_size) {
+    return k3_engine_forward_range_impl(
+        engine, input_tokens, token_count, backend,
+        next_token, token_value, stats,
+        NULL, NULL, error, error_size);
+}
+
+extern "C" bool k3_engine_forward_range_with_progress(
+        k3_engine *engine,
+        const uint32_t *input_tokens,
+        uint32_t token_count,
+        uint32_t *next_token,
+        float *token_value,
+        k3_engine_prefill_stats *stats,
+        k3_engine_prefill_progress_callback progress_callback,
+        void *progress_data,
+        char *error,
+        size_t error_size) {
+    return k3_engine_forward_range_impl(
+        engine, input_tokens, token_count,
+        K3_PREFILL_PROJECTION_DEFAULT,
+        next_token, token_value, stats,
+        progress_callback, progress_data,
+        error, error_size);
+}
+
 extern "C" bool k3_engine_forward_range(
         k3_engine *engine,
         const uint32_t *input_tokens,
@@ -1763,11 +1808,11 @@ extern "C" bool k3_engine_forward_range(
         k3_engine_prefill_stats *stats,
         char *error,
         size_t error_size) {
-    return k3_engine_forward_range_with_projection_backend(
+    return k3_engine_forward_range_impl(
         engine, input_tokens, token_count,
         K3_PREFILL_PROJECTION_DEFAULT,
         next_token, token_value, stats,
-        error, error_size);
+        NULL, NULL, error, error_size);
 }
 
 static bool prefill_hash_device_bytes(

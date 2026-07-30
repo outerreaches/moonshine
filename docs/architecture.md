@@ -42,9 +42,9 @@ turn API. The first call renders the optional system message plus user turn;
 later calls submit only the new user-message and assistant-opener XTML delta
 against retained causal state.
 
-Prompt scheduling is length-aware. The default uses token-major execution up
-to 128 prompt tokens because a small chat turn is much cheaper than the fixed
-1.447 TB layer-major routed sweep. Longer prompts use layer-major prefill.
+Prompt scheduling is length-aware. The measured crossover is 92.4 tokens:
+the default uses token-major execution through 92 tokens and layer-major
+prefill from 93 tokens onward.
 Every model-produced token, including the final end-of-message marker, is fed
 back into the engine so the position is a complete-turn boundary. A length
 stop forces only the missing suffix of the official response/message trailer.
@@ -56,10 +56,12 @@ forced trailer count, and committed position. Export/import delegates to the
 exact semantic checkpoint API.
 
 `moonshine-chat` is a thin one-shot or interactive shell over this shared
-layer. `moonshine-server` uses the same layer for stateless Chat Completions:
-it zero-resets causal storage, clears cache mappings, renders the complete
-supplied history, and executes one request at a time without reloading
-weights.
+layer. `moonshine-server` uses the same layer for Chat Completions. Stateless
+requests zero-reset causal storage while retaining immutable expert-cache
+mappings. Requests carrying the same `X-Moonshine-Session` identifier may
+reuse retained in-process state only when the newly rendered full history is
+an exact token-prefix extension. Any mismatch resets causal state and
+prefills the full history.
 
 ## OpenAI-compatible transport
 
@@ -71,6 +73,9 @@ The initial server is a deliberately bounded HTTP/1.1 implementation:
   `POST /v1/chat/completions`;
 - strict native JSON parsing with an 8 MiB default body limit;
 - ordinary JSON completion responses and incremental SSE chunks;
+- SSE comment keepalives with token/layer prefill progress;
+- opt-in single-session append-prefix reuse through
+  `X-Moonshine-Session`;
 - UTF-8 boundary buffering so tokenizer byte fragments never corrupt a stream;
 - standard OpenAI error envelopes and usage accounting;
 - fixed greedy execution, with unsupported tools and structured response
@@ -260,8 +265,12 @@ combined KDA input/output projection time from 292.319 to 19.876 seconds and
 raises full prefill from 7.746 to 10.447 token/s.
 
 The changed reduction order shifts selected values and causal hashes, so it is
-not the default. hipBLASLt exposes block-scale types but returned no usable
-native MXFP4/BF16 algorithms on the tested `gfx1151` stack.
+not the default. Promotion does not require impossible bit-identical hashes
+across different reduction orders. It requires paired same-schedule replay
+distributions as a numerical control envelope plus sequence-level natural-text
+and task-quality tests showing no schedule-specific decline. hipBLASLt exposes
+block-scale types but returned no usable native MXFP4/BF16 algorithms on the
+tested `gfx1151` stack.
 
 ## Correctness model
 

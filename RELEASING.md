@@ -2,13 +2,14 @@
 
 ## Repository setup
 
-1. Create a public repository with the slug `moonshine-k3`.
+1. Use the public `outerreaches/moonshine` repository.
 2. Use the display name **Moonshine** and the description in
    `docs/release-plan.md`.
 3. Enable private vulnerability reporting.
 4. Enable secret scanning and push protection.
 5. Protect `main` and require the portable CI workflow.
-6. Add the local remote only after reviewing the initial public repository.
+6. Do not push a candidate until the local commit passes clean-checkout
+   qualification and review.
 
 ## Release qualification
 
@@ -26,8 +27,10 @@ make test-chat-hello MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3
 ```
 
 Also verify `moonshine-server` health, model discovery, JSON completion, and
-SSE completion on the qualified host. Record the commit, model revision,
-hardware, kernel, ROCm version, context, memory ledger, and timings.
+SSE completion on the qualified host. Confirm pre-TTFT SSE keepalives, a
+warmer second stateless request, exact append-prefix reuse under
+`X-Moonshine-Session`, and mismatch fallback. Record the commit, model
+revision, hardware, kernel, ROCm version, context, memory ledger, and timings.
 
 Run a final audit:
 

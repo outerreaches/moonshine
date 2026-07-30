@@ -5,7 +5,14 @@ Semantic Versioning once its first research-preview tag is published.
 
 ## [Unreleased]
 
-- Prepare the standalone repository for public review.
+- Preserve immutable routed-expert cache mappings across stateless requests.
+- Add opt-in exact append-prefix causal-state reuse through
+  `X-Moonshine-Session`.
+- Add SSE token/layer prefill-progress keepalives and timeout guidance.
+- Move the default sequential limit from 128 to 92, selecting layer-major
+  prefill from the measured 93-token crossover onward.
+- Replace the impossible cross-schedule bit-exact promotion gate with paired
+  same-schedule numerical envelopes plus sequence/task quality gates.
 
 ## [0.1.0-research-preview] - 2026-07-30
 

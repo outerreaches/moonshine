@@ -29,7 +29,7 @@ static void usage(FILE *stream, const char *program) {
         "  --system TEXT              Initial system message\n"
         "  -n, --max-tokens N         Maximum generated tokens (default 256)\n"
         "  --context N                Context capacity (default 8192)\n"
-        "  --sequential-limit N       Token-major prompt cutoff (default 128)\n"
+        "  --sequential-limit N       Token-major prompt limit (default 92)\n"
         "  --load PATH                Import causal state after startup\n"
         "  --save PATH                Export causal state before exit\n"
         "  -h, --help                 Show this help\n"
@@ -56,7 +56,8 @@ static bool parse_options(
     memset(options, 0, sizeof(*options));
     options->max_tokens = 256u;
     options->context = 8192u;
-    options->sequential_limit = 128u;
+    options->sequential_limit =
+        K3_CHAT_MEASURED_SEQUENTIAL_LIMIT;
 
     int index = 1;
     if (index < argc && argv[index][0] != '-') {

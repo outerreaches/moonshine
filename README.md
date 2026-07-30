@@ -159,9 +159,12 @@ Stop every other large model process first, then run:
 ```
 
 Enter one user message per line. The engine stays resident and retains causal
-and expert-cache state across turns. Short prompts use token-major execution;
-prompts above 128 tokens switch to layer-major prefill so a normal chat turn
-does not pay the fixed 1.447 TB routed sweep.
+and expert-cache state across turns. Short prompts use token-major execution
+through 92 tokens; prompts of 93 tokens or more use layer-major prefill. The
+92.4-token crossover is derived from the measured
+`n / 0.440 tok/s` sequential cost and
+`203.638 s + 0.0682 s/token` layer-major cost rather than an arbitrary round
+number.
 
 One-shot mode writes response text to stdout and telemetry to stderr:
 
@@ -193,9 +196,17 @@ Use a larger qualified context without changing the weight residency:
 ## Run the OpenAI-compatible API
 
 The server keeps one Q8/32 engine resident and processes one request at a time.
-Each Chat Completions request is stateless: the engine zero-resets its
-semantic state, renders the complete supplied text history, and clears expert
-cache mappings without reloading static weights or reallocating the cache.
+Requests are semantically stateless by default: the engine zero-resets causal
+state and renders the complete supplied text history. It preserves the routed
+expert cache across requests because the cache contains immutable model
+weights, not conversation state.
+
+Append-only prefix reuse is opt-in through `X-Moonshine-Session`. The server
+retains one completed session—the most recently successful identifier—and
+reuses its in-process causal state only when the next rendered history is an
+exact token-prefix extension. Edited, forked, shorter, mismatched, missing, or
+different-session histories fall back to an isolated semantic reset and full
+prefill. Clients must still send the complete OpenAI message history.
 
 Start a loopback-only 32K service:
 
@@ -211,7 +222,7 @@ The initial surface provides `GET /health`, `GET /v1/models`, and
 are supported:
 
 ```sh
-curl http://127.0.0.1:8080/v1/chat/completions \
+curl --max-time 0 http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   --data-binary '{
     "model": "moonshine",
@@ -220,7 +231,7 @@ curl http://127.0.0.1:8080/v1/chat/completions \
     "stream": false
   }'
 
-curl -N http://127.0.0.1:8080/v1/chat/completions \
+curl --max-time 0 -N http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   --data-binary '{
     "model": "moonshine",
@@ -228,6 +239,28 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
     "stream": true
   }'
 ```
+
+Layer-major TTFT can be many minutes. Configure OpenAI SDK read/request
+timeouts accordingly; the examples use curl's unlimited timeout. Streaming
+responses send spec-legal SSE comment keepalives during prefill, with token or
+layer progress throttled to ten seconds and emitted at completed-unit
+boundaries. Ordinary JSON responses cannot send keepalives.
+
+To reuse an append-only conversation, send the same identifier on consecutive
+requests:
+
+```sh
+curl --max-time 0 http://127.0.0.1:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'X-Moonshine-Session: agent-1' \
+  --data-binary @request-with-complete-history.json
+```
+
+Non-streaming responses report evaluated and reused prompt tokens in
+`X-Moonshine-Prompt-Evaluated-Tokens` and
+`X-Moonshine-Prompt-Reused-Tokens`. SSE streams report the same values in a
+final comment. Use `--clear-expert-cache-per-request` only for explicit cold
+cache benchmarks; it also disables prefix reuse for that request.
 
 Set `MOONSHINE_API_KEY` or pass `--api-key` to require bearer authentication.
 The server refuses a non-loopback bind without a key. It accepts text-only

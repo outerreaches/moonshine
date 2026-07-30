@@ -14,6 +14,11 @@ extern "C" {
 
 typedef struct k3_chat_session k3_chat_session;
 
+enum {
+    /* Sequential remains faster through 92 whole tokens; switch at 93. */
+    K3_CHAT_MEASURED_SEQUENTIAL_LIMIT = 92,
+};
+
 typedef struct {
     const char *model_root;
     const char *system_prompt;
@@ -34,11 +39,18 @@ typedef enum {
     K3_CHAT_FINISH_LENGTH = 1,
 } k3_chat_finish_reason;
 
+typedef enum {
+    K3_CHAT_PREFILL_PROGRESS_TOKENS = 0,
+    K3_CHAT_PREFILL_PROGRESS_LAYERS = 1,
+} k3_chat_prefill_progress_unit;
+
 typedef struct {
     k3_text_buffer           response;
     k3_chat_prefill_strategy prefill_strategy;
     k3_chat_finish_reason    finish_reason;
     uint32_t                 prompt_tokens;
+    uint32_t                 prompt_evaluated_tokens;
+    uint32_t                 prompt_reused_tokens;
     uint32_t                 generated_tokens;
     uint32_t                 forced_trailer_tokens;
     uint32_t                 position;
@@ -57,6 +69,29 @@ typedef struct {
  */
 typedef void (*k3_chat_text_callback)(
     const char *bytes, size_t size, void *user_data);
+
+typedef void (*k3_chat_prefill_progress_callback)(
+    k3_chat_prefill_progress_unit unit,
+    uint32_t                      completed,
+    uint32_t                      total,
+    void                         *user_data);
+
+typedef struct {
+    /*
+     * Reuse the retained causal state only when the newly rendered history is
+     * an exact token-prefix extension. A mismatch falls back to a semantic
+     * reset and full prefill.
+     */
+    bool                              reuse_prefix;
+    /*
+     * Clearing the expert cache is useful for explicit cold-cache benchmarks.
+     * Normal serving should leave this false because cached weights are not
+     * semantic request state.
+     */
+    bool                              clear_expert_cache;
+    k3_chat_prefill_progress_callback progress_callback;
+    void                             *progress_data;
+} k3_chat_completion_options;
 
 /*
  * Create one stateful non-thinking text chat session. Short prompts use
@@ -97,9 +132,9 @@ bool k3_chat_session_reset(
     size_t           error_size);
 
 /*
- * OpenAI-style stateless completion: reset the engine and render the complete
- * supplied text-only history before generation. Expert mappings are forgotten
- * so large layer-major prompts may borrow the cold cache allocation.
+ * OpenAI-style stateless completion: reset semantic state and render the
+ * complete supplied text-only history before generation. Resident expert
+ * mappings are preserved because they contain immutable model weights.
  */
 bool k3_chat_session_complete_messages(
     k3_chat_session        *session,
@@ -111,6 +146,25 @@ bool k3_chat_session_complete_messages(
     k3_chat_turn_result    *result,
     char                   *error,
     size_t                  error_size);
+
+/*
+ * Extended completion interface. Prefix reuse is opt-in and append-only: it
+ * activates only when the rendered history exactly extends every token in the
+ * retained semantic state. Edited, forked, shorter, or otherwise mismatched
+ * histories fall back to the same isolated full-prefill behavior as the
+ * stateless interface.
+ */
+bool k3_chat_session_complete_messages_with_options(
+    k3_chat_session                 *session,
+    const k3_chat_message           *messages,
+    size_t                           message_count,
+    uint32_t                         max_generated_tokens,
+    const k3_chat_completion_options *options,
+    k3_chat_text_callback            callback,
+    void                            *callback_data,
+    k3_chat_turn_result             *result,
+    char                            *error,
+    size_t                           error_size);
 
 bool k3_chat_session_export_state(
     const k3_chat_session      *session,

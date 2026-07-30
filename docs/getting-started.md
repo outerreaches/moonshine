@@ -223,6 +223,20 @@ The OpenAI model ID is `moonshine`. Set `MOONSHINE_API_KEY` or use
 `--api-key` before binding beyond loopback. This research server has one
 blocking request slot.
 
+Long prefill can take minutes. Configure client request/read timeouts
+accordingly; use `curl --max-time 0` for manual checks. Streaming requests emit
+SSE comment keepalives with token/layer progress during prefill.
+
+The server preserves immutable expert-cache mappings between requests.
+Append-only causal-state reuse is opt-in: send the same
+`X-Moonshine-Session` value with consecutive requests and keep supplying the
+complete OpenAI message history. Only the most recently completed session is
+resident. An exact token-prefix extension reuses prior state; any mismatch or
+different identifier performs a semantic reset and full prefill.
+
+Use `--clear-expert-cache-per-request` only to reproduce cold-cache
+benchmarks.
+
 ## 12. Run prefill fixtures
 
 Exact sequential/range comparison:

@@ -42,6 +42,9 @@ revisions, or compatibility with GGUF quants.
 - dynamic MLA cache/workspace allocation qualified at 8K, 16K, and 32K;
 - a one-slot OpenAI-compatible HTTP service with JSON and SSE completions;
 - bearer authentication guardrails for non-loopback serving.
+- persistent semantically neutral expert-cache residency across requests;
+- opt-in exact append-prefix reuse through `X-Moonshine-Session`;
+- SSE prefill-progress keepalives and explicit long-timeout guidance;
 - portable GCC/Clang CPU-only GitHub Actions workflow;
 - contribution, conduct, security, changelog, citation, and release guides;
 - issue forms and a pull-request template.
@@ -62,8 +65,9 @@ revisions, or compatibility with GGUF quants.
   when creating the public repository;
 - rerun secret scanning and ensure no private hostnames, tokens, logs, or model
   paths beyond documented examples are present;
-- create the GitHub repository, set DS4 as historical upstream in the
-  description, and push only after the local release commit is reviewed.
+- the public GitHub repository exists at `outerreaches/moonshine`; do not push
+  the Round 4 integration commit until its local clean-checkout qualification
+  and review are complete.
 
 ## Engine milestones after repository extraction
 
@@ -98,8 +102,12 @@ Use the native tokenizer and XTML fixtures to compare:
 - diagnostic KDA hipBLAS versus default on multi-token natural text;
 - bounded streamed-static BF16 versus Q8 on selected layers or full tokens.
 
-Do not promote hipBLAS or future Q4 static weights on a same-greedy-token
-observation alone.
+Different GEMM reduction orders are not expected to produce bit-identical
+values or causal hashes. For hipBLAS and future numerical backends, establish
+a paired same-schedule replay distribution as the control envelope, then run
+sequence-level natural-text and task-quality tests. Promotion requires no
+schedule-specific quality decline; a same-greedy-token observation alone is
+insufficient.
 
 ### 3. Usable application surface
 
@@ -138,9 +146,9 @@ projects, not implicit parts of the first release.
 - benchmark tables name hardware, software pins, model revision, context,
   static mode, cache size, and whether results are default or diagnostic.
 
-## Suggested GitHub identity
+## GitHub identity
 
-Repository slug: `moonshine-k3`
+Repository: `outerreaches/moonshine`
 
 Display name: `Moonshine`
 

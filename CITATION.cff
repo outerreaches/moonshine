@@ -7,6 +7,7 @@ authors:
 version: "0.1.0-research-preview"
 date-released: 2026-07-30
 license: MIT
+repository-code: "https://github.com/outerreaches/moonshine"
 abstract: >-
   An experimental single-node SafeTensors/ROCm inference engine for Kimi K3
   on 128 GB AMD Strix Halo, with NVMe-streamed MXFP4 experts and layer-major

@@ -65,6 +65,8 @@ int main(int argc, char **argv) {
     char error[512] = { 0 };
     k3_tokenizer *tokenizer = NULL;
     k3_token_buffer tokens = { 0 };
+    k3_token_buffer completed_history = { 0 };
+    k3_token_buffer extended_history = { 0 };
     k3_text_buffer text = { 0 };
 
     CHECK(k3_tokenizer_create(
@@ -231,18 +233,72 @@ int main(int argc, char **argv) {
               "Literal <|end_of_msg|> stays text.") != NULL,
           "user text containing a marker was not preserved literally");
 
+    static const k3_chat_message completed_messages[] = {
+        {
+            .role = K3_CHAT_ROLE_USER,
+            .content = "Say hello.",
+        },
+        {
+            .role = K3_CHAT_ROLE_ASSISTANT,
+            .content = "Hello! 👋 How can I help you today?",
+        },
+    };
+    static const k3_chat_message extended_messages[] = {
+        {
+            .role = K3_CHAT_ROLE_USER,
+            .content = "Say hello.",
+        },
+        {
+            .role = K3_CHAT_ROLE_ASSISTANT,
+            .content = "Hello! 👋 How can I help you today?",
+        },
+        {
+            .role = K3_CHAT_ROLE_USER,
+            .content = "Say hello again.",
+        },
+    };
+    const k3_chat_options completed_options = {
+        .add_generation_prompt = false,
+        .thinking = false,
+        .thinking_effort = NULL,
+    };
+    CHECK(k3_tokenizer_encode_chat(
+              tokenizer, completed_messages,
+              sizeof(completed_messages) /
+                  sizeof(completed_messages[0]),
+              &completed_options, &completed_history,
+              error, sizeof(error)),
+          error);
+    CHECK(k3_tokenizer_encode_chat(
+              tokenizer, extended_messages,
+              sizeof(extended_messages) /
+                  sizeof(extended_messages[0]),
+              &nonthinking, &extended_history,
+              error, sizeof(error)),
+          error);
+    CHECK(extended_history.count >
+              completed_history.count &&
+          memcmp(
+              extended_history.data,
+              completed_history.data,
+              completed_history.count *
+                  sizeof(*completed_history.data)) == 0,
+          "append-only history is not an exact XTML token-prefix extension");
+
     printf("K3 native tokenizer/XTML: PASS\n");
     printf("  vocab=%u base=%u; ICU Unicode pre-tokenizer\n",
            K3_TOKEN_VOCAB_SIZE, 163584u);
     printf("  official oracles: ASCII, contractions/numbers, Han, "
            "multilingual, special-token safety\n");
     printf("  XTML: non-thinking hello exact; thinking/max and "
-           "multi-turn hashes exact\n");
+           "multi-turn hashes exact; append-prefix exact\n");
     result = 0;
 
 cleanup:
     k3_text_buffer_free(&text);
     k3_token_buffer_free(&tokens);
+    k3_token_buffer_free(&completed_history);
+    k3_token_buffer_free(&extended_history);
     k3_tokenizer_destroy(tokenizer);
     return result;
 }

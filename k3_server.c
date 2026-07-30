@@ -22,11 +22,14 @@
 enum {
     K3_SERVER_DEFAULT_PORT = 8080,
     K3_SERVER_DEFAULT_CONTEXT = 8192,
-    K3_SERVER_DEFAULT_SEQUENTIAL_LIMIT = 128,
+    K3_SERVER_DEFAULT_SEQUENTIAL_LIMIT =
+        K3_CHAT_MEASURED_SEQUENTIAL_LIMIT,
     K3_SERVER_DEFAULT_EXPERTS = 32,
     K3_SERVER_DEFAULT_STAGING = 16,
     K3_SERVER_MAX_HEADERS = 64 * 1024,
     K3_SERVER_DEFAULT_MAX_BODY = 8 * 1024 * 1024,
+    K3_SERVER_MAX_SESSION_ID = 128,
+    K3_SERVER_KEEPALIVE_SECONDS = 10,
 };
 
 typedef struct {
@@ -35,6 +38,7 @@ typedef struct {
     char  *body;
     size_t body_size;
     char  *authorization;
+    char  *session_id;
 } http_request;
 
 typedef struct {
@@ -47,6 +51,7 @@ typedef struct {
     uint16_t    experts;
     uint16_t    staging;
     size_t      max_body;
+    bool        clear_expert_cache_per_request;
 } server_config;
 
 typedef struct {
@@ -56,6 +61,7 @@ typedef struct {
     char       *pending;
     size_t      pending_size;
     size_t      pending_capacity;
+    struct timespec last_progress;
     bool        failed;
 } stream_state;
 
@@ -80,6 +86,12 @@ static void set_error(char *error, size_t error_size, const char *fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(error, error_size, fmt, ap);
     va_end(ap);
+}
+
+static double elapsed_seconds(struct timespec start,
+                              struct timespec end) {
+    return (double)(end.tv_sec - start.tv_sec) +
+           (double)(end.tv_nsec - start.tv_nsec) / 1e9;
 }
 
 static bool parse_u32(const char *text, uint32_t min_value,
@@ -110,10 +122,12 @@ static void usage(FILE *stream, const char *program) {
         "  --port PORT           TCP port (default 8080)\n"
         "  --api-key KEY         Require Authorization: Bearer KEY\n"
         "  --context TOKENS      Context capacity (default 8192)\n"
-        "  --sequential-limit N  Token-major prompt threshold (default 128)\n"
+        "  --sequential-limit N  Token-major prompt limit (default 92)\n"
         "  --experts N           Resident expert slots per layer (default 32)\n"
         "  --staging N           Expert staging slots (default 16)\n"
         "  --max-body BYTES      Maximum JSON request body (default 8388608)\n"
+        "  --clear-expert-cache-per-request\n"
+        "                        Force cold-cache request benchmarks\n"
         "  -h, --help            Show this help\n"
         "  --version             Show the Moonshine version\n"
         "\n"
@@ -147,6 +161,12 @@ static bool parse_args(int argc, char **argv, server_config *config) {
         if (strcmp(argument, "--version") == 0) {
             printf("%s %s\n", MOONSHINE_NAME, MOONSHINE_VERSION);
             exit(0);
+        }
+        if (strcmp(
+                argument,
+                "--clear-expert-cache-per-request") == 0) {
+            config->clear_expert_cache_per_request = true;
+            continue;
         }
         if (strcmp(argument, "--host") == 0 ||
             strcmp(argument, "--port") == 0 ||
@@ -394,7 +414,28 @@ static void http_request_free(http_request *request) {
     }
     free(request->body);
     free(request->authorization);
+    free(request->session_id);
     memset(request, 0, sizeof(*request));
+}
+
+static bool valid_session_id(const char *value) {
+    const size_t size = strlen(value);
+    if (size == 0u || size > K3_SERVER_MAX_SESSION_ID) {
+        return false;
+    }
+    for (size_t i = 0u; i < size; i++) {
+        const unsigned char byte = (unsigned char)value[i];
+        const bool valid =
+            (byte >= 'a' && byte <= 'z') ||
+            (byte >= 'A' && byte <= 'Z') ||
+            (byte >= '0' && byte <= '9') ||
+            byte == '-' || byte == '_' ||
+            byte == '.' || byte == ':';
+        if (!valid) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static char *trim_header_value(char *value) {
@@ -527,6 +568,26 @@ static bool receive_request(int fd, size_t max_body,
                 *http_status = 500;
                 set_error(error, error_size,
                           "allocating authorization header failed");
+                free(headers);
+                return false;
+            }
+        } else if (strcasecmp(
+                       line, "X-Moonshine-Session") == 0) {
+            if (request->session_id != NULL ||
+                !valid_session_id(value)) {
+                set_error(
+                    error, error_size,
+                    "X-Moonshine-Session must be one unique "
+                    "1-128 character identifier using "
+                    "letters, digits, '.', '_', '-', or ':'");
+                free(headers);
+                return false;
+            }
+            request->session_id = strdup(value);
+            if (request->session_id == NULL) {
+                *http_status = 500;
+                set_error(error, error_size,
+                          "allocating session header failed");
                 free(headers);
                 return false;
             }
@@ -790,8 +851,46 @@ static bool stream_begin(stream_state *stream) {
         "\"finish_reason\":null}]}",
         stream->completion_id, (long long)stream->created,
         MOONSHINE_MODEL_ID);
-    return size > 0 && (size_t)size < sizeof(event) &&
-           stream_send_event(stream, event, (size_t)size);
+    const bool ok =
+        size > 0 && (size_t)size < sizeof(event) &&
+        stream_send_event(stream, event, (size_t)size);
+    if (ok) {
+        clock_gettime(
+            CLOCK_MONOTONIC, &stream->last_progress);
+    }
+    return ok;
+}
+
+static void stream_progress(
+        k3_chat_prefill_progress_unit unit,
+        uint32_t completed,
+        uint32_t total,
+        void *user_data) {
+    stream_state *stream = (stream_state *)user_data;
+    if (stream->failed) {
+        return;
+    }
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (completed != total &&
+        elapsed_seconds(stream->last_progress, now) <
+            K3_SERVER_KEEPALIVE_SECONDS) {
+        return;
+    }
+    const char *unit_name =
+        unit == K3_CHAT_PREFILL_PROGRESS_LAYERS ?
+            "layer" : "token";
+    char comment[160];
+    const int size = snprintf(
+        comment, sizeof(comment),
+        ": moonshine prefill %s %u/%u\r\n\r\n",
+        unit_name, completed, total);
+    if (size <= 0 || (size_t)size >= sizeof(comment) ||
+        !send_all(stream->fd, comment, (size_t)size)) {
+        stream->failed = true;
+        return;
+    }
+    stream->last_progress = now;
 }
 
 static void stream_end(stream_state *stream,
@@ -800,6 +899,20 @@ static void stream_end(stream_state *stream,
         (void)stream_send_content(
             stream, stream->pending, stream->pending_size);
         stream->pending_size = 0u;
+    }
+    if (!stream->failed) {
+        char comment[192];
+        const int size = snprintf(
+            comment, sizeof(comment),
+            ": moonshine prompt total=%u evaluated=%u "
+            "reused=%u\r\n\r\n",
+            result->prompt_tokens,
+            result->prompt_evaluated_tokens,
+            result->prompt_reused_tokens);
+        if (size <= 0 || (size_t)size >= sizeof(comment) ||
+            !send_all(stream->fd, comment, (size_t)size)) {
+            stream->failed = true;
+        }
     }
     if (!stream->failed) {
         const char *finish =
@@ -878,14 +991,25 @@ static void make_completion_id(char *id, size_t id_size, time_t created) {
 static void log_result(const char *id,
                        const k3_chat_turn_result *result,
                        bool streamed, bool client_ok) {
+    const uint64_t cache_hits =
+        result->cache_after.hits -
+        result->cache_before.hits;
+    const uint64_t cache_accesses =
+        result->cache_after.accesses -
+        result->cache_before.accesses;
     fprintf(
         stderr,
-        "request %s complete: prompt=%u %.3fs %.3f tok/s; "
+        "request %s complete: prompt=%u evaluated=%u "
+        "reused=%u %.3fs %.3f tok/s; "
         "generated=%u %.3fs %.3f tok/s; finish=%s; "
-        "stream=%s client=%s cache_hits=%llu/%llu\n",
-        id, result->prompt_tokens, result->prompt_seconds,
+        "stream=%s client=%s cache_delta=%llu/%llu "
+        "cache_total=%llu/%llu\n",
+        id, result->prompt_tokens,
+        result->prompt_evaluated_tokens,
+        result->prompt_reused_tokens,
+        result->prompt_seconds,
         result->prompt_seconds > 0.0 ?
-            (double)result->prompt_tokens /
+            (double)result->prompt_evaluated_tokens /
                 result->prompt_seconds : 0.0,
         result->generated_tokens, result->decode_seconds,
         result->tokens_per_second,
@@ -893,12 +1017,16 @@ static void log_result(const char *id,
             K3_CHAT_FINISH_END_OF_MESSAGE ? "stop" : "length",
         streamed ? "yes" : "no",
         client_ok ? "connected" : "disconnected",
+        (unsigned long long)cache_hits,
+        (unsigned long long)cache_accesses,
         (unsigned long long)result->cache_after.hits,
         (unsigned long long)result->cache_after.accesses);
 }
 
 static void handle_chat_completion(int fd, k3_chat_session *session,
-                                   const http_request *http) {
+                                   const http_request *http,
+                                   const server_config *config,
+                                   char *active_session_id) {
     char error[1024];
     k3_openai_chat_request request;
     memset(&request, 0, sizeof(request));
@@ -923,6 +1051,13 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
     make_completion_id(completion_id, sizeof(completion_id), created);
     k3_chat_turn_result result;
     memset(&result, 0, sizeof(result));
+    const bool reuse_requested =
+        http->session_id != NULL &&
+        active_session_id[0] != '\0' &&
+        strcmp(
+            http->session_id,
+            active_session_id) == 0;
+    active_session_id[0] = '\0';
     bool ok;
     if (request.stream) {
         stream_state stream = {
@@ -934,11 +1069,24 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
             k3_openai_chat_request_free(&request);
             return;
         }
-        ok = k3_chat_session_complete_messages(
+        const k3_chat_completion_options completion_options = {
+            .reuse_prefix = reuse_requested,
+            .clear_expert_cache =
+                config->clear_expert_cache_per_request,
+            .progress_callback = stream_progress,
+            .progress_data = &stream,
+        };
+        ok = k3_chat_session_complete_messages_with_options(
             session, request.messages, request.message_count,
-            request.max_tokens, stream_callback, &stream,
+            request.max_tokens, &completion_options,
+            stream_callback, &stream,
             &result, error, sizeof(error));
         if (ok) {
+            if (http->session_id != NULL) {
+                memcpy(
+                    active_session_id, http->session_id,
+                    strlen(http->session_id) + 1u);
+            }
             stream_end(&stream, &result);
             log_result(completion_id, &result, true, !stream.failed);
         } else {
@@ -947,15 +1095,26 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
             stream_send_inference_error(&stream, error);
         }
     } else {
-        ok = k3_chat_session_complete_messages(
+        const k3_chat_completion_options completion_options = {
+            .reuse_prefix = reuse_requested,
+            .clear_expert_cache =
+                config->clear_expert_cache_per_request,
+        };
+        ok = k3_chat_session_complete_messages_with_options(
             session, request.messages, request.message_count,
-            request.max_tokens, NULL, NULL,
+            request.max_tokens, &completion_options,
+            NULL, NULL,
             &result, error, sizeof(error));
         if (!ok) {
             fprintf(stderr, "request %s failed: %s\n",
                     completion_id, error);
             (void)send_json_error(fd, 500, error);
         } else {
+            if (http->session_id != NULL) {
+                memcpy(
+                    active_session_id, http->session_id,
+                    strlen(http->session_id) + 1u);
+            }
             char *json = NULL;
             size_t json_size = 0u;
             ok = k3_openai_build_chat_response(
@@ -968,10 +1127,15 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
                 char metrics[512];
                 snprintf(
                     metrics, sizeof(metrics),
-                    "X-K3-Prompt-Seconds: %.6f\r\n"
-                    "X-K3-Decode-Seconds: %.6f\r\n"
-                    "X-K3-Decode-Tokens-Per-Second: %.6f\r\n",
-                    result.prompt_seconds, result.decode_seconds,
+                    "X-Moonshine-Prompt-Seconds: %.6f\r\n"
+                    "X-Moonshine-Prompt-Evaluated-Tokens: %u\r\n"
+                    "X-Moonshine-Prompt-Reused-Tokens: %u\r\n"
+                    "X-Moonshine-Decode-Seconds: %.6f\r\n"
+                    "X-Moonshine-Decode-Tokens-Per-Second: %.6f\r\n",
+                    result.prompt_seconds,
+                    result.prompt_evaluated_tokens,
+                    result.prompt_reused_tokens,
+                    result.decode_seconds,
                     result.tokens_per_second);
                 const bool client_ok = send_response(
                     fd, 200, "application/json",
@@ -987,7 +1151,8 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
 }
 
 static void handle_request(int fd, k3_chat_session *session,
-                           const server_config *config) {
+                           const server_config *config,
+                           char *active_session_id) {
     http_request request;
     int status = 400;
     char error[1024];
@@ -1007,6 +1172,8 @@ static void handle_request(int fd, k3_chat_session *session,
                 "\"model\":\"" MOONSHINE_MODEL_ID "\","
                 "\"engine\":\"" MOONSHINE_NAME "\","
                 "\"version\":\"" MOONSHINE_VERSION "\","
+                "\"expert_cache\":\"persistent\","
+                "\"prefix_reuse\":\"X-Moonshine-Session\","
                 "\"slots\":1}";
             (void)send_response(
                 fd, 200, "application/json",
@@ -1039,7 +1206,9 @@ static void handle_request(int fd, k3_chat_session *session,
         if (strcmp(request.method, "POST") != 0) {
             (void)send_json_error(fd, 405, "method not allowed");
         } else {
-            handle_chat_completion(fd, session, &request);
+            handle_chat_completion(
+                fd, session, &request, config,
+                active_session_id);
         }
     } else {
         (void)send_json_error(fd, 404, "endpoint not found");
@@ -1111,6 +1280,7 @@ int main(int argc, char **argv) {
         (double)stats.state_bytes / (1024.0 * 1024.0 * 1024.0),
         config.api_key == NULL ? "off" : "on");
 
+    char active_session_id[K3_SERVER_MAX_SESSION_ID + 1u] = { 0 };
     while (!stop_requested) {
         const int client = accept(listener, NULL, NULL);
         if (client < 0) {
@@ -1122,7 +1292,9 @@ int main(int argc, char **argv) {
             }
             break;
         }
-        handle_request(client, session, &config);
+        handle_request(
+            client, session, &config,
+            active_session_id);
         close(client);
     }
     fprintf(stderr, "shutting down\n");

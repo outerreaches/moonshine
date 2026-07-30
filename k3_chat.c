@@ -9,7 +9,6 @@
 
 enum {
     K3_CHAT_DEFAULT_CONTEXT = 8192,
-    K3_CHAT_DEFAULT_SEQUENTIAL_LIMIT = 128,
     K3_CHAT_DEFAULT_EXPERTS_PER_LAYER = 32,
     K3_CHAT_DEFAULT_STAGING_SLOTS = 16,
 };
@@ -27,6 +26,7 @@ struct k3_chat_session {
     uint32_t      context;
     uint32_t      sequential_prefill_limit;
     uint32_t      position;
+    k3_token_buffer retained_tokens;
     bool          started;
     bool          healthy;
 };
@@ -44,6 +44,70 @@ static void set_error(char *error, size_t error_size, const char *fmt, ...) {
 static double elapsed_seconds(struct timespec start, struct timespec end) {
     return (double)(end.tv_sec - start.tv_sec) +
            (double)(end.tv_nsec - start.tv_nsec) / 1e9;
+}
+
+static bool reserve_retained_tokens(k3_chat_session *session,
+                                    size_t additional,
+                                    char *error,
+                                    size_t error_size) {
+    if (additional > SIZE_MAX - session->retained_tokens.count) {
+        set_error(error, error_size,
+                  "retained token history size overflow");
+        return false;
+    }
+    const size_t required =
+        session->retained_tokens.count + additional;
+    if (required <= session->retained_tokens.capacity) {
+        return true;
+    }
+    size_t capacity =
+        session->retained_tokens.capacity == 0u ?
+            256u : session->retained_tokens.capacity;
+    while (capacity < required) {
+        if (capacity > SIZE_MAX / 2u) {
+            set_error(error, error_size,
+                      "retained token history capacity overflow");
+            return false;
+        }
+        capacity *= 2u;
+    }
+    if (capacity > SIZE_MAX /
+            sizeof(*session->retained_tokens.data)) {
+        set_error(error, error_size,
+                  "retained token history byte size overflow");
+        return false;
+    }
+    uint32_t *data = (uint32_t *)realloc(
+        session->retained_tokens.data,
+        capacity * sizeof(*session->retained_tokens.data));
+    if (data == NULL) {
+        set_error(error, error_size,
+                  "allocating retained token history failed");
+        return false;
+    }
+    session->retained_tokens.data = data;
+    session->retained_tokens.capacity = capacity;
+    return true;
+}
+
+static bool append_retained_tokens(k3_chat_session *session,
+                                   const uint32_t *tokens,
+                                   size_t count,
+                                   char *error,
+                                   size_t error_size) {
+    if (count == 0u) {
+        return true;
+    }
+    if (!reserve_retained_tokens(
+            session, count, error, error_size)) {
+        return false;
+    }
+    memcpy(
+        session->retained_tokens.data +
+            session->retained_tokens.count,
+        tokens, count * sizeof(*tokens));
+    session->retained_tokens.count += count;
+    return true;
 }
 
 static bool append_response_bytes(k3_text_buffer *buffer,
@@ -160,7 +224,7 @@ bool k3_chat_session_create(
         K3_CHAT_DEFAULT_CONTEXT : config->context;
     session->sequential_prefill_limit =
         config->sequential_prefill_limit == 0u ?
-            K3_CHAT_DEFAULT_SEQUENTIAL_LIMIT :
+            K3_CHAT_MEASURED_SEQUENTIAL_LIMIT :
             config->sequential_prefill_limit;
     session->healthy = true;
     if (config->system_prompt != NULL &&
@@ -208,6 +272,7 @@ void k3_chat_session_destroy(k3_chat_session *session) {
     }
     k3_engine_destroy(session->engine);
     k3_tokenizer_destroy(session->tokenizer);
+    k3_token_buffer_free(&session->retained_tokens);
     free(session->system_prompt);
     free(session);
 }
@@ -238,22 +303,42 @@ static bool encode_turn_prompt(k3_chat_session *session,
         .role = K3_CHAT_ROLE_USER,
         .content = user_text,
     };
-    const k3_chat_options options = {
+    const k3_chat_options render_options = {
         .add_generation_prompt = true,
         .thinking = false,
         .thinking_effort = NULL,
     };
     return k3_tokenizer_encode_chat(
         session->tokenizer, messages, message_count,
-        &options, prompt, error, error_size);
+        &render_options, prompt, error, error_size);
 }
 
-static bool execute_prompt(k3_chat_session *session,
-                           const k3_token_buffer *prompt,
-                           uint32_t *predicted,
-                           k3_chat_turn_result *result,
-                           char *error,
-                           size_t error_size) {
+typedef struct {
+    k3_chat_prefill_progress_callback callback;
+    void                             *data;
+} prefill_progress_bridge;
+
+static void report_layer_progress(uint32_t completed,
+                                  uint32_t total,
+                                  void *user_data) {
+    prefill_progress_bridge *bridge =
+        (prefill_progress_bridge *)user_data;
+    if (bridge->callback != NULL) {
+        bridge->callback(
+            K3_CHAT_PREFILL_PROGRESS_LAYERS,
+            completed, total, bridge->data);
+    }
+}
+
+static bool execute_prompt(
+        k3_chat_session *session,
+        const k3_token_buffer *prompt,
+        uint32_t *predicted,
+        k3_chat_prefill_progress_callback progress_callback,
+        void *progress_data,
+        k3_chat_turn_result *result,
+        char *error,
+        size_t error_size) {
     struct timespec start;
     struct timespec end;
     clock_gettime(CLOCK_MONOTONIC, &start);
@@ -265,14 +350,26 @@ static bool execute_prompt(k3_chat_session *session,
             ok = k3_engine_forward_token(
                 session->engine, prompt->data[i],
                 predicted, &value, error, error_size);
+            if (ok && progress_callback != NULL) {
+                progress_callback(
+                    K3_CHAT_PREFILL_PROGRESS_TOKENS,
+                    (uint32_t)(i + 1u),
+                    (uint32_t)prompt->count,
+                    progress_data);
+            }
         }
     } else {
         result->prefill_strategy = K3_CHAT_PREFILL_LAYER_MAJOR;
         float value = 0.0f;
-        ok = k3_engine_forward_range(
+        prefill_progress_bridge bridge = {
+            .callback = progress_callback,
+            .data = progress_data,
+        };
+        ok = k3_engine_forward_range_with_progress(
             session->engine, prompt->data,
             (uint32_t)prompt->count,
             predicted, &value, &result->range_stats,
+            report_layer_progress, &bridge,
             error, error_size);
     }
     clock_gettime(CLOCK_MONOTONIC, &end);
@@ -289,7 +386,11 @@ static bool execute_prompt(k3_chat_session *session,
 static bool execute_encoded_turn(
         k3_chat_session *session,
         const k3_token_buffer *prompt,
+        uint32_t total_prompt_tokens,
+        uint32_t reused_prompt_tokens,
         uint32_t max_generated_tokens,
+        k3_chat_prefill_progress_callback progress_callback,
+        void *progress_data,
         k3_chat_text_callback callback,
         void *callback_data,
         k3_chat_turn_result *result,
@@ -297,6 +398,7 @@ static bool execute_encoded_turn(
         size_t error_size) {
     k3_text_buffer token_piece = { 0 };
     bool ok = true;
+    bool mutated = false;
     if (prompt->count < 2u || prompt->count > UINT32_MAX) {
         set_error(error, error_size,
                   "rendered prompt token count %zu is invalid",
@@ -330,13 +432,33 @@ static bool execute_encoded_turn(
         goto cleanup;
     }
 
-    result->prompt_tokens = (uint32_t)prompt->count;
+    if (!reserve_retained_tokens(
+            session,
+            prompt->count + (size_t)generation_limit +
+                trailer_count,
+            error, error_size)) {
+        ok = false;
+        goto cleanup;
+    }
+
+    result->prompt_tokens = total_prompt_tokens;
+    result->prompt_evaluated_tokens =
+        (uint32_t)prompt->count;
+    result->prompt_reused_tokens = reused_prompt_tokens;
     k3_engine_get_cache_stats(
         session->engine, &result->cache_before);
     uint32_t predicted = 0u;
     if (!execute_prompt(
             session, prompt, &predicted,
+            progress_callback, progress_data,
             result, error, error_size)) {
+        ok = false;
+        goto cleanup;
+    }
+    mutated = true;
+    if (!append_retained_tokens(
+            session, prompt->data, prompt->count,
+            error, error_size)) {
         ok = false;
         goto cleanup;
     }
@@ -359,6 +481,12 @@ static bool execute_encoded_turn(
             uint32_t discard = 0u;
             if (!feed_token(
                     session, token, &discard,
+                    error, error_size)) {
+                ok = false;
+                goto cleanup;
+            }
+            if (!append_retained_tokens(
+                    session, &token, 1u,
                     error, error_size)) {
                 ok = false;
                 goto cleanup;
@@ -393,6 +521,12 @@ static bool execute_encoded_turn(
             ok = false;
             goto cleanup;
         }
+        if (!append_retained_tokens(
+                session, &token, 1u,
+                error, error_size)) {
+            ok = false;
+            goto cleanup;
+        }
     }
 
     if (!natural_stop) {
@@ -403,6 +537,12 @@ static bool execute_encoded_turn(
             if (!feed_token(
                     session, K3_RESPONSE_TRAILER[i],
                     &discard, error, error_size)) {
+                ok = false;
+                goto cleanup;
+            }
+            if (!append_retained_tokens(
+                    session, &K3_RESPONSE_TRAILER[i], 1u,
+                    error, error_size)) {
                 ok = false;
                 goto cleanup;
             }
@@ -428,6 +568,10 @@ cleanup:
     k3_text_buffer_free(&token_piece);
     if (!ok) {
         k3_text_buffer_free(&result->response);
+        if (mutated || !session->healthy) {
+            session->healthy = false;
+            session->retained_tokens.count = 0u;
+        }
     }
     return ok;
 }
@@ -459,7 +603,9 @@ bool k3_chat_session_turn(
         session, user_text, &prompt, error, error_size);
     if (ok) {
         ok = execute_encoded_turn(
-            session, &prompt, max_generated_tokens,
+            session, &prompt,
+            (uint32_t)prompt.count, 0u,
+            max_generated_tokens, NULL, NULL,
             callback, callback_data, result,
             error, error_size);
     }
@@ -484,6 +630,7 @@ bool k3_chat_session_reset(
         return false;
     }
     session->position = 0u;
+    session->retained_tokens.count = 0u;
     session->started = false;
     session->healthy = true;
     return true;
@@ -499,6 +646,24 @@ bool k3_chat_session_complete_messages(
         k3_chat_turn_result *result,
         char *error,
         size_t error_size) {
+    return k3_chat_session_complete_messages_with_options(
+        session, messages, message_count,
+        max_generated_tokens, NULL,
+        callback, callback_data, result,
+        error, error_size);
+}
+
+bool k3_chat_session_complete_messages_with_options(
+        k3_chat_session *session,
+        const k3_chat_message *messages,
+        size_t message_count,
+        uint32_t max_generated_tokens,
+        const k3_chat_completion_options *options,
+        k3_chat_text_callback callback,
+        void *callback_data,
+        k3_chat_turn_result *result,
+        char *error,
+        size_t error_size) {
     if (session == NULL || messages == NULL ||
         message_count == 0u || result == NULL ||
         max_generated_tokens == 0u) {
@@ -507,11 +672,7 @@ bool k3_chat_session_complete_messages(
         return false;
     }
     memset(result, 0, sizeof(*result));
-    if (!k3_chat_session_reset(
-            session, true, error, error_size)) {
-        return false;
-    }
-    const k3_chat_options options = {
+    const k3_chat_options render_options = {
         .add_generation_prompt = true,
         .thinking = false,
         .thinking_effort = NULL,
@@ -519,10 +680,49 @@ bool k3_chat_session_complete_messages(
     k3_token_buffer prompt = { 0 };
     bool ok = k3_tokenizer_encode_chat(
         session->tokenizer, messages, message_count,
-        &options, &prompt, error, error_size);
+        &render_options, &prompt, error, error_size);
+    const bool clear_expert_cache =
+        options != NULL && options->clear_expert_cache;
+    size_t reused = 0u;
+    if (ok && options != NULL && options->reuse_prefix &&
+        !clear_expert_cache && session->healthy &&
+        session->retained_tokens.count ==
+            (size_t)session->position &&
+        session->retained_tokens.count != 0u &&
+        prompt.count >= session->retained_tokens.count + 2u &&
+        memcmp(
+            prompt.data, session->retained_tokens.data,
+            session->retained_tokens.count *
+                sizeof(*prompt.data)) == 0) {
+        reused = session->retained_tokens.count;
+    }
+    if (ok && reused == 0u) {
+        ok = k3_chat_session_reset(
+            session, clear_expert_cache,
+            error, error_size);
+    }
     if (ok) {
+        if (prompt.count > UINT32_MAX ||
+            reused > UINT32_MAX) {
+            set_error(error, error_size,
+                      "rendered prompt is too large");
+            ok = false;
+        }
+    }
+    if (ok) {
+        const k3_token_buffer suffix = {
+            .data = prompt.data + reused,
+            .count = prompt.count - reused,
+            .capacity = prompt.count - reused,
+        };
         ok = execute_encoded_turn(
-            session, &prompt, max_generated_tokens,
+            session, &suffix,
+            (uint32_t)prompt.count, (uint32_t)reused,
+            max_generated_tokens,
+            options == NULL ? NULL :
+                options->progress_callback,
+            options == NULL ? NULL :
+                options->progress_data,
             callback, callback_data, result,
             error, error_size);
     }
@@ -563,6 +763,7 @@ bool k3_chat_session_import_state(
         return false;
     }
     session->position = imported.token_position;
+    session->retained_tokens.count = 0u;
     session->started = session->position != 0u;
     session->healthy = true;
     if (info != NULL) {

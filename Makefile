@@ -138,6 +138,9 @@ k3_openai.o: k3_openai.c k3_openai.h k3_json.h k3_chat.h
 k3_rocm_ops.o: k3_rocm_ops.cu k3_rocm_ops.h
 k3_safetensors.o: k3_safetensors.c k3_safetensors.h
 k3_tokenizer.o: k3_tokenizer.c k3_tokenizer.h
+tests/test_k3_chat_session.o: tests/test_k3_chat_session.c k3_chat.h
+tests/test_k3_openai.o: tests/test_k3_openai.c k3_openai.h k3_chat.h
+tests/test_k3_tokenizer.o: tests/test_k3_tokenizer.c k3_tokenizer.h
 
 tests/test_k3_expert_cache: tests/test_k3_expert_cache.o k3_expert_cache.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
