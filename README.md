@@ -380,7 +380,7 @@ context allocation, and one-slot OpenAI-compatible HTTP/SSE service are now
 locked. Tool declarations/calls/results and structured responses remain
 required for the broader agentic surface.
 
-See [Release plan](docs/release-plan.md) for the readiness gates and
+See [Architecture](docs/architecture.md) for the correctness model and
 [Provenance](docs/provenance.md) for code lineage, references, and
 acknowledgements.
 

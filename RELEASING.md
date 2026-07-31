@@ -3,8 +3,10 @@
 ## Repository setup
 
 1. Use the public `outerreaches/moonshine` repository.
-2. Use the display name **Moonshine** and the description in
-   `docs/release-plan.md`.
+2. Use the display name **Moonshine** and this description: "Moonshine is an
+   experimental single-node SafeTensors/ROCm inference engine for Kimi K3 on
+   128 GB AMD Strix Halo, with NVMe-streamed MXFP4 experts and layer-major
+   prefill."
 3. Enable private vulnerability reporting.
 4. Enable secret scanning and push protection.
 5. Protect `main` and require the portable CI workflow.
