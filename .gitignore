@@ -10,5 +10,6 @@ tests/test_k3_*
 !tests/test_k3_*.cu
 __pycache__/
 *.pyc
+moonshine-pre-public-history-*.bundle
 .DS_Store
 .*.swp

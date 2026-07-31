@@ -66,8 +66,11 @@ revisions, or compatibility with GGUF quants.
   when creating the public repository;
 - rerun secret scanning and ensure no private hostnames, tokens, logs, or model
   paths beyond documented examples are present;
-- the public GitHub repository exists at `outerreaches/moonshine`; review the
-  locally qualified Round 4 commits before pushing them.
+- the qualified Round 4 implementation and documentation are published on
+  `outerreaches/moonshine` through `55384eb`;
+- keep `archive/pre-public-history` and the pre-public history bundle local.
+  The maintainer checkout uses a main-only `origin` push refspec plus a
+  pre-push hook that rejects `refs/heads/archive/*`.
 
 ## Engine milestones after repository extraction
 

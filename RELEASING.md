@@ -10,6 +10,10 @@
 5. Protect `main` and require the portable CI workflow.
 6. Do not push a candidate until the local commit passes clean-checkout
    qualification and review.
+7. Keep private archive refs and pre-public history bundles local. A maintainer
+   checkout containing `refs/heads/archive/*` must use a main-only
+   `remote.origin.push` refspec and a pre-push guard that rejects those refs;
+   do not bypass the guard with `--no-verify`.
 
 ## Release qualification
 
