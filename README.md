@@ -63,17 +63,19 @@ correctness model.
 ## Current measured checkpoint
 
 These are single-run results on an AMD Ryzen AI Max+ 395 / Radeon 8060S
-(`gfx1151`), Ubuntu 24.04, Linux 7.0, ROCm 7.2, and a Samsung 990 PRO. They are
-engineering fixtures, not cross-project benchmark claims.
+(`gfx1151`), Ubuntu 24.04, Linux 7.0, ROCm 7.2, and a Samsung 990 PRO. The
+startup, short-prompt, decode, and prefill rows were rerun from a detached clean
+checkout of `c041205`; the remaining rows are accepted checkpoint fixtures.
+They are engineering fixtures, not cross-project benchmark claims.
 
 | workload | result |
 |---|---:|
-| Startup, Q8 static + 32 experts/layer | 37.8 s |
-| Short 24-token sequential prompt | 0.440 tok/s |
-| Post-TTFT greedy decode | 0.511 tok/s |
-| Layer-major prefill, 512 positions | 2.139 tok/s |
-| Layer-major prefill, 8,192 positions | 7.746 tok/s |
-| Diagnostic KDA hipBLAS prefill, 8,192 positions | 10.447 tok/s |
+| Startup, Q8 static + 32 experts/layer | 38.1 s |
+| Short 24-token sequential prompt | 0.438 tok/s |
+| Post-TTFT greedy decode | 0.509 tok/s |
+| Layer-major prefill, 512 positions | 2.145 tok/s |
+| Layer-major prefill, 8,192 positions | 7.768 tok/s |
+| Diagnostic KDA hipBLAS prefill, 8,192 positions | 10.448 tok/s |
 | Causal-state export after 2 positions | 1.043 s |
 | Causal-state import after 2 positions | 0.841 s |
 | Native chat `Say hello.` prompt | 0.439 tok/s |
@@ -261,6 +263,13 @@ Non-streaming responses report evaluated and reused prompt tokens in
 `X-Moonshine-Prompt-Reused-Tokens`. SSE streams report the same values in a
 final comment. Use `--clear-expert-cache-per-request` only for explicit cold
 cache benchmarks; it also disables prefix reuse for that request.
+
+In the live 8K integration check, an appended 67-token second turn reused 42
+tokens and evaluated only the 25-token suffix in 54.742 seconds. Replaying all
+67 tokens sequentially would have taken about 152 seconds at the measured
+short-prompt rate. Preserving only the expert cache improved repeated short
+stateless prompts by about 0.8%; exact causal-prefix reuse is the material
+agentic latency optimization.
 
 Set `MOONSHINE_API_KEY` or pass `--api-key` to require bearer authentication.
 The server refuses a non-loopback bind without a key. It accepts text-only

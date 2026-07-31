@@ -260,9 +260,10 @@ The release/default backend uses custom tile-16 Q8 and MXFP4 kernels. It is the
 exact sequential/range oracle path.
 
 The opt-in range-only KDA experiment dequantizes one Q8 matrix at a time into a
-reused 168 MiB BF16 buffer and dispatches hipBLAS GEMM. At 8K it reduces
-combined KDA input/output projection time from 292.319 to 19.876 seconds and
-raises full prefill from 7.746 to 10.447 token/s.
+reused 168 MiB BF16 buffer and dispatches hipBLAS GEMM. The clean-checkout 8K
+pair at `c041205` reduced the complete KDA phase from 334.754 to 62.474 seconds
+(19.676 seconds in projection/output), raising full prefill from 7.768 to
+10.448 token/s and reducing wall time from 1,054.547 to 784.092 seconds.
 
 The changed reduction order shifts selected values and causal hashes, so it is
 not the default. Promotion does not require impossible bit-identical hashes

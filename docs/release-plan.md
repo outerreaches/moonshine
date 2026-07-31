@@ -45,14 +45,15 @@ revisions, or compatibility with GGUF quants.
 - persistent semantically neutral expert-cache residency across requests;
 - opt-in exact append-prefix reuse through `X-Moonshine-Session`;
 - SSE prefill-progress keepalives and explicit long-timeout guidance;
+- detached clean-worktree qualification of exact integration commit `c041205`,
+  including refreshed 512/8K default fixtures, the 8K diagnostic fixture, and
+  the real 8K locked hello;
 - portable GCC/Clang CPU-only GitHub Actions workflow;
 - contribution, conduct, security, changelog, citation, and release guides;
 - issue forms and a pull-request template.
 
 ## Required before publishing
 
-- rerun the standalone repository's full-residency fixtures from a clean
-  checkout;
 - portable CPU-only CI is complete; ROCm remains a documented maintainer
   qualification because hosted runners do not match the target hardware;
 - add a release tag and immutable benchmark/source checkpoint;
@@ -65,9 +66,8 @@ revisions, or compatibility with GGUF quants.
   when creating the public repository;
 - rerun secret scanning and ensure no private hostnames, tokens, logs, or model
   paths beyond documented examples are present;
-- the public GitHub repository exists at `outerreaches/moonshine`; do not push
-  the Round 4 integration commit until its local clean-checkout qualification
-  and review are complete.
+- the public GitHub repository exists at `outerreaches/moonshine`; review the
+  locally qualified Round 4 commits before pushing them.
 
 ## Engine milestones after repository extraction
 
