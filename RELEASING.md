@@ -28,7 +28,7 @@ make tests
 make test
 make test-model-layout MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3
 make test-tokenizer MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3
-make test-engine-hello MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3
+make test-reduction-qualification MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3
 make test-chat-hello MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3
 ```
 

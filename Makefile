@@ -61,6 +61,7 @@ ROCM_TESTS := \
 	tests/test_k3_mla_decode \
 	tests/test_k3_mla_layer_smoke \
 	tests/test_k3_moe_smoke \
+	tests/test_k3_mxfp4_envelope \
 	tests/test_k3_prefill_512 \
 	tests/test_k3_prefill_chunk \
 	tests/test_k3_prefill_crossover \
@@ -82,6 +83,7 @@ ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS)
 	test-engine-hello test-chat-hello test-state-checkpoint test-tokenizer \
 	test-prefill-2 test-prefill-scale test-prefill-kda-blas \
 	test-prefill-crossover \
+	test-reduction-qualification \
 	test-openai-sdk clean
 
 all: libmoonshine.a moonshine-chat moonshine-server
@@ -117,6 +119,8 @@ help:
 	@echo "                               Run the diagnostic KDA hipBLAS candidate"
 	@echo "  make test-prefill-crossover MOONSHINE_MODEL=/path/to/Kimi-K3 MOONSHINE_CROSSOVER_TOKENS='2 4 8 16'"
 	@echo "                               Compare exact warm sequential/range suffixes"
+	@echo "  make test-reduction-qualification MOONSHINE_MODEL=/path/to/Kimi-K3"
+	@echo "                               Run the MXFP4 reduction-change gate bundle"
 	@echo "  make clean                  Remove local build products"
 
 libmoonshine.a: $(K3_OBJS)
@@ -191,6 +195,7 @@ test: \
 	tests/test_k3_json \
 	tests/test_k3_openai \
 	tests/test_k3_rocm_components \
+	tests/test_k3_mxfp4_envelope \
 	tests/test_k3_kda_recurrent \
 	tests/test_k3_mla_decode \
 	tests/test_k3_prefill_ops
@@ -198,6 +203,7 @@ test: \
 	./tests/test_k3_json
 	./tests/test_k3_openai
 	./tests/test_k3_rocm_components
+	./tests/test_k3_mxfp4_envelope
 	./tests/test_k3_kda_recurrent
 	./tests/test_k3_mla_decode
 	./tests/test_k3_prefill_ops
@@ -265,6 +271,22 @@ test-prefill-kda-blas: check-model tests/test_k3_prefill_512
 test-prefill-crossover: check-model tests/test_k3_prefill_crossover
 	./tests/test_k3_prefill_crossover \
 		"$(MOONSHINE_MODEL)" $(MOONSHINE_CROSSOVER_TOKENS)
+
+test-reduction-qualification: check-model \
+	tests/test_k3_rocm_components \
+	tests/test_k3_mxfp4_envelope \
+	tests/test_k3_expert_smoke \
+	tests/test_k3_moe_smoke \
+	tests/test_k3_engine_init \
+	tests/test_k3_engine_hello \
+	tests/test_k3_tokenizer
+	./tests/test_k3_rocm_components
+	./tests/test_k3_mxfp4_envelope
+	./tests/test_k3_expert_smoke "$(MOONSHINE_MODEL)"
+	./tests/test_k3_moe_smoke "$(MOONSHINE_MODEL)"
+	./tests/test_k3_engine_init "$(MOONSHINE_MODEL)" 8192
+	./tests/test_k3_tokenizer "$(MOONSHINE_MODEL)"
+	./tests/test_k3_engine_hello "$(MOONSHINE_MODEL)" q8 32 8192
 
 clean:
 	rm -f libmoonshine.a moonshine-chat moonshine-server \

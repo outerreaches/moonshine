@@ -53,6 +53,12 @@ Semantic Versioning once its first research-preview tag is published.
   7.961 seconds and the locked 512-token range from 239.325 to 123.519 seconds.
 - A warm-cache crossover fixture comparing sequential and selected range
   execution on one resident engine with exact output and causal-state gates.
+- A model-shape, 262,144-output MXFP4 numerical envelope comparing the exact
+  historical scalar reduction with the production group-vectorized schedule
+  across inputs that cross BF16 rounding boundaries.
+- A single self-hosted reduction-change qualification target covering
+  component envelopes, real experts/MoE, complete routed-layer hashes,
+  tokenizer/XTML, and the locked chat fixture.
 - A paired live structured continuation whose 117-token prefill fell from
   211.473 to 104.469 seconds while retaining all 237 prior causal tokens.
 - A filled-8K exact-output gate at 1,008.104 seconds / 8.126 tok/s, with 30.2%

@@ -361,8 +361,19 @@ its own locked full-layer hashes; promotion of another schedule requires a
 same-schedule oracle, a bounded comparison to the reference path, and the
 end-to-end token/value gates below.
 
+The model-free MXFP4 envelope retains an exact test-only copy of that
+historical 256-thread scalar schedule and compares it with the production
+128-thread group schedule at both real expert input widths. Across 256 varied
+inputs per shape (262,144 outputs total), seven outputs crossed a BF16 rounding
+boundary and every difference was exactly one ULP. Maximum cross-schedule
+absolute/relative differences were 1.0 / 0.65%; both schedules remained
+within 0.39% of an FP64 accumulation reference. The gate requires at least one
+boundary crossing, at most one BF16 ULP between schedules, and a 1% relative
+or 0.25 absolute reference envelope.
+
 - CPU or device reference oracles for MXFP4, Q8, SiTU, router, KDA, MLA, and
   AttnRes primitives;
+- a multi-input scalar/vector MXFP4 envelope at both model expert widths;
 - real-weight layer and component hashes;
 - exact two-token comparison of sequential and range execution;
 - hashes of KDA recurrent state, KDA convolution state, MLA cache, and

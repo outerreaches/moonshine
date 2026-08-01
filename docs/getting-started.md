@@ -288,7 +288,23 @@ gate is:
 
 Neither command is part of the native runtime dependency set.
 
-## 12. Run prefill fixtures
+## 12. Qualify a reduction-schedule change
+
+Before promoting any MXFP4, Q8, attention, or reduction-order change, run the
+single self-hosted bundle:
+
+```sh
+make test-reduction-qualification \
+  MOONSHINE_MODEL="$MOONSHINE_MODEL"
+```
+
+This combines the model-free scalar/vector MXFP4 envelope with component
+oracles, real expert and MoE gates, complete routed-layer hashes, the exact
+tokenizer/XTML fixture, and the locked end-to-end hello. Cross-schedule hashes
+are not required to match; each schedule must satisfy its declared numerical
+envelope and the promoted schedule must pass its own exact full-engine gates.
+
+## 13. Run prefill fixtures
 
 Exact sequential/range comparison:
 
@@ -335,7 +351,7 @@ The 8K tests are long, high-memory runs. The selected-expert default path took
 about 16.8 minutes; the historical full-store diagnostic path took about 13.1
 minutes on the qualified machine and needs requalification with selected I/O.
 
-## 13. Verify exact state persistence
+## 14. Verify exact state persistence
 
 Choose a local temporary directory with at least 1 GiB free:
 

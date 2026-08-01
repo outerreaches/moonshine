@@ -64,6 +64,11 @@ The executable tests in this repository contain independent small CPU/device
 oracles and locked real-weight hashes so the native path can be checked without
 depending on those frameworks at runtime.
 
+The MXFP4 numerical-envelope fixture retains the maintainer's own historical
+scalar reduction from K3 development commit `9a237c2` as a test-only diagnostic
+oracle. It is compared with the group-vectorized production schedule introduced
+by the maintainer's K3 commit `f68aa08`; neither commit was upstream DS4 code.
+
 The tokenizer and text-only XTML implementation follows the official
 `tokenization_kimi.py`, `encoding_k3.py`, `tokenizer_config.json`, and
 `tiktoken.model` shipped at the pinned model revision. The official Python

@@ -458,6 +458,17 @@ expert-cache hits. It does not decode arbitrary user text.
 
 ## Run layer-major prefill
 
+For any reduction-order or kernel-schedule change, first run the complete
+self-hosted qualification bundle:
+
+```sh
+make test-reduction-qualification \
+  MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3
+```
+
+It combines a model-shape scalar/vector MXFP4 numerical envelope with real
+expert/MoE, complete routed-layer hash, tokenizer/XTML, and locked chat gates.
+
 The two-token oracle compares range execution with sequential execution,
 including KDA, convolution, MLA, and AttnRes state hashes:
 
