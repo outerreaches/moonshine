@@ -1178,16 +1178,19 @@ static bool filter_specific_tool(
 bool k3_openai_parse_chat_request(
         const char *json,
         size_t json_size,
+        uint32_t max_output_tokens,
         k3_openai_chat_request *request,
         char *error,
         size_t error_size) {
-    if (json == NULL || request == NULL) {
+    if (json == NULL || request == NULL ||
+        max_output_tokens == 0u) {
         set_error(error, error_size,
                   "OpenAI request arguments are invalid");
         return false;
     }
     memset(request, 0, sizeof(*request));
-    request->max_tokens = 256u;
+    request->max_tokens = max_output_tokens < 256u ?
+        max_output_tokens : 256u;
     request->thinking = true;
     request->reasoning_effort = strdup("max");
     if (request->reasoning_effort == NULL) {
@@ -1263,18 +1266,27 @@ bool k3_openai_parse_chat_request(
         k3_json_object_get(
             &document, document.root,
             "max_completion_tokens");
+    if (max_tokens >= 0 &&
+        token_type(&document, max_tokens, K3_JSON_NULL)) {
+        max_tokens = -1;
+    }
     if (max_tokens < 0) {
         max_tokens = k3_json_object_get(
             &document, document.root, "max_tokens");
+        if (max_tokens >= 0 &&
+            token_type(&document, max_tokens, K3_JSON_NULL)) {
+            max_tokens = -1;
+        }
     }
     if (max_tokens >= 0 &&
         (!k3_json_u32(
             &document, max_tokens,
             &request->max_tokens) ||
          request->max_tokens == 0u ||
-         request->max_tokens > 8192u)) {
+         request->max_tokens > max_output_tokens)) {
         set_error(error, error_size,
-                  "max tokens must be an integer in [1,8192]");
+                  "max tokens must be an integer in [1,%u]",
+                  max_output_tokens);
         goto cleanup;
     }
     const int32_t reasoning_effort =

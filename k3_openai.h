@@ -34,6 +34,7 @@ typedef struct {
 bool k3_openai_parse_chat_request(
     const char              *json,
     size_t                   json_size,
+    uint32_t                 max_output_tokens,
     k3_openai_chat_request  *request,
     char                    *error,
     size_t                   error_size);

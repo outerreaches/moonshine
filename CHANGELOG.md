@@ -87,6 +87,9 @@ AMD architectures, and not source-precision equivalent.
 - A portable model-free `test_k3_prefix_reuse` gate covering session
   prefix-reuse admission, including edited-same-length history and count-
   arithmetic boundaries. It runs in CPU-only CI without ROCm or model weights.
+- A configurable server output ceiling through `--max-output-tokens`, with an
+  8K default, a bounded 32K maximum, context-aware clamping, and advertised
+  context/output limits in health and model discovery.
 
 ### Changed
 
@@ -107,11 +110,15 @@ AMD architectures, and not source-precision equivalent.
   42 tokens; retain the marginal 3--6-token region on the sequential path.
 - Reject required-tool generations that exhaust their token budget without
   producing a call instead of returning an unsatisfied length-stopped turn.
+- Make the OpenAI request parser enforce the active server output ceiling
+  instead of a transport-global 8K constant.
 
 ### Fixed
 
 - Non-thinking natural-stop completions now retain their ordinary response
   text when the generated XTML suffix is parsed after streaming.
+- Treat explicit `null` `max_completion_tokens`/`max_tokens` values as
+  unspecified, including fallback from the preferred field to the legacy one.
 
 ## [0.1.0-research-preview] - 2026-07-30
 

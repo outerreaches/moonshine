@@ -26,6 +26,8 @@ enum {
         K3_CHAT_MEASURED_SEQUENTIAL_LIMIT,
     K3_SERVER_DEFAULT_EXPERTS = 32,
     K3_SERVER_DEFAULT_STAGING = 16,
+    K3_SERVER_DEFAULT_MAX_OUTPUT_TOKENS = 8192,
+    K3_SERVER_MAX_OUTPUT_TOKENS = 32768,
     K3_SERVER_MAX_HEADERS = 64 * 1024,
     K3_SERVER_DEFAULT_MAX_BODY = 8 * 1024 * 1024,
     K3_SERVER_MAX_SESSION_ID = 128,
@@ -50,6 +52,7 @@ typedef struct {
     uint32_t    sequential_limit;
     uint16_t    experts;
     uint16_t    staging;
+    uint32_t    max_output_tokens;
     size_t      max_body;
     k3_prefill_projection_backend range_backend;
     bool        clear_expert_cache_per_request;
@@ -129,6 +132,8 @@ static void usage(FILE *stream, const char *program) {
         "  --sequential-limit N  Token-major prompt limit (default 7)\n"
         "  --experts N           Resident expert slots per layer (default 32)\n"
         "  --staging N           Expert staging slots (default 16)\n"
+        "  --max-output-tokens N Per-request output ceiling\n"
+        "                        (default 8192; maximum 32768)\n"
         "  --range-backend NAME  Diagnostic range backend: default|kda-blas\n"
         "  --max-body BYTES      Maximum JSON request body (default 8388608)\n"
         "  --clear-expert-cache-per-request\n"
@@ -153,6 +158,7 @@ static bool parse_args(int argc, char **argv, server_config *config) {
         .sequential_limit = K3_SERVER_DEFAULT_SEQUENTIAL_LIMIT,
         .experts = K3_SERVER_DEFAULT_EXPERTS,
         .staging = K3_SERVER_DEFAULT_STAGING,
+        .max_output_tokens = K3_SERVER_DEFAULT_MAX_OUTPUT_TOKENS,
         .max_body = K3_SERVER_DEFAULT_MAX_BODY,
     };
     bool positional_model = false;
@@ -180,6 +186,7 @@ static bool parse_args(int argc, char **argv, server_config *config) {
             strcmp(argument, "--sequential-limit") == 0 ||
             strcmp(argument, "--experts") == 0 ||
             strcmp(argument, "--staging") == 0 ||
+            strcmp(argument, "--max-output-tokens") == 0 ||
             strcmp(argument, "--range-backend") == 0 ||
             strcmp(argument, "--max-body") == 0) {
             if (++i >= argc) {
@@ -223,6 +230,17 @@ static bool parse_args(int argc, char **argv, server_config *config) {
                     return false;
                 }
                 config->staging = (uint16_t)parsed;
+            } else if (strcmp(argument, "--max-output-tokens") == 0) {
+                if (!parse_u32(
+                        value, 1u, K3_SERVER_MAX_OUTPUT_TOKENS,
+                        &parsed)) {
+                    fprintf(
+                        stderr,
+                        "error: invalid maximum output tokens %s\n",
+                        value);
+                    return false;
+                }
+                config->max_output_tokens = parsed;
             } else if (strcmp(argument, "--range-backend") == 0) {
                 if (strcmp(value, "default") == 0) {
                     config->range_backend =
@@ -273,6 +291,12 @@ static bool loopback_host(const char *host) {
     struct in_addr address;
     return inet_pton(AF_INET, host, &address) == 1 &&
            (ntohl(address.s_addr) >> 24) == 127u;
+}
+
+static uint32_t effective_max_output_tokens(
+        const server_config *config) {
+    return config->max_output_tokens < config->context ?
+        config->max_output_tokens : config->context;
 }
 
 static int create_listener(const server_config *config,
@@ -1192,7 +1216,8 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
     k3_openai_chat_request request;
     memset(&request, 0, sizeof(request));
     if (!k3_openai_parse_chat_request(
-            http->body, http->body_size, &request,
+            http->body, http->body_size,
+            effective_max_output_tokens(config), &request,
             error, sizeof(error))) {
         (void)send_json_error(fd, 400, error);
         return;
@@ -1372,17 +1397,29 @@ static void handle_request(int fd, k3_chat_session *session,
         if (strcmp(request.method, "GET") != 0) {
             (void)send_json_error(fd, 405, "method not allowed");
         } else {
-            static const char body[] =
+            char body[512];
+            const int body_size = snprintf(
+                body, sizeof(body),
                 "{\"status\":\"ok\",\"ready\":true,"
                 "\"model\":\"" MOONSHINE_MODEL_ID "\","
                 "\"engine\":\"" MOONSHINE_NAME "\","
                 "\"version\":\"" MOONSHINE_VERSION "\","
                 "\"expert_cache\":\"persistent\","
                 "\"prefix_reuse\":\"X-Moonshine-Session\","
-                "\"slots\":1}";
-            (void)send_response(
-                fd, 200, "application/json",
-                body, sizeof(body) - 1u, NULL);
+                "\"context_length\":%u,"
+                "\"max_output_tokens\":%u,"
+                "\"slots\":1}",
+                config->context,
+                effective_max_output_tokens(config));
+            if (body_size < 0 ||
+                (size_t)body_size >= sizeof(body)) {
+                (void)send_json_error(
+                    fd, 500, "health metadata overflow");
+            } else {
+                (void)send_response(
+                    fd, 200, "application/json",
+                    body, (size_t)body_size, NULL);
+            }
         }
         http_request_free(&request);
         return;
@@ -1396,14 +1433,26 @@ static void handle_request(int fd, k3_chat_session *session,
         if (strcmp(request.method, "GET") != 0) {
             (void)send_json_error(fd, 405, "method not allowed");
         } else {
-            static const char body[] =
+            char body[512];
+            const int body_size = snprintf(
+                body, sizeof(body),
                 "{\"object\":\"list\",\"data\":[{"
                 "\"id\":\"" MOONSHINE_MODEL_ID "\","
                 "\"object\":\"model\",\"created\":0,"
-                "\"owned_by\":\"local\"}]}";
-            (void)send_response(
-                fd, 200, "application/json",
-                body, sizeof(body) - 1u, NULL);
+                "\"owned_by\":\"local\","
+                "\"context_length\":%u,"
+                "\"max_output_tokens\":%u}]}",
+                config->context,
+                effective_max_output_tokens(config));
+            if (body_size < 0 ||
+                (size_t)body_size >= sizeof(body)) {
+                (void)send_json_error(
+                    fd, 500, "model metadata overflow");
+            } else {
+                (void)send_response(
+                    fd, 200, "application/json",
+                    body, (size_t)body_size, NULL);
+            }
         }
     } else if (strcmp(
                    request.path,
@@ -1475,11 +1524,12 @@ int main(int argc, char **argv) {
     }
     fprintf(
         stderr,
-        "ready: http://%s:%u model=%s context=%u load=%.3fs "
+        "ready: http://%s:%u model=%s context=%u max_output=%u load=%.3fs "
         "static=%.3f GiB cache=%.3f GiB state=%.3f GiB "
         "slot=1 auth=%s range_backend=%s\n",
         config.host, config.port, MOONSHINE_MODEL_ID,
-        config.context, stats.startup_seconds,
+        config.context, effective_max_output_tokens(&config),
+        stats.startup_seconds,
         (double)stats.static_store.resident_bytes /
             (1024.0 * 1024.0 * 1024.0),
         (double)stats.cache_bytes / (1024.0 * 1024.0 * 1024.0),

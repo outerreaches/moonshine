@@ -225,7 +225,8 @@ Start a loopback-only 128K-capacity service:
 ./moonshine-server "$MOONSHINE_MODEL" \
   --host 127.0.0.1 \
   --port 8080 \
-  --context 131072
+  --context 131072 \
+  --max-output-tokens 32768
 ```
 
 Verify discovery:
@@ -235,9 +236,19 @@ curl http://127.0.0.1:8080/health
 curl http://127.0.0.1:8080/v1/models
 ```
 
-The OpenAI model ID is `moonshine`. Set `MOONSHINE_API_KEY` or use
-`--api-key` before binding beyond loopback. This research server has one
+The OpenAI model ID is `moonshine`. Health and discovery include the configured
+`context_length` and effective `max_output_tokens`. Set `MOONSHINE_API_KEY` or
+use `--api-key` before binding beyond loopback. This research server has one
 blocking request slot.
+
+The output ceiling defaults to 8,192 and can be raised to 32,768 with
+`--max-output-tokens`. It cannot exceed the configured context. The Chat
+Completions request may use `max_completion_tokens` or legacy `max_tokens`;
+explicit `null` is treated as unspecified. Without a value, the request
+defaults to 256 tokens or the smaller server ceiling. This is a maximum, not a
+forced response length: natural stop and remaining context can end generation
+earlier. Configuring a 32K ceiling does not claim qualification of a continuous
+32K decode.
 
 Long prefill can take minutes. Configure client request/read timeouts
 accordingly; use `curl --max-time 0` for manual checks. Streaming requests emit

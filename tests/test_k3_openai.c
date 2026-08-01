@@ -14,6 +14,10 @@
         } \
     } while (0)
 
+enum {
+    TEST_MAX_OUTPUT_TOKENS = 32768,
+};
+
 int main(void) {
     int exit_code = 1;
     char error[512];
@@ -46,6 +50,7 @@ int main(void) {
 
     CHECK(k3_openai_parse_chat_request(
               request_json, sizeof(request_json) - 1u,
+              TEST_MAX_OUTPUT_TOKENS,
               &request, error, sizeof(error)),
           error);
     CHECK(strcmp(request.model, MOONSHINE_MODEL_ID) == 0,
@@ -87,8 +92,15 @@ int main(void) {
     memset(&specific_request, 0, sizeof(specific_request));
     k3_openai_chat_request schema_request;
     memset(&schema_request, 0, sizeof(schema_request));
+    k3_openai_chat_request compatibility_request;
+    memset(&compatibility_request, 0, sizeof(compatibility_request));
+    k3_openai_chat_request default_request;
+    memset(&default_request, 0, sizeof(default_request));
+    k3_openai_chat_request over_limit_request;
+    memset(&over_limit_request, 0, sizeof(over_limit_request));
     CHECK(k3_openai_parse_chat_request(
               agent_request_json, strlen(agent_request_json),
+              TEST_MAX_OUTPUT_TOKENS,
               &agent_request, error, sizeof(error)),
           error);
     CHECK(agent_request.tool_count == 2u &&
@@ -118,6 +130,7 @@ int main(void) {
         "\"parallel_tool_calls\":false}";
     CHECK(k3_openai_parse_chat_request(
               specific_request_json, strlen(specific_request_json),
+              TEST_MAX_OUTPUT_TOKENS,
               &specific_request, error, sizeof(error)),
           error);
     CHECK(specific_request.tool_count == 1u &&
@@ -140,6 +153,7 @@ int main(void) {
         "\"additionalProperties\":false}}}}";
     CHECK(k3_openai_parse_chat_request(
               schema_request_json, strlen(schema_request_json),
+              TEST_MAX_OUTPUT_TOKENS,
               &schema_request, error, sizeof(error)),
           error);
     CHECK(schema_request.response_format == K3_RESPONSE_FORMAT_JSON_SCHEMA &&
@@ -163,6 +177,42 @@ int main(void) {
               &schema_request, &schema_result,
               error, sizeof(error)),
           error);
+
+    static const char compatibility_json[] =
+        "{\"model\":\"moonshine\",\"messages\":[{\"role\":\"user\","
+        "\"content\":\"x\"}],\"max_completion_tokens\":null,"
+        "\"max_tokens\":32768}";
+    CHECK(k3_openai_parse_chat_request(
+              compatibility_json, strlen(compatibility_json),
+              TEST_MAX_OUTPUT_TOKENS,
+              &compatibility_request, error, sizeof(error)),
+          error);
+    CHECK(compatibility_request.max_tokens == TEST_MAX_OUTPUT_TOKENS,
+          "null max_completion_tokens did not fall back to max_tokens");
+
+    static const char null_limits_json[] =
+        "{\"model\":\"moonshine\",\"messages\":[{\"role\":\"user\","
+        "\"content\":\"x\"}],\"max_completion_tokens\":null,"
+        "\"max_tokens\":null}";
+    CHECK(k3_openai_parse_chat_request(
+              null_limits_json, strlen(null_limits_json), 64u,
+              &default_request, error, sizeof(error)),
+          error);
+    CHECK(default_request.max_tokens == 64u,
+          "default output cap was not clamped to the server limit");
+
+    static const char over_limit_json[] =
+        "{\"model\":\"moonshine\",\"messages\":[{\"role\":\"user\","
+        "\"content\":\"x\"}],\"max_tokens\":32769}";
+    CHECK(!k3_openai_parse_chat_request(
+              over_limit_json, strlen(over_limit_json),
+              TEST_MAX_OUTPUT_TOKENS,
+              &over_limit_request, error, sizeof(error)),
+          "configured output ceiling was not enforced");
+    CHECK(strcmp(
+              error,
+              "max tokens must be an integer in [1,32768]") == 0,
+          "configured output ceiling error changed");
     static const char valid_integer_forms[] =
         "{\"greeting\":\"hello\",\"count\":2.0}";
     schema_result.response.data = (char *)valid_integer_forms;
@@ -412,6 +462,7 @@ int main(void) {
         memset(&bad, 0, sizeof(bad));
         CHECK(!k3_openai_parse_chat_request(
                   invalid[i], strlen(invalid[i]),
+                  TEST_MAX_OUTPUT_TOKENS,
                   &bad, error, sizeof(error)),
               "unsupported OpenAI request was accepted");
         k3_openai_chat_request_free(&bad);
@@ -429,5 +480,8 @@ cleanup:
     k3_openai_chat_request_free(&agent_request);
     k3_openai_chat_request_free(&specific_request);
     k3_openai_chat_request_free(&schema_request);
+    k3_openai_chat_request_free(&compatibility_request);
+    k3_openai_chat_request_free(&default_request);
+    k3_openai_chat_request_free(&over_limit_request);
     return exit_code;
 }

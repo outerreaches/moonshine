@@ -309,12 +309,28 @@ Start a loopback-only 128K-capacity service:
 ./moonshine-server /path/to/moonshotai__Kimi-K3 \
   --host 127.0.0.1 \
   --port 8080 \
-  --context 131072
+  --context 131072 \
+  --max-output-tokens 32768
 ```
 
 The initial surface provides `GET /health`, `GET /v1/models`, and
 `POST /v1/chat/completions`. Both ordinary JSON and incremental SSE responses
-are supported:
+are supported. Health and model discovery report `context_length` and the
+effective `max_output_tokens` ceiling.
+
+The server's default per-request output ceiling is 8,192 tokens. Set
+`--max-output-tokens` to raise it as high as 32,768; the effective ceiling is
+never larger than the configured context. Requests may use either
+`max_completion_tokens` or legacy `max_tokens`, in that order. Explicit
+`null` is treated as unspecified for client compatibility. If neither field
+supplies a value, Moonshine uses 256 or the server ceiling when it is smaller.
+Generation can stop naturally before the cap and is always clamped to the
+context remaining after the prompt and required XTML trailers. The 32K setting
+qualifies request admission and capacity accounting, not a 32K uninterrupted
+decode workload; at the measured decode rate such a workload would take many
+hours.
+
+Example requests:
 
 ```sh
 curl --max-time 0 http://127.0.0.1:8080/v1/chat/completions \
@@ -447,8 +463,10 @@ not the complete vocabulary.
 
 ## Obtain the model
 
-Weights are not included. Their license and use terms are controlled by the
-[official Kimi K3 model repository](https://huggingface.co/moonshotai/Kimi-K3),
+Weights are not included. They are governed by the
+[Kimi K3 License](https://huggingface.co/moonshotai/Kimi-K3/blob/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/LICENSE)
+published with the
+[official Kimi K3 model release](https://huggingface.co/moonshotai/Kimi-K3),
 not by this code repository.
 
 With the Hugging Face CLI installed, download the pinned revision to a local
@@ -646,8 +664,10 @@ Release history and maintainer qualification steps are in
 
 ## License
 
-The code is MIT licensed. Kimi K3 model weights are separate and are not
-redistributed here. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+The code is MIT licensed. Kimi K3 model weights are separate, are not
+redistributed here, and remain subject to the
+[Kimi K3 License](https://huggingface.co/moonshotai/Kimi-K3/blob/9f62e4e9fffbd0a83ddd60e1c209d828994b3569/LICENSE).
+See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 ## Development disclosure
 
