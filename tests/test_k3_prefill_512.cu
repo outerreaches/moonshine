@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define HIP_CHECK(call)                                                     \
     do {                                                                    \
@@ -30,6 +31,27 @@
 static const uint64_t K3_ROUTED_PHYSICAL_BYTES_CEILING =
     UINT64_C(1446793422960);
 
+typedef struct {
+    struct timespec start;
+} scale_progress;
+
+static void report_progress(uint32_t completed,
+                            uint32_t total,
+                            void *user_data) {
+    if (completed != 1u && completed != total && completed % 8u != 0u) {
+        return;
+    }
+    const scale_progress *progress = (const scale_progress *)user_data;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    const double elapsed =
+        (double)(now.tv_sec - progress->start.tv_sec) +
+        (double)(now.tv_nsec - progress->start.tv_nsec) / 1e9;
+    printf("  progress: layer %u/%u, elapsed %.1f s\n",
+           completed, total, elapsed);
+    fflush(stdout);
+}
+
 int main(int argc, char **argv) {
     const char *root = argc > 1 ? argv[1] :
         "/srv/modelstore/models/moonshotai__Kimi-K3";
@@ -38,16 +60,37 @@ int main(int argc, char **argv) {
         char *end = NULL;
         parsed_tokens = strtoul(argv[2], &end, 10);
         if (!end || *end != '\0' ||
-            parsed_tokens < 2ul || parsed_tokens > 8192ul) {
+            parsed_tokens < 2ul || parsed_tokens > 32768ul) {
             fprintf(stderr, "invalid token count: %s\n", argv[2]);
             return 2;
         }
     }
-    const bool kda_blas =
-        argc > 3 && strcmp(argv[3], "kda-blas") == 0;
-    if (argc > 4 || (argc > 3 && !kda_blas)) {
+    unsigned long parsed_context =
+        parsed_tokens > 8192ul ? parsed_tokens : 8192ul;
+    bool kda_blas = false;
+    if (argc > 3) {
+        if (strcmp(argv[3], "kda-blas") == 0) {
+            kda_blas = true;
+        } else {
+            char *end = NULL;
+            parsed_context = strtoul(argv[3], &end, 10);
+            if (!end || *end != '\0' ||
+                parsed_context < parsed_tokens ||
+                parsed_context > 131072ul) {
+                fprintf(stderr, "invalid context: %s\n", argv[3]);
+                return 2;
+            }
+        }
+    }
+    if (argc > 4 && strcmp(argv[4], "kda-blas") == 0) {
+        kda_blas = true;
+    }
+    if (argc > 5 ||
+        (argc > 4 && strcmp(argv[4], "kda-blas") != 0)) {
         fprintf(stderr,
-                "usage: %s [MODEL_ROOT [TOKENS [kda-blas]]]\n",
+                "usage: %s [MODEL_ROOT [TOKENS [CONTEXT [kda-blas]]]]\n"
+                "       %s [MODEL_ROOT [TOKENS [kda-blas]]]\n",
+                argv[0],
                 argv[0]);
         return 2;
     }
@@ -56,6 +99,7 @@ int main(int argc, char **argv) {
             K3_PREFILL_PROJECTION_KDA_DEQUANT_BLAS_EXPERIMENT :
             K3_PREFILL_PROJECTION_DEFAULT;
     const uint32_t token_count = (uint32_t)parsed_tokens;
+    const uint32_t context = (uint32_t)parsed_context;
     int device_count = 0;
     HIP_CHECK(hipGetDeviceCount(&device_count));
     if (device_count == 0) {
@@ -85,7 +129,7 @@ int main(int argc, char **argv) {
     k3_engine *engine = NULL;
     k3_engine_stats startup;
     CHECK(k3_engine_create(
-              &engine, root, 8192u, 32u, 16u, true,
+              &engine, root, context, 32u, 16u, true,
               &startup, error, sizeof(error)),
           error);
     k3_prefill_plan plan;
@@ -106,11 +150,22 @@ int main(int argc, char **argv) {
     uint32_t next = 0u;
     float value = 0.0f;
     k3_engine_prefill_stats measured;
-    CHECK(k3_engine_forward_range_with_projection_backend(
-              engine, tokens, token_count, backend,
-              &next, &value, &measured,
-              error, sizeof(error)),
-          error);
+    bool forwarded = false;
+    if (kda_blas) {
+        forwarded = k3_engine_forward_range_with_projection_backend(
+            engine, tokens, token_count, backend,
+            &next, &value, &measured,
+            error, sizeof(error));
+    } else {
+        scale_progress progress;
+        clock_gettime(CLOCK_MONOTONIC, &progress.start);
+        forwarded = k3_engine_forward_range_with_progress(
+            engine, tokens, token_count,
+            &next, &value, &measured,
+            report_progress, &progress,
+            error, sizeof(error));
+    }
+    CHECK(forwarded, error);
     CHECK(next < 163840u && isfinite(value),
           "scale-token output is invalid");
     if (token_count == 512u) {
@@ -139,8 +194,8 @@ int main(int argc, char **argv) {
                K3_ROUTED_PHYSICAL_BYTES_CEILING),
           "scale-token runtime I/O ledger");
 
-    printf("K3 prefill scale: %u tokens: PASS\n",
-           token_count);
+    printf("K3 prefill scale: %u/%u tokens/context: PASS\n",
+           token_count, context);
     printf("  next=%u value=%.8g; wall=%.3f s; %.3f tok/s\n",
            next, value, measured.wall_seconds,
            token_count / measured.wall_seconds);

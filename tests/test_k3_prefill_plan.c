@@ -33,8 +33,9 @@ static int check_chunk(
         uint32_t expected_segments) {
     char error[512];
     k3_prefill_plan plan;
+    const uint32_t context = chunk > 8192u ? chunk : 8192u;
     CHECK(k3_prefill_plan_build(
-              model, chunk, 8192u, 32u, 16u, lease,
+              model, chunk, context, 32u, 16u, lease,
               &plan, error, sizeof(error)),
           error);
     CHECK(plan.chunk_tokens == chunk,
@@ -157,7 +158,9 @@ int main(int argc, char **argv) {
               &larger_context, error, sizeof(error)),
           "context beyond the model limit was accepted");
 
-    static const uint32_t chunks[] = {2u, 8u, 512u, 8192u};
+    static const uint32_t chunks[] = {
+        2u, 8u, 512u, 8192u, 16384u, 32768u,
+    };
     for (size_t index = 0;
          index < sizeof(chunks) / sizeof(chunks[0]); index++) {
         if (check_chunk(
@@ -176,6 +179,19 @@ int main(int argc, char **argv) {
             K3_PHYSICAL_LAYER_SEGMENTS) != 0) {
         k3_st_model_close(&model);
         return 1;
+    }
+    static const uint32_t filled_chunks[] = {16384u, 32768u};
+    for (size_t index = 0u;
+         index < sizeof(filled_chunks) / sizeof(filled_chunks[0]);
+         index++) {
+        if (check_chunk(
+                &model, filled_chunks[index],
+                K3_PREFILL_CACHE_BORROW_COLD_WORKSPACE,
+                K3_PHYSICAL_READ_BYTES,
+                K3_PHYSICAL_LAYER_SEGMENTS) != 0) {
+            k3_st_model_close(&model);
+            return 1;
+        }
     }
 
     k3_prefill_plan candidate;

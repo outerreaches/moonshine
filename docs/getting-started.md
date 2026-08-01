@@ -339,6 +339,21 @@ make test-prefill-scale \
   MOONSHINE_PREFILL_TOKENS=8192
 ```
 
+Graduated filled-context tests require matching token and configured-context
+values. Qualify 16K before attempting 32K:
+
+```sh
+make test-prefill-scale \
+  MOONSHINE_MODEL="$MOONSHINE_MODEL" \
+  MOONSHINE_CONTEXT=16384 \
+  MOONSHINE_PREFILL_TOKENS=16384
+```
+
+The scale fixture currently accepts at most 32K tokens and 128K configured
+context. A finite output alone is not a qualification: record the exact next
+token/value, complete phase ledger, selected read union, memory/swap counters,
+SSD thermals, and a separate long-context quality probe.
+
 Diagnostic KDA hipBLAS filled-8K test:
 
 ```sh

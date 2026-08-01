@@ -484,6 +484,16 @@ make test-prefill-scale \
   MOONSHINE_PREFILL_TOKENS=512
 ```
 
+For the graduated filled-context program, set both values explicitly and run
+16K before 32K:
+
+```sh
+make test-prefill-scale \
+  MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3 \
+  MOONSHINE_CONTEXT=16384 \
+  MOONSHINE_PREFILL_TOKENS=16384
+```
+
 The maximum tested 8K run takes roughly 13–18 minutes depending on backend.
 The faster backend is diagnostic:
 

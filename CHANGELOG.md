@@ -59,6 +59,8 @@ Semantic Versioning once its first research-preview tag is published.
 - A single self-hosted reduction-change qualification target covering
   component envelopes, real experts/MoE, complete routed-layer hashes,
   tokenizer/XTML, and the locked chat fixture.
+- Explicit configured-context support in the exact scale fixture for graduated
+  filled 16K and 32K qualification.
 - A paired live structured continuation whose 117-token prefill fell from
   211.473 to 104.469 seconds while retaining all 237 prior causal tokens.
 - A filled-8K exact-output gate at 1,008.104 seconds / 8.126 tok/s, with 30.2%

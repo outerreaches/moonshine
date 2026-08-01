@@ -262,11 +262,14 @@ test-prefill-2: check-model tests/test_k3_prefill_chunk
 	./tests/test_k3_prefill_chunk "$(MOONSHINE_MODEL)"
 
 test-prefill-scale: check-model tests/test_k3_prefill_512
-	./tests/test_k3_prefill_512 "$(MOONSHINE_MODEL)" "$(MOONSHINE_PREFILL_TOKENS)"
+	./tests/test_k3_prefill_512 \
+		"$(MOONSHINE_MODEL)" "$(MOONSHINE_PREFILL_TOKENS)" \
+		"$(MOONSHINE_CONTEXT)"
 
 test-prefill-kda-blas: check-model tests/test_k3_prefill_512
 	./tests/test_k3_prefill_512 \
-		"$(MOONSHINE_MODEL)" "$(MOONSHINE_PREFILL_TOKENS)" kda-blas
+		"$(MOONSHINE_MODEL)" "$(MOONSHINE_PREFILL_TOKENS)" \
+		"$(MOONSHINE_CONTEXT)" kda-blas
 
 test-prefill-crossover: check-model tests/test_k3_prefill_crossover
 	./tests/test_k3_prefill_crossover \
