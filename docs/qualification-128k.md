@@ -82,14 +82,41 @@ and 18 generated tokens in 36.114 seconds (0.498 tok/s). Client wall time was
   sweep or prompt-workspace accounting.
 - The locked hello fixture verifies the same token sequence at 8K and 128K.
 
-During qualification, the synthetic full-residency fixture exposed stale
-routed-layer hashes imported from the earlier native prototype. The public
-release qualification had run the real locked hello fixture, not this
-synthetic fixture. The current public engine repeats a stable routed hash path
-and preserves the synthetic greedy token (`220`), with a BF16 score of `6.875`
-instead of the imported `6.84375`. The synthetic hashes and score were
-re-locked to the current engine; the exact real-chat token/value fixture
-remains the stronger end-to-end gate.
+### MXFP4 reduction-order oracle correction
+
+The synthetic full-residency fixture exposed hashes that were correct for the
+scalar MXFP4 GEMV at native commit `9a237c2` but obsolete for the optimized
+kernel shipped by Moonshine. The immediately following commit, `f68aa08`,
+changed work assignment from individual columns across 256 threads to native
+32-weight MXFP4 groups across 128 threads. Both paths accumulate in FP32 and
+round to BF16, but their addition order differs.
+
+A controlled 2026-08-01 replay rebuilt both commits against the same model,
+host, Linux kernel, and ROCm stack:
+
+| native commit | MXFP4 reduction | layer-1 hash | synthetic token/value |
+|---|---|---|---|
+| `9a237c2` | scalar 256-thread | `0xe594e3d89de7ccbd` | `220` / `6.84375` |
+| `f68aa08` | group-vectorized 128-thread | `0x4a33492ac1238cca` | `220` / `6.87500` |
+
+The scalar replay reproduced every imported hash; the vectorized replay
+reproduced every current hash. Layer 0 and the streamed embedding hash were
+unchanged. This isolates the difference to `f68aa08` and rules out context
+size, model corruption, ROCm/kernel drift, SSD behavior, and `io_uring`
+completion ordering.
+
+The optimization was intentional and remains accepted: the retained real
+expert improved from 0.300 to 0.083 ms in device memory and from 0.315 to
+0.105 ms through the mapped path. Its component fixture happened to round to
+the same BF16 output hash, while complete-engine activations crossed a small
+number of BF16 rounding boundaries and changed some downstream routes. The
+full locked chat token sequence remained exact.
+
+The audit gap was that the `f68aa08` qualification reran component, MoE, and
+locked real-chat gates but did not re-lock `test_k3_engine_init`. The synthetic
+hashes and score are now explicitly scoped to the group-vectorized kernel.
+Future reduction-order changes must run both the full-layer synthetic fixture
+and the real-chat token/value fixture.
 
 ## Qualification boundary
 

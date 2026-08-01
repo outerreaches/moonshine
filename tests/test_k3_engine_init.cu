@@ -211,6 +211,12 @@ int main(int argc, char **argv) {
     CHECK(nonzero, "engine layer-1 output is zero");
     const uint64_t layer1_hash =
         fnv1a64(output, hidden_bytes);
+    /*
+     * These routed hashes and the greedy score below are scoped to the
+     * accepted group-vectorized MXFP4 reduction introduced by native commit
+     * f68aa08. Its scalar parent 9a237c2 has a different, valid FP32 addition
+     * order; see docs/qualification-128k.md.
+     */
     bool routed_hashes_ok = expected_hash(
         "engine layer-1 output", layer1_hash,
         UINT64_C(0x4a33492ac1238cca));

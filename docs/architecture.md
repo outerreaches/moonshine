@@ -285,6 +285,14 @@ tested `gfx1151` stack.
 
 Performance work is gated at several levels:
 
+Exact hashes are algorithm-scoped, not claims that mathematically equivalent
+floating-point reduction schedules must be bit-identical. In particular, the
+accepted group-vectorized MXFP4 GEMV from native commit `f68aa08` uses a
+different FP32 addition order than its scalar parent. The optimized kernel has
+its own locked full-layer hashes; promotion of another schedule requires a
+same-schedule oracle, a bounded comparison to the reference path, and the
+end-to-end token/value gates below.
+
 - CPU or device reference oracles for MXFP4, Q8, SiTU, router, KDA, MLA, and
   AttnRes primitives;
 - real-weight layer and component hashes;

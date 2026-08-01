@@ -16,9 +16,11 @@ Semantic Versioning once its first research-preview tag is published.
 
 - Extend the documented qualified configured-context capacity from 32K to
   128K. Filled-128K latency and long-context quality remain unqualified.
-- Re-lock the synthetic routed-layer hashes and first-token BF16 score against
-  the current public engine; the public release qualification had covered the
-  locked real-chat fixture but not this imported prototype oracle.
+- Re-lock the synthetic routed-layer hashes and first-token BF16 score for the
+  accepted group-vectorized MXFP4 reduction introduced by native commit
+  `f68aa08`. Its scalar-parent hashes survived because the optimization
+  qualification covered component and real-chat gates but not the synthetic
+  full-layer fixture.
 
 ## [0.1.0-research-preview] - 2026-07-30
 
