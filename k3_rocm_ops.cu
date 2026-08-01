@@ -960,6 +960,94 @@ __global__ static void k3_mla_decompress_v_kernel(
     }
 }
 
+__global__ static void k3_mla_absorb_q_batch_kernel(
+        hip_bfloat16       *absorbed_q,
+        const hip_bfloat16 *q,
+        const hip_bfloat16 *packed_k,
+        uint32_t            head_count) {
+    const uint32_t head = blockIdx.x;
+    const uint32_t latent = blockIdx.y;
+    const uint32_t query = blockIdx.z;
+    const uint32_t tid = threadIdx.x;
+    const uint64_t weight_base =
+        ((uint64_t)head * K3_MLA_LATENT_DIM + latent) *
+        K3_MLA_NOPE_DIM;
+    const uint64_t q_base =
+        ((uint64_t)query * head_count + head) * K3_MLA_Q_DIM;
+    const uint64_t output_base =
+        ((uint64_t)query * head_count + head) * K3_MLA_CACHE_DIM;
+    __shared__ float reduction[K3_MLA_NOPE_DIM];
+    reduction[tid] =
+        k3_bf16_to_float(packed_k[weight_base + tid]) *
+        k3_bf16_to_float(q[q_base + tid]);
+    __syncthreads();
+    for (uint32_t width = K3_MLA_NOPE_DIM / 2u;
+         width > 0;
+         width /= 2u) {
+        if (tid < width) reduction[tid] += reduction[tid + width];
+        __syncthreads();
+    }
+    if (tid == 0) {
+        absorbed_q[output_base + latent] =
+            k3_float_to_bf16(reduction[0]);
+    }
+}
+
+__global__ static void k3_mla_copy_pass_q_batch_kernel(
+        hip_bfloat16       *absorbed_q,
+        const hip_bfloat16 *q,
+        uint32_t            head_count,
+        uint64_t            count) {
+    uint64_t index = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+    const uint32_t d = index % K3_MLA_PASS_DIM;
+    const uint64_t outer = index / K3_MLA_PASS_DIM;
+    const uint32_t head = outer % head_count;
+    const uint64_t query = outer / head_count;
+    absorbed_q[(query * head_count + head) * K3_MLA_CACHE_DIM +
+               K3_MLA_LATENT_DIM + d] =
+        q[(query * head_count + head) * K3_MLA_Q_DIM +
+          K3_MLA_NOPE_DIM + d];
+}
+
+__global__ static void k3_mla_decompress_v_batch_kernel(
+        hip_bfloat16       *output,
+        const hip_bfloat16 *latent,
+        const hip_bfloat16 *kv_b,
+        uint32_t            head_count) {
+    const uint32_t head = blockIdx.x;
+    const uint32_t value = blockIdx.y;
+    const uint32_t query = blockIdx.z;
+    const uint32_t tid = threadIdx.x;
+    const uint64_t weight_base =
+        ((uint64_t)head * K3_MLA_KV_B_HEAD_STRIDE +
+         K3_MLA_NOPE_DIM + value) * K3_MLA_LATENT_DIM;
+    const uint64_t latent_base =
+        ((uint64_t)query * head_count + head) * K3_MLA_LATENT_DIM;
+    const uint64_t output_base =
+        ((uint64_t)query * head_count + head) * K3_MLA_V_DIM;
+    const uint32_t *weight_pairs =
+        (const uint32_t *)(kv_b + weight_base);
+    const uint32_t *latent_pairs =
+        (const uint32_t *)(latent + latent_base);
+    __shared__ float reduction[K3_ROCM_THREADS];
+    const uint32_t weight_value = weight_pairs[tid];
+    const uint32_t latent_value = latent_pairs[tid];
+    reduction[tid] =
+        k3_packed_bf16x2_dot(weight_value, latent_value);
+    __syncthreads();
+    for (uint32_t width = K3_ROCM_THREADS / 2u;
+         width > 0;
+         width /= 2u) {
+        if (tid < width) reduction[tid] += reduction[tid + width];
+        __syncthreads();
+    }
+    if (tid == 0) {
+        output[output_base + value] =
+            k3_float_to_bf16(reduction[0]);
+    }
+}
+
 __global__ static void k3_mla_softmax_kernel(
         hip_bfloat16 *probabilities,
         const float  *scores,
@@ -2058,6 +2146,62 @@ extern "C" bool k3_rocm_mla_decompress_v_bf16(
                        (hip_bfloat16 *)output,
                        (const hip_bfloat16 *)latent,
                        (const hip_bfloat16 *)kv_b);
+    return hipGetLastError() == hipSuccess;
+}
+
+extern "C" bool k3_rocm_mla_absorb_q_batch_bf16(
+        void       *absorbed_q,
+        const void *q,
+        const void *packed_k,
+        uint32_t    head_count,
+        uint32_t    query_count,
+        void       *stream_pointer) {
+    if (!absorbed_q || !q || !packed_k || head_count == 0 ||
+        query_count == 0 || query_count > UINT16_MAX) {
+        return false;
+    }
+    hipStream_t stream = (hipStream_t)stream_pointer;
+    hipLaunchKernelGGL(k3_mla_absorb_q_batch_kernel,
+                       dim3(head_count, K3_MLA_LATENT_DIM, query_count),
+                       dim3(K3_MLA_NOPE_DIM), 0, stream,
+                       (hip_bfloat16 *)absorbed_q,
+                       (const hip_bfloat16 *)q,
+                       (const hip_bfloat16 *)packed_k,
+                       head_count);
+    if (hipGetLastError() != hipSuccess) return false;
+    const uint64_t count =
+        (uint64_t)query_count * head_count * K3_MLA_PASS_DIM;
+    const uint64_t blocks =
+        (count + K3_ROCM_THREADS - 1u) / K3_ROCM_THREADS;
+    if (blocks > UINT32_MAX) return false;
+    hipLaunchKernelGGL(k3_mla_copy_pass_q_batch_kernel,
+                       dim3((uint32_t)blocks),
+                       dim3(K3_ROCM_THREADS), 0, stream,
+                       (hip_bfloat16 *)absorbed_q,
+                       (const hip_bfloat16 *)q,
+                       head_count, count);
+    return hipGetLastError() == hipSuccess;
+}
+
+extern "C" bool k3_rocm_mla_decompress_v_batch_bf16(
+        void       *output,
+        const void *latent,
+        const void *kv_b,
+        uint32_t    head_count,
+        uint32_t    query_count,
+        void       *stream_pointer) {
+    if (!output || !latent || !kv_b || head_count == 0 ||
+        query_count == 0 || query_count > UINT16_MAX) {
+        return false;
+    }
+    hipStream_t stream = (hipStream_t)stream_pointer;
+    hipLaunchKernelGGL(k3_mla_decompress_v_batch_kernel,
+                       dim3(head_count, K3_MLA_V_DIM, query_count),
+                       dim3(K3_ROCM_THREADS), 0, stream,
+                       (hip_bfloat16 *)output,
+                       (const hip_bfloat16 *)latent,
+                       (const hip_bfloat16 *)kv_b,
+                       head_count);
     return hipGetLastError() == hipSuccess;
 }
 

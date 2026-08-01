@@ -238,11 +238,29 @@ bool k3_rocm_mla_absorb_q_bf16(
         uint32_t    head_count,
         void       *stream);
 
+/* Query-major batched form with the same per-output reduction tree. */
+bool k3_rocm_mla_absorb_q_batch_bf16(
+        void       *absorbed_q,
+        const void *q,
+        const void *packed_k,
+        uint32_t    head_count,
+        uint32_t    query_count,
+        void       *stream);
+
 bool k3_rocm_mla_decompress_v_bf16(
         void       *output,
         const void *latent,
         const void *kv_b,
         uint32_t    head_count,
+        void       *stream);
+
+/* Query-major batched form with the same per-output reduction tree. */
+bool k3_rocm_mla_decompress_v_batch_bf16(
+        void       *output,
+        const void *latent,
+        const void *kv_b,
+        uint32_t    head_count,
+        uint32_t    query_count,
         void       *stream);
 
 /*

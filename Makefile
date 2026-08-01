@@ -60,6 +60,7 @@ ROCM_TESTS := \
 	tests/test_k3_kda_layer_smoke \
 	tests/test_k3_kda_recurrent \
 	tests/test_k3_mla_batch_determinism \
+	tests/test_k3_mla_batch_kernels \
 	tests/test_k3_mla_decode \
 	tests/test_k3_mla_layer_smoke \
 	tests/test_k3_moe_tail_profile \
@@ -87,7 +88,8 @@ ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS)
 	test-engine-hello test-chat-hello test-state-checkpoint test-tokenizer \
 	test-prefill-2 test-prefill-scale test-prefill-kda-blas \
 	test-prefill-crossover test-long-context-retrieval \
-	test-mla-batch-determinism test-moe-tail-profile \
+	test-mla-batch-determinism test-mla-batch-kernels \
+	test-moe-tail-profile \
 	test-reduction-qualification \
 	test-openai-sdk clean
 
@@ -128,6 +130,7 @@ help:
 	@echo "                               Run a deterministic natural-text gate"
 	@echo "  make test-mla-batch-determinism"
 	@echo "                               Compare looped and strided-batched MLA GEMMs"
+	@echo "  make test-mla-batch-kernels  Check exact batched MLA launch primitives"
 	@echo "  make test-moe-tail-profile  Profile model-shape MoE-tail kernels"
 	@echo "  make test-reduction-qualification MOONSHINE_MODEL=/path/to/Kimi-K3"
 	@echo "                               Run the MXFP4 reduction-change gate bundle"
@@ -290,11 +293,14 @@ test-long-context-retrieval: check-model tests/test_k3_long_context
 	MOONSHINE_RETRIEVAL_TARGET="$(MOONSHINE_RETRIEVAL_TARGET)" \
 		./tests/test_k3_long_context "$(MOONSHINE_MODEL)"
 
-test-moe-tail-profile: tests/test_k3_moe_tail_profile
-	./tests/test_k3_moe_tail_profile
-
 test-mla-batch-determinism: tests/test_k3_mla_batch_determinism
 	./tests/test_k3_mla_batch_determinism
+
+test-mla-batch-kernels: tests/test_k3_mla_batch_kernels
+	./tests/test_k3_mla_batch_kernels
+
+test-moe-tail-profile: tests/test_k3_moe_tail_profile
+	./tests/test_k3_moe_tail_profile
 
 test-reduction-qualification: check-model \
 	tests/test_k3_rocm_components \
