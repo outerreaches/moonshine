@@ -324,6 +324,13 @@ attention phase scales 2.206x; this is the first measured filled-context
 pressure. The complete evidence and 32K decision boundary are in
 [filled-context qualification](qualification-filled-context.md).
 
+The separate 15,993-token natural-text retrieval gate routes much more
+densely: 721–895 experts per layer (868.0 mean) and 1,401,616,232,728 selected
+bytes, or 96.9% of the full-store ceiling. It still sustains 7.924 token/s and
+retrieves three exact values from early, middle, and late prompt positions.
+This density makes further selected-I/O savings a secondary long-context lever
+relative to attention and expert execution.
+
 The matched crossover fixture warms the decode cache, then executes the same
 fixed token prefix sequentially and as one selected range on a single
 resident engine. Every point must match the greedy token, float bits, token

@@ -495,6 +495,18 @@ rises 2.206x and is now the first measured superlinear pressure. See the
 [filled-context qualification](docs/qualification-filled-context.md) for the
 complete phase ledger, host evidence, and the 32K decision boundary.
 
+Run the separate deterministic natural-text retrieval gate:
+
+```sh
+make test-long-context-retrieval \
+  MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3
+```
+
+It fills 15,993 rendered tokens with 389 operational records, places three
+retrieval keys near 12.5%, 50%, and 87.5%, and requires the exact decoded
+answer `saffron|7319|Nivens`. Set `MOONSHINE_RETRIEVAL_TARGET=512` for a
+short staged harness check; only the default 16K arm is the qualification.
+
 For the graduated filled-context program, set both values explicitly and run
 16K before 32K:
 

@@ -358,6 +358,18 @@ The accepted 16K default gate ends with token `6244`, value `26.875`, and
 7.929 tok/s. See [filled-context qualification](qualification-filled-context.md)
 before attempting the substantially longer 32K arm.
 
+Run semantic retrieval separately from the repeated-token performance gate:
+
+```sh
+make test-long-context-retrieval \
+  MOONSHINE_MODEL="$MOONSHINE_MODEL"
+```
+
+The qualified default renders 15,993 tokens, retrieves three fixed values
+from early, middle, and late prompt positions, and requires the exact response
+`saffron|7319|Nivens`. A 512-token staged arm is available through
+`MOONSHINE_RETRIEVAL_TARGET=512`, but it does not replace the 16K gate.
+
 Diagnostic KDA hipBLAS filled-8K test:
 
 ```sh

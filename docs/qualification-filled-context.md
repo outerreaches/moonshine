@@ -18,7 +18,7 @@ workspace, and the production selected-I/O path. Qualification requires:
 - host memory, swap, SSD temperature, and SMART evidence.
 
 This fixture measures execution and numerical stability. Repetition is not a
-semantic long-context test, so natural-text retrieval remains a separate gate.
+semantic long-context test, so natural-text retrieval is a separate gate.
 
 ## Accepted 16K result
 
@@ -83,14 +83,56 @@ in and 27.44 MiB out. Sampled SSD temperatures peaked at 56 C composite and
 errors, or error-log entries. The run read approximately 1.171 TB of SSD data
 according to the device data-unit counter.
 
+## Accepted natural-text retrieval
+
+The semantic gate builds 389 deterministic operational records and renders a
+15,993-token non-thinking chat prompt. Three explicitly labeled retrieval keys
+sit at records 49, 195, and 341, approximately 12.5%, 50%, and 87.5% through
+the record stream. Routine record numbers and shipment codes act as
+distractors. The exact required answer is `saffron|7319|Nivens`.
+
+The accepted execution returned that exact decoded response with a natural
+end-of-message stop, 17 generated tokens, no forced trailer, no reasoning, and
+no tool calls:
+
+| Measurement | Result |
+| --- | ---: |
+| Prompt prefill | 2,018.210 s / 7.924 tok/s |
+| Decode | 39.784 s / 0.427 tok/s |
+| Selected read requests | 79,858 |
+| Selected read bytes | 1,401,616,232,728 |
+| Unique experts, min / mean / max | 721 / 868.0 / 895 |
+| Attention | 1,063.846 s |
+| Expert streaming | 870.347 s |
+| Expert pipeline | 815.293 s |
+| Read wait | 44.433 s |
+
+Natural text produces a much denser route union than the repeated 16K
+fixture: selected traffic reaches 96.9% of the full-store ceiling. Even so,
+throughput remains within 0.1% of the repeated-token result, and the complete
+phase ledger reconciles 2,017.949 of 2,017.951 range seconds.
+
+This gate also exposed and fixed a result-boundary regression. Streaming had
+emitted the correct ordinary response, but the post-generation non-thinking
+XTML parser skipped those leading text tokens and replaced the returned result
+with an empty buffer. Commit `04df2a3` scopes the initial ordinary-token scan
+to thinking mode and adds a direct parser oracle. Inference was correct; the
+returned non-streaming/native result was not.
+
+During the definitive run, swap allocation grew by 11,399,168 bytes;
+cumulative counters moved by 10.05 MiB in and 20.58 MiB out. Sampled SSD
+temperature peaked at 57 C composite / 67 C sensor 2. SMART retained zero
+warning/critical-temperature time, media errors, and error-log entries. The
+device data-unit delta was approximately 1.751 TB read.
+
 ## 32K decision boundary
 
 The payload-free 32K plan passes: it borrows 34.069 GiB of range workspace,
 allocates 864 MiB for MLA append state, stays within the 48.111 GiB expert
 cache, and requests no new device allocation. Based on the 16K attention
-curve, an execution is expected to take roughly 75--85 minutes.
+curve, an execution is expected to take roughly 75–85 minutes.
 
-Before spending that run, add and pass a deterministic natural-text retrieval
-probe at 16K. Then either investigate the attention scaling or deliberately
+The deterministic natural-text retrieval prerequisite now passes. The next
+decision is whether to investigate the attention scaling first or deliberately
 collect the 32K execution as a baseline. The 32K point is planned, not yet
 qualified.

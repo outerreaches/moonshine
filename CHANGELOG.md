@@ -63,6 +63,8 @@ Semantic Versioning once its first research-preview tag is published.
   filled 16K and 32K qualification.
 - An exact filled-16K selected-prefill gate at 2,066.332 seconds / 7.929
   token/s, including full phase, selected-I/O, memory, swap, and SSD evidence.
+- A deterministic 15,993-token natural-text retrieval gate with three fixed
+  needles spanning the prompt and an exact decoded-response oracle.
 - A paired live structured continuation whose 117-token prefill fell from
   211.473 to 104.469 seconds while retaining all 237 prior causal tokens.
 - A filled-8K exact-output gate at 1,008.104 seconds / 8.126 tok/s, with 30.2%

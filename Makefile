@@ -19,6 +19,7 @@ MOONSHINE_MODEL ?=
 MOONSHINE_CONTEXT ?= 8192
 MOONSHINE_PREFILL_TOKENS ?= 512
 MOONSHINE_CROSSOVER_TOKENS ?= 2 3 4 6 8 12 16 24 32 42
+MOONSHINE_RETRIEVAL_TARGET ?= 16000
 MOONSHINE_STATE_DIR ?= /tmp
 
 K3_OBJS := \
@@ -74,7 +75,8 @@ ROCM_TESTS := \
 	tests/test_k3_static_store
 
 CHAT_TESTS := \
-	tests/test_k3_chat_session
+	tests/test_k3_chat_session \
+	tests/test_k3_long_context
 
 ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS)
 
@@ -82,7 +84,7 @@ ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS)
 	test-model-layout test-model-components test-engine-init \
 	test-engine-hello test-chat-hello test-state-checkpoint test-tokenizer \
 	test-prefill-2 test-prefill-scale test-prefill-kda-blas \
-	test-prefill-crossover \
+	test-prefill-crossover test-long-context-retrieval \
 	test-reduction-qualification \
 	test-openai-sdk clean
 
@@ -119,6 +121,8 @@ help:
 	@echo "                               Run the diagnostic KDA hipBLAS candidate"
 	@echo "  make test-prefill-crossover MOONSHINE_MODEL=/path/to/Kimi-K3 MOONSHINE_CROSSOVER_TOKENS='2 4 8 16'"
 	@echo "                               Compare exact warm sequential/range suffixes"
+	@echo "  make test-long-context-retrieval MOONSHINE_MODEL=/path/to/Kimi-K3 MOONSHINE_RETRIEVAL_TARGET=16000"
+	@echo "                               Run the deterministic natural-text 16K gate"
 	@echo "  make test-reduction-qualification MOONSHINE_MODEL=/path/to/Kimi-K3"
 	@echo "                               Run the MXFP4 reduction-change gate bundle"
 	@echo "  make clean                  Remove local build products"
@@ -152,6 +156,7 @@ k3_rocm_ops.o: k3_rocm_ops.cu k3_rocm_ops.h
 k3_safetensors.o: k3_safetensors.c k3_safetensors.h
 k3_tokenizer.o: k3_tokenizer.c k3_tokenizer.h
 tests/test_k3_chat_session.o: tests/test_k3_chat_session.c k3_chat.h
+tests/test_k3_long_context.o: tests/test_k3_long_context.c k3_chat.h
 tests/test_k3_openai.o: tests/test_k3_openai.c k3_openai.h k3_chat.h
 tests/test_k3_tokenizer.o: tests/test_k3_tokenizer.c k3_tokenizer.h
 
@@ -170,7 +175,7 @@ $(MODEL_CPU_TESTS): %: %.o libmoonshine.a
 tests/test_k3_tokenizer: tests/test_k3_tokenizer.o libmoonshine.a
 	$(CC) $(CFLAGS) -o $@ $< libmoonshine.a $(LDLIBS) $(ICU_LDLIBS)
 
-tests/test_k3_chat_session: tests/test_k3_chat_session.o libmoonshine.a
+$(CHAT_TESTS): %: %.o libmoonshine.a
 	$(HIPCC) $(HIPFLAGS) -o $@ $< libmoonshine.a \
 		$(ROCM_LDLIBS) $(ICU_LDLIBS)
 
@@ -274,6 +279,10 @@ test-prefill-kda-blas: check-model tests/test_k3_prefill_512
 test-prefill-crossover: check-model tests/test_k3_prefill_crossover
 	./tests/test_k3_prefill_crossover \
 		"$(MOONSHINE_MODEL)" $(MOONSHINE_CROSSOVER_TOKENS)
+
+test-long-context-retrieval: check-model tests/test_k3_long_context
+	MOONSHINE_RETRIEVAL_TARGET="$(MOONSHINE_RETRIEVAL_TARGET)" \
+		./tests/test_k3_long_context "$(MOONSHINE_MODEL)"
 
 test-reduction-qualification: check-model \
 	tests/test_k3_rocm_components \
