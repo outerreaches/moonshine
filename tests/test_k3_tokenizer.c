@@ -72,6 +72,9 @@ int main(int argc, char **argv) {
     k3_token_buffer retained_tool_turn = { 0 };
     k3_token_buffer augmented_tool_history = { 0 };
     k3_token_buffer canonical_tool_history = { 0 };
+    k3_token_buffer single_tool_prompt = { 0 };
+    k3_token_buffer retained_single_tool_turn = { 0 };
+    k3_token_buffer augmented_single_tool_history = { 0 };
     k3_token_buffer thinking_prompt = { 0 };
     k3_token_buffer thinking_tail = { 0 };
     k3_token_buffer retained_thinking_turn = { 0 };
@@ -524,6 +527,66 @@ int main(int argc, char **argv) {
                    sizeof(*retained_tool_turn.data)) != 0),
           "canonical history unexpectedly retained a hidden directive");
 
+    k3_chat_options single_tool_options = required_tool_options;
+    single_tool_options.enforce_single_tool_call = true;
+    CHECK(k3_tokenizer_encode_chat(
+              tokenizer, required_tool_request,
+              sizeof(required_tool_request) /
+                  sizeof(required_tool_request[0]),
+              &single_tool_options, &single_tool_prompt,
+              error, sizeof(error)) &&
+          k3_tokenizer_decode(
+              tokenizer, single_tool_prompt.data,
+              single_tool_prompt.count, true,
+              &text, error, sizeof(error)) &&
+          strstr(
+              text.data,
+              "<|open|>message role=\"system\" "
+              "type=\"parallel-tool-calls\"<|sep|>"
+              "The system is invoked with "
+              "`parallel_tool_calls=false`.\n"
+              "You MUST make at most one tool call in the next message. "
+              "If more than one tool could help, choose only the single "
+              "best tool.<|close|>message<|sep|><|end_of_msg|>") != NULL,
+          "single-tool-call directive rendering changed");
+    retained_single_tool_turn.count =
+        single_tool_prompt.count + generated_tool_tail.count;
+    retained_single_tool_turn.capacity =
+        retained_single_tool_turn.count;
+    retained_single_tool_turn.data = (uint32_t *)malloc(
+        retained_single_tool_turn.count *
+            sizeof(*retained_single_tool_turn.data));
+    CHECK(retained_single_tool_turn.data != NULL,
+          "allocating retained single-tool oracle failed");
+    memcpy(
+        retained_single_tool_turn.data,
+        single_tool_prompt.data,
+        single_tool_prompt.count * sizeof(*single_tool_prompt.data));
+    memcpy(
+        retained_single_tool_turn.data + single_tool_prompt.count,
+        generated_tool_tail.data,
+        generated_tool_tail.count * sizeof(*generated_tool_tail.data));
+    static const k3_single_tool_call_marker single_marker[] = {
+        { .after_message_count = 1u },
+    };
+    k3_chat_options augmented_single_options = augmented_tool_options;
+    augmented_single_options.historical_single_tool_calls = single_marker;
+    augmented_single_options.historical_single_tool_call_count =
+        sizeof(single_marker) / sizeof(single_marker[0]);
+    CHECK(k3_tokenizer_encode_chat(
+              tokenizer, tool_history,
+              sizeof(tool_history) / sizeof(tool_history[0]),
+              &augmented_single_options, &augmented_single_tool_history,
+              error, sizeof(error)) &&
+          augmented_single_tool_history.count >
+              retained_single_tool_turn.count &&
+          memcmp(
+              augmented_single_tool_history.data,
+              retained_single_tool_turn.data,
+              retained_single_tool_turn.count *
+                  sizeof(*retained_single_tool_turn.data)) == 0,
+          "single-tool directive did not reconstruct the causal prefix");
+
     static const k3_tool_choice_marker invalid_choice_marker[] = {
         {
             .after_message_count = 1u,
@@ -572,6 +635,20 @@ int main(int argc, char **argv) {
               &invalid_marker_options, &tokens,
               error, sizeof(error)),
           "unordered historical tool-choice markers were accepted");
+    static const k3_single_tool_call_marker invalid_single_marker[] = {
+        { .after_message_count = 4u },
+    };
+    invalid_marker_options = augmented_tool_options;
+    invalid_marker_options.historical_single_tool_calls =
+        invalid_single_marker;
+    invalid_marker_options.historical_single_tool_call_count =
+        sizeof(invalid_single_marker) / sizeof(invalid_single_marker[0]);
+    CHECK(!k3_tokenizer_encode_chat(
+              tokenizer, tool_history,
+              sizeof(tool_history) / sizeof(tool_history[0]),
+              &invalid_marker_options, &tokens,
+              error, sizeof(error)),
+          "an out-of-range single-tool marker was accepted");
 
     static const char generated_tool_output[] =
         "<|close|>response<|sep|><|open|>tools<|sep|>"
@@ -719,6 +796,9 @@ cleanup:
     k3_token_buffer_free(&retained_tool_turn);
     k3_token_buffer_free(&augmented_tool_history);
     k3_token_buffer_free(&canonical_tool_history);
+    k3_token_buffer_free(&single_tool_prompt);
+    k3_token_buffer_free(&retained_single_tool_turn);
+    k3_token_buffer_free(&augmented_single_tool_history);
     k3_token_buffer_free(&thinking_prompt);
     k3_token_buffer_free(&thinking_tail);
     k3_token_buffer_free(&retained_thinking_turn);

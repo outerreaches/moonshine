@@ -87,13 +87,16 @@ The initial server is a deliberately bounded HTTP/1.1 implementation:
   reasoning/content fields in JSON and SSE;
 - native `json_object` and bounded `json_schema` response directives with
   validated, deferred SSE content;
-- fixed greedy execution, with unsupported schema vocabulary and
-  `parallel_tool_calls: false` rejected before inference.
+- fixed greedy execution, with unsupported schema vocabulary rejected before
+  inference and non-parallel tool calls hard-checked after parsing.
 
 Tool-call SSE is structurally streamed at message completion: ordinary
 response bytes remain token-live, while each parsed call is emitted as one
 complete indexed `delta.tool_calls` item before the terminal chunk. This keeps
 the OpenAI wire contract without exposing half-parsed XTML attributes.
+For `parallel_tool_calls: false`, a Moonshine-specific hidden directive steers
+K3 toward one call and the parsed set is rejected if its count exceeds one.
+Policy validation precedes emission of those complete call chunks.
 
 Thinking SSE is token-live. The session tracks the native `<think>` close and
 `<response>` open sequence exactly, sends pre-transition text only as

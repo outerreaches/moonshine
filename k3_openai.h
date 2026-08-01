@@ -40,6 +40,12 @@ bool k3_openai_parse_chat_request(
 
 void k3_openai_chat_request_free(k3_openai_chat_request *request);
 
+bool k3_openai_validate_tool_policy(
+    const k3_openai_chat_request *request,
+    const k3_chat_turn_result    *result,
+    char                         *error,
+    size_t                        error_size);
+
 bool k3_openai_validate_response_format(
     const k3_openai_chat_request *request,
     const k3_chat_turn_result    *result,

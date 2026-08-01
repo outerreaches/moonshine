@@ -259,6 +259,10 @@ use](agentic-api.md). Keep the complete returned assistant message, including
 `reasoning_content` and all `tool_calls`, and return one matching `role:
 "tool"` message per call. K3 thinking is always enabled on the API;
 `reasoning_effort` accepts `low`, `high`, or `max` and defaults to `max`.
+Set `parallel_tool_calls: false` to force serial call turns; Moonshine prompts
+for at most one call and rejects a multi-call result before emitting tool-call
+SSE. Allow the default 256 completion tokens for prompts that require K3 to
+plan an order across several operations.
 Use `response_format: {"type":"json_object"}` for a validated top-level JSON
 object, or `type: "json_schema"` for Moonshine's bounded typed
 object/array/scalar subset. The schema vocabulary and wrapper are documented

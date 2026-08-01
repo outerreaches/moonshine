@@ -1148,26 +1148,6 @@ static void log_result(const char *id,
         (unsigned long long)result->cache_after.accesses);
 }
 
-static bool validate_tool_choice_result(
-        const k3_openai_chat_request *request,
-        const k3_chat_turn_result *result,
-        char *error,
-        size_t error_size) {
-    if (request->tool_choice == K3_TOOL_CHOICE_NONE &&
-        result->tool_call_count != 0u) {
-        set_error(error, error_size,
-                  "model violated tool_choice=none");
-        return false;
-    }
-    if (request->tool_choice == K3_TOOL_CHOICE_REQUIRED &&
-        result->finish_reason == K3_CHAT_FINISH_END_OF_MESSAGE) {
-        set_error(error, error_size,
-                  "model ended without satisfying tool_choice=required");
-        return false;
-    }
-    return true;
-}
-
 static void handle_chat_completion(int fd, k3_chat_session *session,
                                    const http_request *http,
                                    const server_config *config,
@@ -1229,9 +1209,12 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
             .reasoning_data = &stream,
             .tools_json = request.tools_json,
             .tool_choice = request.tool_choice,
+            .enforce_single_tool_call =
+                !request.parallel_tool_calls &&
+                request.tool_count != 0u,
             .response_format = request.response_format,
             .response_schema_json = request.response_schema_json,
-            .preserve_tool_choice_history =
+            .preserve_request_directive_history =
                 http->session_id != NULL,
         };
         ok = k3_chat_session_complete_messages_with_options(
@@ -1241,7 +1224,7 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
             &stream,
             &result, error, sizeof(error));
         if (ok) {
-            ok = validate_tool_choice_result(
+            ok = k3_openai_validate_tool_policy(
                 &request, &result, error, sizeof(error));
         }
         if (ok) {
@@ -1270,9 +1253,12 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
             .thinking_effort = request.reasoning_effort,
             .tools_json = request.tools_json,
             .tool_choice = request.tool_choice,
+            .enforce_single_tool_call =
+                !request.parallel_tool_calls &&
+                request.tool_count != 0u,
             .response_format = request.response_format,
             .response_schema_json = request.response_schema_json,
-            .preserve_tool_choice_history =
+            .preserve_request_directive_history =
                 http->session_id != NULL,
         };
         ok = k3_chat_session_complete_messages_with_options(
@@ -1281,7 +1267,7 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
             NULL, NULL,
             &result, error, sizeof(error));
         if (ok) {
-            ok = validate_tool_choice_result(
+            ok = k3_openai_validate_tool_policy(
                 &request, &result, error, sizeof(error));
         }
         if (ok) {

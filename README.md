@@ -360,9 +360,12 @@ Set `MOONSHINE_API_KEY` or pass `--api-key` to require bearer authentication.
 The server refuses a non-loopback bind without a key. It accepts text-only
 system/developer, user, assistant, and tool history, plus Kimi dynamic tool
 declarations on system messages. The engine is deterministic and greedy.
-`parallel_tool_calls: false`, sampling, parallel request slots, and HTTP
-request chunking are not implemented yet. JSON Schema support is intentionally
-limited to the declared subset above, not the complete vocabulary.
+`parallel_tool_calls: false` adds a Moonshine hidden one-call directive and a
+hard post-parse check; multiple calls can never be returned for that request,
+although the constraint is not grammar-enforced during generation. Sampling,
+parallel request slots, and HTTP request chunking are not implemented yet.
+JSON Schema support is intentionally limited to the declared subset above,
+not the complete vocabulary.
 
 ## Obtain the model
 
@@ -470,9 +473,9 @@ allocation capacity-qualified through 128K, and one-slot OpenAI-compatible
 HTTP/SSE service with a qualified two-turn function-tool loop are now locked.
 Agentic hidden-directive prefix recovery and the real SSE tool wire are also
 qualified locally, along with preserved thinking history and live reasoning
-deltas. Bounded JSON Schema responses are also locally qualified. Filled-128K
-workload behavior is still an open qualification item; enforceable
-non-parallel tool calls remain the next agentic gate.
+deltas. Bounded JSON Schema responses and serial non-parallel tool loops are
+also locally qualified. Filled-128K workload behavior remains open; the next
+agentic gate is SDK-level consumption of reasoning and indexed tool-call SSE.
 
 See [Architecture](docs/architecture.md) for the correctness model and
 [Provenance](docs/provenance.md) for code lineage, references, and

@@ -31,11 +31,14 @@ and the [Kimi K3 quickstart](https://platform.kimi.ai/docs/guide/kimi-k3-quickst
 - complete assistant reasoning history rendered back into native `<think>`
   channels for multi-turn and tool continuation.
 
-`parallel_tool_calls` defaults to true. Explicit false is rejected until the
-engine can enforce a one-call generation constraint rather than silently
-accepting a request it may violate. `response_format` supports `json_object`
-and the bounded `json_schema` subset documented below. Image input, sampling,
-and concurrent request slots remain outside this checkpoint.
+`parallel_tool_calls` defaults to true. Explicit false is supported through a
+Moonshine hidden at-most-one-call directive plus a hard post-parse policy
+check. The prompt steers K3 to serialize work across turns; if it nevertheless
+emits more than one call, Moonshine returns an inference error before any
+tool-call SSE item. This is an enforceable API boundary, not a generation
+grammar. `response_format` supports `json_object` and the bounded
+`json_schema` subset documented below. Image input, sampling, and concurrent
+request slots remain outside this checkpoint.
 
 ## Minimal two-request loop
 
@@ -284,5 +287,43 @@ The accepted 8K low-effort SSE qualification required `greeting` as a string,
 
 K3 produced `{"greeting":"hello","count":1}`. Reasoning streamed live;
 the response body appeared only once, after the recursive validator accepted
-it. The next gates are enforceable `parallel_tool_calls: false` and an
-SDK-level SSE fixture.
+it.
+
+## Non-parallel tool calls
+
+For `parallel_tool_calls: false`, Moonshine places a hidden
+`parallel-tool-calls` system message after K3's native tool-choice directive.
+The request policy then rejects a parsed result containing more than one call.
+Tool calls are emitted only after complete XTML parsing and policy validation,
+so a violating call set cannot leak through an earlier indexed SSE chunk.
+
+The hidden directive is absent from returned OpenAI history. Session-prefix
+reuse therefore stores its message boundary alongside the historical
+tool-choice directive, reconstructs both in their original order, and still
+requires an exact token-prefix match. A mismatch takes the ordinary isolated
+full-prefill fallback.
+
+The accepted 8K low-effort SSE loop deliberately requested two independent
+operations while exposing `get_weather` and `get_time`:
+
+| phase | prompt total | evaluated | reused | prefill | generated | decode | finish |
+|---|---:|---:|---:|---:|---:|---:|---|
+| first serial call | 326 | 326 | 0 | 225.175 s | 170 | 439.579 s | `tool_calls` |
+| second serial call | 630 | 134 | 496 | 211.549 s | 60 | 165.431 s | `tool_calls` |
+| final answer | 826 | 136 | 690 | 211.591 s | 40 | 92.510 s | `stop` |
+
+K3 first emitted only `get_weather({"city":"Toronto"})`, then only
+`get_time({"city":"Paris"})`, and finally answered with sunny/22 °C and
+14:00 after `tool_choice: "none"`. Its first reasoning explicitly planned
+sequential calls across assistant turns. All 496 and then 690 prior causal
+tokens were reused, proving exact reconstruction of the added directive.
+
+An adversarial first attempt capped at 128 completion tokens exhausted its
+budget during this serial-planning reasoning. The strengthened required-tool
+check returned an inference error instead of accepting a length-stopped turn
+without a call. The normal 256-token default completed the call. This is also
+a latency finding: conflicting multi-operation prompts can spend substantial
+reasoning tokens deciding call order even at low effort.
+
+The next agentic gate is an SDK-level fixture for live reasoning and indexed
+tool-call SSE.

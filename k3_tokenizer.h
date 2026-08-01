@@ -81,6 +81,11 @@ typedef struct {
 } k3_tool_choice_marker;
 
 typedef struct {
+    /* Restore Moonshine's one-call directive at this message boundary. */
+    size_t after_message_count;
+} k3_single_tool_call_marker;
+
+typedef struct {
     bool        add_generation_prompt;
     bool        thinking;
     /*
@@ -91,11 +96,15 @@ typedef struct {
     /* Compact, recursively key-sorted JSON array matching OpenAI tools. */
     const char *tools_json;
     k3_tool_choice tool_choice;
+    /* Add a hidden Moonshine directive limiting the next turn to one call. */
+    bool enforce_single_tool_call;
     k3_response_format response_format;
     /* Compact recursively key-sorted schema for JSON_SCHEMA. */
     const char *response_schema_json;
     const k3_tool_choice_marker *historical_tool_choices;
     size_t historical_tool_choice_count;
+    const k3_single_tool_call_marker *historical_single_tool_calls;
+    size_t historical_single_tool_call_count;
 } k3_chat_options;
 
 typedef struct {

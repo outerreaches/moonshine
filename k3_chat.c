@@ -30,6 +30,9 @@ struct k3_chat_session {
     k3_tool_choice_marker *historical_tool_choices;
     size_t historical_tool_choice_count;
     size_t historical_tool_choice_capacity;
+    k3_single_tool_call_marker *historical_single_tool_calls;
+    size_t historical_single_tool_call_count;
+    size_t historical_single_tool_call_capacity;
     bool          started;
     bool          healthy;
 };
@@ -113,8 +116,9 @@ static bool append_retained_tokens(k3_chat_session *session,
     return true;
 }
 
-static void clear_tool_choice_history(k3_chat_session *session) {
+static void clear_request_directive_history(k3_chat_session *session) {
     session->historical_tool_choice_count = 0u;
+    session->historical_single_tool_call_count = 0u;
 }
 
 /*
@@ -131,14 +135,14 @@ static void remember_tool_choice(
     }
     if (choice != K3_TOOL_CHOICE_REQUIRED &&
         choice != K3_TOOL_CHOICE_NONE) {
-        clear_tool_choice_history(session);
+        clear_request_directive_history(session);
         return;
     }
     if (session->historical_tool_choice_count != 0u &&
         session->historical_tool_choices[
             session->historical_tool_choice_count - 1u]
                 .after_message_count >= after_message_count) {
-        clear_tool_choice_history(session);
+        clear_request_directive_history(session);
         return;
     }
     if (session->historical_tool_choice_count ==
@@ -146,14 +150,14 @@ static void remember_tool_choice(
         const size_t old_capacity =
             session->historical_tool_choice_capacity;
         if (old_capacity > SIZE_MAX / 2u) {
-            clear_tool_choice_history(session);
+            clear_request_directive_history(session);
             return;
         }
         const size_t capacity =
             old_capacity == 0u ? 4u : old_capacity * 2u;
         if (capacity > SIZE_MAX /
                 sizeof(*session->historical_tool_choices)) {
-            clear_tool_choice_history(session);
+            clear_request_directive_history(session);
             return;
         }
         k3_tool_choice_marker *markers =
@@ -161,7 +165,7 @@ static void remember_tool_choice(
                 session->historical_tool_choices,
                 capacity * sizeof(*markers));
         if (markers == NULL) {
-            clear_tool_choice_history(session);
+            clear_request_directive_history(session);
             return;
         }
         session->historical_tool_choices = markers;
@@ -172,6 +176,53 @@ static void remember_tool_choice(
         (k3_tool_choice_marker) {
             .after_message_count = after_message_count,
             .choice = choice,
+        };
+}
+
+static void remember_single_tool_call(
+        k3_chat_session *session,
+        size_t after_message_count,
+        bool enforce) {
+    if (!enforce) {
+        return;
+    }
+    if (session->historical_single_tool_call_count != 0u &&
+        session->historical_single_tool_calls[
+            session->historical_single_tool_call_count - 1u]
+                .after_message_count >= after_message_count) {
+        clear_request_directive_history(session);
+        return;
+    }
+    if (session->historical_single_tool_call_count ==
+        session->historical_single_tool_call_capacity) {
+        const size_t old_capacity =
+            session->historical_single_tool_call_capacity;
+        if (old_capacity > SIZE_MAX / 2u) {
+            clear_request_directive_history(session);
+            return;
+        }
+        const size_t capacity =
+            old_capacity == 0u ? 4u : old_capacity * 2u;
+        if (capacity > SIZE_MAX /
+                sizeof(*session->historical_single_tool_calls)) {
+            clear_request_directive_history(session);
+            return;
+        }
+        k3_single_tool_call_marker *markers =
+            (k3_single_tool_call_marker *)realloc(
+                session->historical_single_tool_calls,
+                capacity * sizeof(*markers));
+        if (markers == NULL) {
+            clear_request_directive_history(session);
+            return;
+        }
+        session->historical_single_tool_calls = markers;
+        session->historical_single_tool_call_capacity = capacity;
+    }
+    session->historical_single_tool_calls[
+        session->historical_single_tool_call_count++] =
+        (k3_single_tool_call_marker) {
+            .after_message_count = after_message_count,
         };
 }
 
@@ -368,6 +419,7 @@ void k3_chat_session_destroy(k3_chat_session *session) {
     k3_tokenizer_destroy(session->tokenizer);
     k3_token_buffer_free(&session->retained_tokens);
     free(session->historical_tool_choices);
+    free(session->historical_single_tool_calls);
     free(session->system_prompt);
     free(session);
 }
@@ -829,7 +881,7 @@ bool k3_chat_session_turn(
     }
     memset(result, 0, sizeof(*result));
     /* The incremental text API cannot later reconstruct OpenAI metadata. */
-    clear_tool_choice_history(session);
+    clear_request_directive_history(session);
     k3_token_buffer prompt = { 0 };
     bool ok = encode_turn_prompt(
         session, user_text, &prompt, error, error_size);
@@ -864,7 +916,7 @@ bool k3_chat_session_reset(
     }
     session->position = 0u;
     session->retained_tokens.count = 0u;
-    clear_tool_choice_history(session);
+    clear_request_directive_history(session);
     session->started = false;
     session->healthy = true;
     return true;
@@ -914,12 +966,16 @@ bool k3_chat_session_complete_messages_with_options(
         .tools_json = options == NULL ? NULL : options->tools_json,
         .tool_choice = options == NULL ? K3_TOOL_CHOICE_AUTO :
             options->tool_choice,
+        .enforce_single_tool_call = options != NULL &&
+            options->enforce_single_tool_call,
         .response_format = options == NULL ?
             K3_RESPONSE_FORMAT_TEXT : options->response_format,
         .response_schema_json = options == NULL ? NULL :
             options->response_schema_json,
         .historical_tool_choices = NULL,
         .historical_tool_choice_count = 0u,
+        .historical_single_tool_calls = NULL,
+        .historical_single_tool_call_count = 0u,
     };
     k3_token_buffer canonical_prompt = { 0 };
     k3_token_buffer augmented_prompt = { 0 };
@@ -946,13 +1002,26 @@ bool k3_chat_session_complete_messages_with_options(
             break;
         }
     }
+    for (size_t i = 0u;
+         marker_boundaries_valid &&
+         i < session->historical_single_tool_call_count; i++) {
+        if (session->historical_single_tool_calls[i]
+                .after_message_count > message_count) {
+            marker_boundaries_valid = false;
+        }
+    }
     if (reuse_eligible && marker_boundaries_valid &&
-        session->historical_tool_choice_count != 0u) {
+        (session->historical_tool_choice_count != 0u ||
+         session->historical_single_tool_call_count != 0u)) {
         k3_chat_options augmented_options = render_options;
         augmented_options.historical_tool_choices =
             session->historical_tool_choices;
         augmented_options.historical_tool_choice_count =
             session->historical_tool_choice_count;
+        augmented_options.historical_single_tool_calls =
+            session->historical_single_tool_calls;
+        augmented_options.historical_single_tool_call_count =
+            session->historical_single_tool_call_count;
         char ignored_error[256] = { 0 };
         if (k3_tokenizer_encode_chat(
                 session->tokenizer, messages, message_count,
@@ -1014,9 +1083,12 @@ bool k3_chat_session_complete_messages_with_options(
             error, error_size);
     }
     if (ok && options != NULL &&
-        options->preserve_tool_choice_history) {
+        options->preserve_request_directive_history) {
         remember_tool_choice(
             session, message_count, options->tool_choice);
+        remember_single_tool_call(
+            session, message_count,
+            options->enforce_single_tool_call);
     }
     k3_token_buffer_free(&augmented_prompt);
     k3_token_buffer_free(&canonical_prompt);
@@ -1057,7 +1129,7 @@ bool k3_chat_session_import_state(
     }
     session->position = imported.token_position;
     session->retained_tokens.count = 0u;
-    clear_tool_choice_history(session);
+    clear_request_directive_history(session);
     session->started = session->position != 0u;
     session->healthy = true;
     if (info != NULL) {

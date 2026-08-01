@@ -34,6 +34,11 @@ Semantic Versioning once its first research-preview tag is published.
 - An 8K live schema qualification that returned the validated object
   `{"greeting":"hello","count":1}` while withholding response content until
   the complete value passed.
+- Enforced `parallel_tool_calls=false` through a hidden single-call directive,
+  post-parse call-count validation, and exact historical-directive recovery.
+- A three-turn serial tool qualification that called weather and time one at
+  a time, reused 496 then 690 causal tokens, and produced a final combined
+  answer.
 
 ### Changed
 
@@ -46,6 +51,8 @@ Semantic Versioning once its first research-preview tag is published.
   full-layer fixture.
 - Preserve the exact mismatch/full-prefill gate while allowing session-local
   tool-result turns to continue the actual hidden-directive causal history.
+- Reject required-tool generations that exhaust their token budget without
+  producing a call instead of returning an unsatisfied length-stopped turn.
 
 ## [0.1.0-research-preview] - 2026-07-30
 

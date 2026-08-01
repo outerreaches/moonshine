@@ -1398,11 +1398,6 @@ bool k3_openai_parse_chat_request(
                   "parallel_tool_calls must be boolean");
         goto cleanup;
     }
-    if (!request->parallel_tool_calls) {
-        set_error(error, error_size,
-                  "parallel_tool_calls=false is not implemented yet");
-        goto cleanup;
-    }
     const int32_t response_format =
         k3_json_object_get(
             &document, document.root, "response_format");
@@ -1490,6 +1485,37 @@ cleanup:
         k3_openai_chat_request_free(request);
     }
     return ok;
+}
+
+bool k3_openai_validate_tool_policy(
+        const k3_openai_chat_request *request,
+        const k3_chat_turn_result *result,
+        char *error,
+        size_t error_size) {
+    if (request == NULL || result == NULL) {
+        set_error(error, error_size,
+                  "tool-policy validation arguments are invalid");
+        return false;
+    }
+    if (request->tool_choice == K3_TOOL_CHOICE_NONE &&
+        result->tool_call_count != 0u) {
+        set_error(error, error_size,
+                  "model violated tool_choice=none");
+        return false;
+    }
+    if (request->tool_choice == K3_TOOL_CHOICE_REQUIRED &&
+        result->tool_call_count == 0u) {
+        set_error(error, error_size,
+                  "model ended without satisfying tool_choice=required");
+        return false;
+    }
+    if (!request->parallel_tool_calls &&
+        result->tool_call_count > 1u) {
+        set_error(error, error_size,
+                  "model emitted multiple calls with parallel_tool_calls=false");
+        return false;
+    }
+    return true;
 }
 
 bool k3_openai_validate_response_format(

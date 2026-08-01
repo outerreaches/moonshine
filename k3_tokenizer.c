@@ -1458,6 +1458,23 @@ static bool append_tool_choice_directive(
     }
 }
 
+static bool append_single_tool_call_directive(
+        k3_tokenizer *tokenizer,
+        bool enforce,
+        k3_token_buffer *output,
+        char *error,
+        size_t error_size) {
+    if (!enforce) {
+        return true;
+    }
+    return append_internal_system_message(
+        tokenizer, "parallel-tool-calls",
+        "The system is invoked with `parallel_tool_calls=false`.\n"
+        "You MUST make at most one tool call in the next message. "
+        "If more than one tool could help, choose only the single best tool.",
+        output, error, error_size);
+}
+
 static bool append_response_format_directive(
         k3_tokenizer *tokenizer,
         k3_response_format format,
@@ -1555,6 +1572,40 @@ static bool validate_tool_choice_markers(
     return true;
 }
 
+static bool validate_single_tool_call_markers(
+        const k3_chat_options *options,
+        size_t message_count,
+        char *error,
+        size_t error_size) {
+    if (options->historical_single_tool_call_count != 0u &&
+        options->historical_single_tool_calls == NULL) {
+        set_error(error, error_size,
+                  "historical single-tool directives need marker storage");
+        return false;
+    }
+    size_t previous = 0u;
+    for (size_t i = 0u;
+         i < options->historical_single_tool_call_count; i++) {
+        const size_t boundary =
+            options->historical_single_tool_calls[i]
+                .after_message_count;
+        if (boundary > message_count) {
+            set_error(error, error_size,
+                      "historical single-tool directive %zu follows "
+                      "message %zu, but the history has only %zu messages",
+                      i, boundary, message_count);
+            return false;
+        }
+        if (i != 0u && boundary <= previous) {
+            set_error(error, error_size,
+                      "historical single-tool directives are not ordered");
+            return false;
+        }
+        previous = boundary;
+    }
+    return true;
+}
+
 bool k3_tokenizer_encode_chat(
         k3_tokenizer *tokenizer,
         const k3_chat_message *messages,
@@ -1575,10 +1626,13 @@ bool k3_tokenizer_encode_chat(
         .thinking_effort = NULL,
         .tools_json = NULL,
         .tool_choice = K3_TOOL_CHOICE_AUTO,
+        .enforce_single_tool_call = false,
         .response_format = K3_RESPONSE_FORMAT_TEXT,
         .response_schema_json = NULL,
         .historical_tool_choices = NULL,
         .historical_tool_choice_count = 0u,
+        .historical_single_tool_calls = NULL,
+        .historical_single_tool_call_count = 0u,
     };
     const k3_chat_options *selected =
         options == NULL ? &defaults : options;
@@ -1596,10 +1650,13 @@ bool k3_tokenizer_encode_chat(
         return false;
     }
     if (!validate_tool_choice_markers(
+            selected, message_count, error, error_size) ||
+        !validate_single_tool_call_markers(
             selected, message_count, error, error_size)) {
         return false;
     }
     size_t marker_index = 0u;
+    size_t single_marker_index = 0u;
     size_t tool_result_index = 0u;
     for (size_t i = 0u; i < message_count; i++) {
         while (marker_index <
@@ -1614,6 +1671,16 @@ bool k3_tokenizer_encode_chat(
                 return false;
             }
             marker_index++;
+        }
+        while (single_marker_index <
+                   selected->historical_single_tool_call_count &&
+               selected->historical_single_tool_calls[single_marker_index]
+                       .after_message_count == i) {
+            if (!append_single_tool_call_directive(
+                    tokenizer, true, output, error, error_size)) {
+                return false;
+            }
+            single_marker_index++;
         }
         if (messages[i].role == K3_CHAT_ROLE_SYSTEM &&
             messages[i].tools_json != NULL) {
@@ -1651,13 +1718,34 @@ bool k3_tokenizer_encode_chat(
         }
         marker_index++;
     }
+    while (single_marker_index <
+               selected->historical_single_tool_call_count &&
+           selected->historical_single_tool_calls[single_marker_index]
+                   .after_message_count == message_count) {
+        if (!append_single_tool_call_directive(
+                tokenizer, true, output, error, error_size)) {
+            return false;
+        }
+        single_marker_index++;
+    }
     if (marker_index != selected->historical_tool_choice_count) {
         set_error(error, error_size,
                   "historical tool choices were not fully rendered");
         return false;
     }
+    if (single_marker_index !=
+            selected->historical_single_tool_call_count) {
+        set_error(error, error_size,
+                  "historical single-tool directives were not fully rendered");
+        return false;
+    }
     if (!append_tool_choice_directive(
             tokenizer, selected->tool_choice,
+            output, error, error_size)) {
+        return false;
+    }
+    if (!append_single_tool_call_directive(
+            tokenizer, selected->enforce_single_tool_call,
             output, error, error_size)) {
         return false;
     }

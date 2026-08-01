@@ -103,10 +103,11 @@ typedef struct {
     void                             *reasoning_data;
     const char                       *tools_json;
     k3_tool_choice                    tool_choice;
+    bool                              enforce_single_tool_call;
     k3_response_format                response_format;
     const char                       *response_schema_json;
     /* Retain hidden request directives for exact session-history replay. */
-    bool                              preserve_tool_choice_history;
+    bool                              preserve_request_directive_history;
 } k3_chat_completion_options;
 
 /*

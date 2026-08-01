@@ -114,13 +114,15 @@ int main(void) {
         "{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
         "\"parameters\":{\"type\":\"object\"}}}],"
         "\"tool_choice\":{\"type\":\"function\",\"function\":{"
-        "\"name\":\"get_weather\"}}}";
+        "\"name\":\"get_weather\"}},"
+        "\"parallel_tool_calls\":false}";
     CHECK(k3_openai_parse_chat_request(
               specific_request_json, strlen(specific_request_json),
               &specific_request, error, sizeof(error)),
           error);
     CHECK(specific_request.tool_count == 1u &&
           specific_request.tool_choice == K3_TOOL_CHOICE_REQUIRED &&
+          !specific_request.parallel_tool_calls &&
           strstr(specific_request.tools_json, "get_weather") != NULL &&
           strstr(specific_request.tools_json, "get_time") == NULL,
           "specific tool_choice filtering");
@@ -325,8 +327,28 @@ int main(void) {
                   &response_document, function, "arguments"),
               "{\"city\":\"Toronto\"}"),
           "tool response function payload");
-    result.tool_calls = NULL;
+    CHECK(k3_openai_validate_tool_policy(
+              &specific_request, &result,
+              error, sizeof(error)),
+          error);
+    result.tool_call_count = 2u;
+    CHECK(!k3_openai_validate_tool_policy(
+              &specific_request, &result,
+              error, sizeof(error)),
+          "multiple calls passed a non-parallel tool policy");
+    result.tool_call_count = 1u;
+    specific_request.tool_choice = K3_TOOL_CHOICE_NONE;
+    CHECK(!k3_openai_validate_tool_policy(
+              &specific_request, &result,
+              error, sizeof(error)),
+          "a tool call passed tool_choice=none");
+    specific_request.tool_choice = K3_TOOL_CHOICE_REQUIRED;
     result.tool_call_count = 0u;
+    CHECK(!k3_openai_validate_tool_policy(
+              &specific_request, &result,
+              error, sizeof(error)),
+          "an empty result passed tool_choice=required");
+    result.tool_calls = NULL;
 
     static const char *invalid[] = {
         "{\"model\":\"moonshine\",\"messages\":[]}",
@@ -342,7 +364,7 @@ int main(void) {
         "\"tool_choice\":\"required\"}",
         "{\"model\":\"moonshine\",\"messages\":["
         "{\"role\":\"user\",\"content\":\"x\"}],"
-        "\"parallel_tool_calls\":false}",
+        "\"parallel_tool_calls\":\"false\"}",
         "{\"model\":\"moonshine\",\"messages\":["
         "{\"role\":\"user\",\"content\":\"x\"}],"
         "\"reasoning_effort\":\"medium\"}",
