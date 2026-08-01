@@ -1176,6 +1176,8 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
             .progress_data = &stream,
             .tools_json = request.tools_json,
             .tool_choice = request.tool_choice,
+            .preserve_tool_choice_history =
+                http->session_id != NULL,
         };
         ok = k3_chat_session_complete_messages_with_options(
             session, request.messages, request.message_count,
@@ -1206,6 +1208,8 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
                 config->clear_expert_cache_per_request,
             .tools_json = request.tools_json,
             .tool_choice = request.tool_choice,
+            .preserve_tool_choice_history =
+                http->session_id != NULL,
         };
         ok = k3_chat_session_complete_messages_with_options(
             session, request.messages, request.message_count,

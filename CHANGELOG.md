@@ -17,6 +17,10 @@ Semantic Versioning once its first research-preview tag is published.
   call output, `auto`/`required`/`none`, forced named-function selection, and
   complete tool-result history validation.
 - A real two-turn `get_weather` agent-loop qualification at 8K context.
+- Exact agentic causal-prefix recovery by restoring historical hidden
+  tool-choice directives at their original message boundaries.
+- A real SSE function-loop qualification that reused all 196 retained tokens
+  and evaluated only the 42-token tool-result suffix.
 
 ### Changed
 
@@ -27,8 +31,8 @@ Semantic Versioning once its first research-preview tag is published.
   `f68aa08`. Its scalar-parent hashes survived because the optimization
   qualification covered component and real-chat gates but not the synthetic
   full-layer fixture.
-- Prioritize agentic prefix recovery: transient tool-choice XTML currently
-  causes a safe full-prefill fallback on the following tool-result turn.
+- Preserve the exact mismatch/full-prefill gate while allowing session-local
+  tool-result turns to continue the actual hidden-directive causal history.
 
 ## [0.1.0-research-preview] - 2026-07-30
 

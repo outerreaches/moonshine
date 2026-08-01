@@ -69,6 +69,12 @@ typedef enum {
 } k3_tool_choice;
 
 typedef struct {
+    /* Insert the historical directive before messages[after_message_count]. */
+    size_t         after_message_count;
+    k3_tool_choice choice;
+} k3_tool_choice_marker;
+
+typedef struct {
     bool        add_generation_prompt;
     bool        thinking;
     /*
@@ -79,6 +85,8 @@ typedef struct {
     /* Compact, recursively key-sorted JSON array matching OpenAI tools. */
     const char *tools_json;
     k3_tool_choice tool_choice;
+    const k3_tool_choice_marker *historical_tool_choices;
+    size_t historical_tool_choice_count;
 } k3_chat_options;
 
 typedef struct {

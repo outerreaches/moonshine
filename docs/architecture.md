@@ -61,8 +61,10 @@ layer. `moonshine-server` uses the same layer for Chat Completions. Stateless
 requests zero-reset causal storage while retaining immutable expert-cache
 mappings. Requests carrying the same `X-Moonshine-Session` identifier may
 reuse retained in-process state only when the newly rendered full history is
-an exact token-prefix extension. Any mismatch resets causal state and
-prefills the full history.
+an exact token-prefix extension. Historical hidden tool-choice directives are
+restored at their original message boundaries before this comparison so an
+ordinary OpenAI tool-result history can continue the actual causal stream.
+Any mismatch resets causal state and prefills the canonical full history.
 
 ## OpenAI-compatible transport
 
@@ -89,13 +91,14 @@ response bytes remain token-live, while each parsed call is emitted as one
 complete indexed `delta.tool_calls` item before the terminal chunk. This keeps
 the OpenAI wire contract without exposing half-parsed XTML attributes.
 
-An exact-prefix limitation matters for agent latency. K3 renders `required`
-and `none` as hidden system messages immediately before the generation prompt.
-Those request-local messages are absent from the assistant history returned to
-the client, so a following canonical tool-result request is not an exact token
-extension of retained state. The current server detects the mismatch and
-performs a safe full replay. Agentic prefix recovery needs a checkpoint or
-rewind boundary before the transient directive, followed by suffix replay.
+K3 renders `required` and `none` as hidden system messages immediately before
+the generation prompt. Those messages are absent from the assistant history
+returned to the client. For the retained session only, Moonshine records the
+directive value and message boundary, then restores it before the historical
+assistant turn when rendering the next candidate prompt. Reuse proceeds only
+when this reconstructed prompt exactly extends every retained token. The
+canonical full replay remains the fallback; serialized checkpoints,
+approximate prefix matching, and state rewinds are not part of this path.
 
 There is no scheduler or hidden concurrency. A disconnected streaming client
 does not interrupt model execution mid-turn; the engine completes its semantic

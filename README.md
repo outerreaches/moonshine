@@ -93,6 +93,8 @@ They are engineering fixtures, not cross-project benchmark claims.
 | Agentic first turn, 45-token tool call | 120.258 s / 0.374 tok/s |
 | Agentic result turn, 217-token prompt | 224.927 s / 0.965 tok/s |
 | Agentic result turn, 25-token answer | 56.759 s / 0.440 tok/s |
+| Agentic reused result turn, 42 of 238 tokens evaluated | 104.913 s / 0.400 tok/s |
+| Agentic reused result turn, 25-token answer | 55.863 s / 0.448 tok/s |
 
 The default range path matches the locked sequential state oracle exactly.
 The faster KDA dequantize-plus-hipBLAS path preserves the tested greedy token
@@ -225,7 +227,9 @@ retains one completed session—the most recently successful identifier—and
 reuses its in-process causal state only when the next rendered history is an
 exact token-prefix extension. Edited, forked, shorter, mismatched, missing, or
 different-session histories fall back to an isolated semantic reset and full
-prefill. Clients must still send the complete OpenAI message history.
+prefill. For agent loops, Moonshine restores prior hidden `required`/`none`
+directives at their original message boundaries before applying the same exact
+token-prefix gate. Clients must still send the complete OpenAI message history.
 
 Start a loopback-only 128K-capacity service:
 
@@ -324,11 +328,11 @@ short-prompt rate. Preserving only the expert cache improved repeated short
 stateless prompts by about 0.8%; exact causal-prefix reuse is the material
 agentic latency optimization.
 
-Request-local tool-choice directives are hidden XTML messages. A turn rendered
-with `tool_choice: "required"` therefore does not currently form an exact
-prefix of the canonical tool-result history sent by the client; Moonshine
-safely falls back to full prefill. Agentic prefix recovery is the next latency
-priority.
+In the qualified SSE function loop, Moonshine reconstructed the prior hidden
+`tool_choice: "required"` directive, reused all 196 retained prompt/generated
+tokens, and evaluated only the 42-token result-turn suffix. Prefill fell from
+the earlier full-replay 224.927 seconds to 104.913 seconds. Any reconstructed
+prefix mismatch still takes the isolated full-prefill fallback.
 
 Set `MOONSHINE_API_KEY` or pass `--api-key` to require bearer authentication.
 The server refuses a non-loopback bind without a key. It accepts text-only
@@ -442,9 +446,10 @@ Versioned causal-state export/import, the official native tokenizer, the
 native XTML chat/tool renderer, deterministic stateful CLI, dynamic context
 allocation capacity-qualified through 128K, and one-slot OpenAI-compatible
 HTTP/SSE service with a qualified two-turn function-tool loop are now locked.
-Filled-128K workload behavior is still an open qualification item. Reasoning
-output, structured responses, and agentic prefix recovery remain required for
-the broader agentic surface.
+Agentic hidden-directive prefix recovery and the real SSE tool wire are also
+qualified locally. Filled-128K workload behavior is still an open
+qualification item. Reasoning output, structured responses, and enforceable
+non-parallel tool calls remain required for the broader agentic surface.
 
 See [Architecture](docs/architecture.md) for the correctness model and
 [Provenance](docs/provenance.md) for code lineage, references, and

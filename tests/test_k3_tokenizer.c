@@ -67,6 +67,11 @@ int main(int argc, char **argv) {
     k3_token_buffer tokens = { 0 };
     k3_token_buffer completed_history = { 0 };
     k3_token_buffer extended_history = { 0 };
+    k3_token_buffer required_prompt = { 0 };
+    k3_token_buffer generated_tool_tail = { 0 };
+    k3_token_buffer retained_tool_turn = { 0 };
+    k3_token_buffer augmented_tool_history = { 0 };
+    k3_token_buffer canonical_tool_history = { 0 };
     k3_text_buffer text = { 0 };
     k3_assistant_output assistant_output;
     memset(&assistant_output, 0, sizeof(assistant_output));
@@ -360,6 +365,142 @@ int main(int argc, char **argv) {
           strcmp(text.data, expected_tool_history) == 0,
           "official K3 tool history XTML rendering changed");
 
+    static const k3_chat_message required_tool_request[] = {
+        {
+            .role = K3_CHAT_ROLE_USER,
+            .content = "Weather in Toronto?",
+        },
+    };
+    const k3_chat_options required_tool_options = {
+        .add_generation_prompt = true,
+        .thinking = false,
+        .thinking_effort = NULL,
+        .tools_json = tools_json,
+        .tool_choice = K3_TOOL_CHOICE_REQUIRED,
+    };
+    static const char generated_weather_call[] =
+        "<|close|>response<|sep|><|open|>tools<|sep|>"
+        "<|open|>call tool=\"get_weather\" index=\"1\"<|sep|>"
+        "<|open|>argument key=\"city\" type=\"string\"<|sep|>Toronto"
+        "<|close|>argument<|sep|><|close|>call<|sep|>"
+        "<|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>";
+    CHECK(k3_tokenizer_encode_chat(
+              tokenizer, required_tool_request,
+              sizeof(required_tool_request) /
+                  sizeof(required_tool_request[0]),
+              &required_tool_options, &required_prompt,
+              error, sizeof(error)) &&
+          k3_tokenizer_encode(
+              tokenizer, generated_weather_call, true,
+              &generated_tool_tail, error, sizeof(error)),
+          error);
+    retained_tool_turn.count =
+        required_prompt.count + generated_tool_tail.count;
+    retained_tool_turn.capacity = retained_tool_turn.count;
+    retained_tool_turn.data = (uint32_t *)malloc(
+        retained_tool_turn.count *
+            sizeof(*retained_tool_turn.data));
+    CHECK(retained_tool_turn.data != NULL,
+          "allocating retained tool-turn oracle failed");
+    memcpy(
+        retained_tool_turn.data, required_prompt.data,
+        required_prompt.count * sizeof(*required_prompt.data));
+    memcpy(
+        retained_tool_turn.data + required_prompt.count,
+        generated_tool_tail.data,
+        generated_tool_tail.count *
+            sizeof(*generated_tool_tail.data));
+
+    static const k3_tool_choice_marker required_marker[] = {
+        {
+            .after_message_count = 1u,
+            .choice = K3_TOOL_CHOICE_REQUIRED,
+        },
+    };
+    const k3_chat_options augmented_tool_options = {
+        .add_generation_prompt = true,
+        .thinking = false,
+        .thinking_effort = NULL,
+        .tools_json = tools_json,
+        .tool_choice = K3_TOOL_CHOICE_AUTO,
+        .historical_tool_choices = required_marker,
+        .historical_tool_choice_count =
+            sizeof(required_marker) / sizeof(required_marker[0]),
+    };
+    CHECK(k3_tokenizer_encode_chat(
+              tokenizer, tool_history,
+              sizeof(tool_history) / sizeof(tool_history[0]),
+              &augmented_tool_options, &augmented_tool_history,
+              error, sizeof(error)) &&
+          augmented_tool_history.count > retained_tool_turn.count &&
+          memcmp(
+              augmented_tool_history.data,
+              retained_tool_turn.data,
+              retained_tool_turn.count *
+                  sizeof(*retained_tool_turn.data)) == 0,
+          "historical tool choice did not reconstruct the causal prefix");
+    CHECK(k3_tokenizer_encode_chat(
+              tokenizer, tool_history,
+              sizeof(tool_history) / sizeof(tool_history[0]),
+              &tool_options, &canonical_tool_history,
+              error, sizeof(error)) &&
+          (canonical_tool_history.count < retained_tool_turn.count ||
+           memcmp(
+               canonical_tool_history.data,
+               retained_tool_turn.data,
+               retained_tool_turn.count *
+                   sizeof(*retained_tool_turn.data)) != 0),
+          "canonical history unexpectedly retained a hidden directive");
+
+    static const k3_tool_choice_marker invalid_choice_marker[] = {
+        {
+            .after_message_count = 1u,
+            .choice = K3_TOOL_CHOICE_AUTO,
+        },
+    };
+    k3_chat_options invalid_marker_options = augmented_tool_options;
+    invalid_marker_options.historical_tool_choices =
+        invalid_choice_marker;
+    CHECK(!k3_tokenizer_encode_chat(
+              tokenizer, tool_history,
+              sizeof(tool_history) / sizeof(tool_history[0]),
+              &invalid_marker_options, &tokens,
+              error, sizeof(error)),
+          "an auto historical tool-choice marker was accepted");
+    static const k3_tool_choice_marker invalid_boundary_marker[] = {
+        {
+            .after_message_count = 4u,
+            .choice = K3_TOOL_CHOICE_REQUIRED,
+        },
+    };
+    invalid_marker_options.historical_tool_choices =
+        invalid_boundary_marker;
+    CHECK(!k3_tokenizer_encode_chat(
+              tokenizer, tool_history,
+              sizeof(tool_history) / sizeof(tool_history[0]),
+              &invalid_marker_options, &tokens,
+              error, sizeof(error)),
+          "an out-of-range historical tool-choice marker was accepted");
+    static const k3_tool_choice_marker unordered_markers[] = {
+        {
+            .after_message_count = 2u,
+            .choice = K3_TOOL_CHOICE_NONE,
+        },
+        {
+            .after_message_count = 1u,
+            .choice = K3_TOOL_CHOICE_REQUIRED,
+        },
+    };
+    invalid_marker_options.historical_tool_choices = unordered_markers;
+    invalid_marker_options.historical_tool_choice_count =
+        sizeof(unordered_markers) / sizeof(unordered_markers[0]);
+    CHECK(!k3_tokenizer_encode_chat(
+              tokenizer, tool_history,
+              sizeof(tool_history) / sizeof(tool_history[0]),
+              &invalid_marker_options, &tokens,
+              error, sizeof(error)),
+          "unordered historical tool-choice markers were accepted");
+
     static const char generated_tool_output[] =
         "<|close|>response<|sep|><|open|>tools<|sep|>"
         "<|open|>call tool=\"get_weather\" index=\"1\"<|sep|>"
@@ -408,7 +549,8 @@ int main(int argc, char **argv) {
     printf("  official oracles: ASCII, contractions/numbers, Han, "
            "multilingual, special-token safety\n");
     printf("  XTML: non-thinking hello exact; thinking/max and "
-           "multi-turn hashes exact; tools/results and append-prefix exact\n");
+           "multi-turn hashes exact; tools/results, append-prefix, and "
+           "hidden-choice prefix exact\n");
     result = 0;
 
 cleanup:
@@ -417,6 +559,11 @@ cleanup:
     k3_token_buffer_free(&tokens);
     k3_token_buffer_free(&completed_history);
     k3_token_buffer_free(&extended_history);
+    k3_token_buffer_free(&required_prompt);
+    k3_token_buffer_free(&generated_tool_tail);
+    k3_token_buffer_free(&retained_tool_turn);
+    k3_token_buffer_free(&augmented_tool_history);
+    k3_token_buffer_free(&canonical_tool_history);
     k3_tokenizer_destroy(tokenizer);
     return result;
 }

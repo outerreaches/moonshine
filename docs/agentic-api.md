@@ -116,7 +116,7 @@ assistant message, and the matching result:
 Tool arguments are model output. Parse and validate them before executing a
 function even when its declaration uses `strict: true`.
 
-## 2026-08-01 live qualification
+## 2026-08-01 baseline qualification
 
 The accepted 8K Q8/32 engine completed the loop above without a fallback
 parser or prompt convention:
@@ -134,16 +134,50 @@ The Samsung 990 PRO moved from 36 °C composite / 40 °C sensor 2 to 55/58 °C.
 It recorded no thermal-management transition, warning-temperature time, media
 error, or swap growth.
 
-## Agentic prefix limitation and next optimization
+## Causal-prefix recovery
 
-Both qualified prompts evaluated in full (`reused=0`). The first request's
-hidden `tool_choice=required` message is causal input to the tool call but is
-not part of the assistant message returned to the client. The canonical second
-request therefore cannot exactly extend Moonshine's retained token history.
+K3's hidden `tool_choice=required` or `none` message is causal input to an
+assistant turn, but is not part of the assistant message returned to the
+client. A canonical second request therefore cannot directly extend the
+retained token stream from the first request.
 
-The current behavior is safe: exact-prefix comparison fails and the server
-resets semantic state before replay. The next optimization should retain a
-rewind/checkpoint boundary before the transient tool-choice directive, match
-the next canonical history up to that boundary, and replay only the divergent
-directive/assistant/tool-result suffix. It must preserve the existing exact
-state-equivalence gate and fall back to full prefill on any mismatch.
+For a continuing `X-Moonshine-Session`, Moonshine now records only the prior
+directive's message boundary and value. On the next request it renders a
+candidate history with that hidden directive restored immediately before the
+assistant message it caused. This recreates the actual causal history while
+the client continues to send an ordinary, complete OpenAI message list.
+
+The candidate is accepted only when every retained token is byte-for-byte
+identical and the new prompt has a non-empty suffix. A changed tool schema,
+edited/forked/shorter history, changed session identifier, missing header,
+cold-cache benchmark request, invalid marker, or allocation failure takes the
+existing semantic reset and canonical full-prefill path. No state file or
+approximate matching is involved. Forced named-tool requests also remain
+safe: widening the exposed declaration on the next turn changes the prefix
+and triggers full replay.
+
+### Live SSE qualification
+
+The same two-request weather loop was repeated through real SSE with
+`X-Moonshine-Session: agentic-prefix-qualification`:
+
+| phase | actual prompt | evaluated | reused | prompt time | generation | decode |
+|---|---:|---:|---:|---:|---:|---:|
+| required tool call | 151 | 151 | 0 | 212.359 s | 45 | 119.409 s |
+| tool-result answer | 238 | 42 | 196 | 104.913 s | 25 | 55.863 s |
+
+The 238-token usage count is the actual causal prompt, including the restored
+historical directive. The second request reused the complete 151-token prompt
+and 45 generated tokens from the first turn. It emitted the indexed
+`delta.tool_calls` item, accepted the matching tool result, answered that
+Toronto was sunny at 22 °C, and stopped naturally.
+
+Compared with the earlier qualified full-replay result turn, prefill time fell
+from 224.927 to 104.913 seconds (53.4%), while complete result-turn latency
+fell from 281.686 to 160.776 seconds (42.9%, about 1.75x faster). The 42-token
+suffix remains below the measured 93-token layer-major crossover and therefore
+uses exact token-major execution.
+
+The next agentic gates are thinking/reasoning history and streaming deltas,
+structured `response_format`, and an enforceable
+`parallel_tool_calls: false` constraint.

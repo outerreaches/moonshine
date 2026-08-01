@@ -1430,6 +1430,74 @@ static bool append_chat_message(
         end_message(output, error, error_size);
 }
 
+static bool append_tool_choice_directive(
+        k3_tokenizer *tokenizer,
+        k3_tool_choice choice,
+        k3_token_buffer *output,
+        char *error,
+        size_t error_size) {
+    switch (choice) {
+        case K3_TOOL_CHOICE_AUTO:
+            return true;
+        case K3_TOOL_CHOICE_REQUIRED:
+            return append_internal_system_message(
+                tokenizer, "tool-choice",
+                "The system is invoked with `tool_choice=required`.\n"
+                "You MUST call tools in the next message.",
+                output, error, error_size);
+        case K3_TOOL_CHOICE_NONE:
+            return append_internal_system_message(
+                tokenizer, "tool-choice",
+                "The system is invoked with `tool_choice=none`.\n"
+                "You MUST NOT call any tools in the next message.",
+                output, error, error_size);
+        default:
+            set_error(error, error_size,
+                      "unsupported K3 tool choice %d", (int)choice);
+            return false;
+    }
+}
+
+static bool validate_tool_choice_markers(
+        const k3_chat_options *options,
+        size_t message_count,
+        char *error,
+        size_t error_size) {
+    if (options->historical_tool_choice_count != 0u &&
+        options->historical_tool_choices == NULL) {
+        set_error(error, error_size,
+                  "historical tool choices need marker storage");
+        return false;
+    }
+    size_t previous = 0u;
+    for (size_t i = 0u;
+         i < options->historical_tool_choice_count; i++) {
+        const k3_tool_choice_marker marker =
+            options->historical_tool_choices[i];
+        if (marker.choice != K3_TOOL_CHOICE_REQUIRED &&
+            marker.choice != K3_TOOL_CHOICE_NONE) {
+            set_error(error, error_size,
+                      "historical tool choice %zu is not required or none",
+                      i);
+            return false;
+        }
+        if (marker.after_message_count > message_count) {
+            set_error(error, error_size,
+                      "historical tool choice %zu follows message %zu, "
+                      "but the history has only %zu messages",
+                      i, marker.after_message_count, message_count);
+            return false;
+        }
+        if (i != 0u && marker.after_message_count < previous) {
+            set_error(error, error_size,
+                      "historical tool choices are not ordered");
+            return false;
+        }
+        previous = marker.after_message_count;
+    }
+    return true;
+}
+
 bool k3_tokenizer_encode_chat(
         k3_tokenizer *tokenizer,
         const k3_chat_message *messages,
@@ -1450,6 +1518,8 @@ bool k3_tokenizer_encode_chat(
         .thinking_effort = NULL,
         .tools_json = NULL,
         .tool_choice = K3_TOOL_CHOICE_AUTO,
+        .historical_tool_choices = NULL,
+        .historical_tool_choice_count = 0u,
     };
     const k3_chat_options *selected =
         options == NULL ? &defaults : options;
@@ -1466,8 +1536,26 @@ bool k3_tokenizer_encode_chat(
             output, error, error_size)) {
         return false;
     }
+    if (!validate_tool_choice_markers(
+            selected, message_count, error, error_size)) {
+        return false;
+    }
+    size_t marker_index = 0u;
     size_t tool_result_index = 0u;
     for (size_t i = 0u; i < message_count; i++) {
+        while (marker_index <
+                   selected->historical_tool_choice_count &&
+               selected->historical_tool_choices[marker_index]
+                       .after_message_count == i) {
+            if (!append_tool_choice_directive(
+                    tokenizer,
+                    selected->historical_tool_choices[marker_index]
+                        .choice,
+                    output, error, error_size)) {
+                return false;
+            }
+            marker_index++;
+        }
         if (messages[i].role == K3_CHAT_ROLE_SYSTEM &&
             messages[i].tools_json != NULL) {
             if (!append_tool_declare(
@@ -1493,19 +1581,24 @@ bool k3_tokenizer_encode_chat(
             return false;
         }
     }
-    if (selected->tool_choice == K3_TOOL_CHOICE_REQUIRED &&
-        !append_internal_system_message(
-            tokenizer, "tool-choice",
-            "The system is invoked with `tool_choice=required`.\n"
-            "You MUST call tools in the next message.",
-            output, error, error_size)) {
+    while (marker_index < selected->historical_tool_choice_count &&
+           selected->historical_tool_choices[marker_index]
+                   .after_message_count == message_count) {
+        if (!append_tool_choice_directive(
+                tokenizer,
+                selected->historical_tool_choices[marker_index].choice,
+                output, error, error_size)) {
+            return false;
+        }
+        marker_index++;
+    }
+    if (marker_index != selected->historical_tool_choice_count) {
+        set_error(error, error_size,
+                  "historical tool choices were not fully rendered");
         return false;
     }
-    if (selected->tool_choice == K3_TOOL_CHOICE_NONE &&
-        !append_internal_system_message(
-            tokenizer, "tool-choice",
-            "The system is invoked with `tool_choice=none`.\n"
-            "You MUST NOT call any tools in the next message.",
+    if (!append_tool_choice_directive(
+            tokenizer, selected->tool_choice,
             output, error, error_size)) {
         return false;
     }

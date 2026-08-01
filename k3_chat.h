@@ -96,6 +96,8 @@ typedef struct {
     void                             *progress_data;
     const char                       *tools_json;
     k3_tool_choice                    tool_choice;
+    /* Retain hidden request directives for exact session-history replay. */
+    bool                              preserve_tool_choice_history;
 } k3_chat_completion_options;
 
 /*
@@ -138,8 +140,8 @@ bool k3_chat_session_reset(
 
 /*
  * OpenAI-style stateless completion: reset semantic state and render the
- * complete supplied text-only history before generation. Resident expert
- * mappings are preserved because they contain immutable model weights.
+ * complete supplied history before generation. Resident expert mappings are
+ * preserved because they contain immutable model weights.
  */
 bool k3_chat_session_complete_messages(
     k3_chat_session        *session,
@@ -155,9 +157,10 @@ bool k3_chat_session_complete_messages(
 /*
  * Extended completion interface. Prefix reuse is opt-in and append-only: it
  * activates only when the rendered history exactly extends every token in the
- * retained semantic state. Edited, forked, shorter, or otherwise mismatched
- * histories fall back to the same isolated full-prefill behavior as the
- * stateless interface.
+ * retained semantic state. Preserved tool-choice history can reconstruct
+ * request-local hidden directives before the same exact comparison. Edited,
+ * forked, shorter, or otherwise mismatched histories fall back to the same
+ * isolated full-prefill behavior as the stateless interface.
  */
 bool k3_chat_session_complete_messages_with_options(
     k3_chat_session                 *session,
