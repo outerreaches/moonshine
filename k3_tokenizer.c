@@ -1084,6 +1084,7 @@ static bool append_thinking_effort(
         return true;
     }
     if (strcmp(effort, "low") != 0 &&
+        strcmp(effort, "medium") != 0 &&
         strcmp(effort, "high") != 0 &&
         strcmp(effort, "max") != 0) {
         set_error(error, error_size,

@@ -166,3 +166,9 @@ Not yet accepted:
 - state export/import near 128K occupancy;
 - concurrent service or transfer pressure;
 - contexts above 128K on the 128 GB host.
+
+The later 0.2.0 work raises the request output ceiling to 65,536. That change
+is not part of this original record; its separate live admission,
+remaining-context, naturally stopped `medium`-reasoning, and persistent-server
+gates are recorded in
+[64K output and medium-reasoning qualification](qualification-output-64k.md).

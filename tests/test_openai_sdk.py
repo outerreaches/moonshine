@@ -149,7 +149,7 @@ def main() -> None:
             }],
             tool_choice="required",
             parallel_tool_calls=False,
-            reasoning_effort="low",
+            reasoning_effort="medium",
             max_completion_tokens=64,
             stream=True,
             extra_headers={"X-Moonshine-Session": "sdk-fixture"},
@@ -179,6 +179,8 @@ def main() -> None:
             raise AssertionError("the SDK request did not enable streaming")
         if request.get("parallel_tool_calls") is not False:
             raise AssertionError("the SDK lost parallel_tool_calls=false")
+        if request.get("reasoning_effort") != "medium":
+            raise AssertionError("the SDK lost reasoning_effort=medium")
         if "".join(reasoning) != "Need weather.":
             raise AssertionError("reasoning_content was not preserved")
         if len(calls) != 1:

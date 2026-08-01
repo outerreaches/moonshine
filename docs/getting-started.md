@@ -227,7 +227,7 @@ Start a loopback-only 128K-capacity service:
   --port 8080 \
   --context 131072 \
   --experts 30 \
-  --max-output-tokens 32768
+  --max-output-tokens 65536
 ```
 
 Verify discovery:
@@ -242,14 +242,15 @@ The OpenAI model ID is `moonshine`. Health and discovery include the configured
 use `--api-key` before binding beyond loopback. This research server has one
 blocking request slot.
 
-The output ceiling defaults to 8,192 and can be raised to 32,768 with
+The output ceiling defaults to 8,192 and can be raised to 65,536 with
 `--max-output-tokens`. It cannot exceed the configured context. The Chat
 Completions request may use `max_completion_tokens` or legacy `max_tokens`;
 explicit `null` is treated as unspecified. Without a value, the request
 defaults to 256 tokens or the smaller server ceiling. This is a maximum, not a
 forced response length: natural stop and remaining context can end generation
-earlier. Configuring a 32K ceiling does not claim qualification of a continuous
-32K decode.
+earlier. The 64K setting is qualified for admission, remaining-context
+clamping, and repeat short requests in a persistent 128K/30-expert process; it
+does not claim qualification of a continuous 64K decode.
 
 The 30-slot setting is deliberate for a persistent 128K service on the
 qualified 128 GB host. A cold first request can borrow the empty expert cache
@@ -266,7 +267,7 @@ Standard operating profiles are:
 | agentic/API baseline | 8,192 | 32 | 8,192 |
 | filled/natural-text qualified | 16,384 | 32 | 16,384 |
 | filled/natural-text qualified | 32,768 | 32 | 32,768 |
-| persistent maximum capacity | 131,072 | 30 | 32,768 |
+| persistent maximum capacity | 131,072 | 30 | 65,536 |
 
 The 128K row is qualified for configured capacity and repeat short requests,
 not a filled 128K prompt. See
@@ -292,7 +293,8 @@ declaration, call, result, and final-answer example in [Agentic API and tool
 use](agentic-api.md). Keep the complete returned assistant message, including
 `reasoning_content` and all `tool_calls`, and return one matching `role:
 "tool"` message per call. K3 thinking is always enabled on the API;
-`reasoning_effort` accepts `low`, `high`, or `max` and defaults to `max`.
+`reasoning_effort` accepts `low`, `medium`, `high`, or `max` and defaults to
+`max`.
 Set `parallel_tool_calls: false` to force serial call turns; Moonshine prompts
 for at most one call and rejects a multi-call result before emitting tool-call
 SSE. Allow the default 256 completion tokens for prompts that require K3 to
@@ -304,12 +306,15 @@ in [Agentic API and tool use](agentic-api.md). Unsupported keywords fail
 before inference. Structured SSE response content arrives only after complete
 validation; reasoning still streams live.
 
-For Hermes Agent, explicitly set `model.max_tokens: 32768` and a matching
-`model.context_length` in `~/.hermes/config.yaml`. Also set
-`agent.reasoning_effort` to `low`, `high`, or `max`; Hermes's standard
-`medium` value is not accepted by Moonshine. Use `HERMES_API_TIMEOUT` and
+For Hermes Agent against the 128K/64K 0.2.0 profile, set
+`model.max_tokens: 65536`, a matching `model.context_length: 131072`, and
+`agent.reasoning_effort: medium` in `~/.hermes/config.yaml`. Older binaries
+and smaller server profiles require a lower output cap; confirm the effective
+limits through discovery before testing. Use `HERMES_API_TIMEOUT` and
 `HERMES_STREAM_READ_TIMEOUT` of at least 1,800 seconds for ordinary agentic
-use, and begin at 7,200 seconds for deliberately long 16K/32K prompts. The
+use. Hermes's full system/tool prompt can make prefill exceed a 15-minute
+effective timeout even when the visible user prompt is short. Begin at 7,200
+seconds for deliberately long 16K/32K prompts. The
 complete example and failure map are in [Deployment profiles and Hermes
 Agent](deployment-profiles.md).
 

@@ -15,7 +15,7 @@
     } while (0)
 
 enum {
-    TEST_MAX_OUTPUT_TOKENS = 32768,
+    TEST_MAX_OUTPUT_TOKENS = 65536,
 };
 
 int main(void) {
@@ -94,6 +94,8 @@ int main(void) {
     memset(&schema_request, 0, sizeof(schema_request));
     k3_openai_chat_request compatibility_request;
     memset(&compatibility_request, 0, sizeof(compatibility_request));
+    k3_openai_chat_request medium_request;
+    memset(&medium_request, 0, sizeof(medium_request));
     k3_openai_chat_request default_request;
     memset(&default_request, 0, sizeof(default_request));
     k3_openai_chat_request over_limit_request;
@@ -181,7 +183,7 @@ int main(void) {
     static const char compatibility_json[] =
         "{\"model\":\"moonshine\",\"messages\":[{\"role\":\"user\","
         "\"content\":\"x\"}],\"max_completion_tokens\":null,"
-        "\"max_tokens\":32768}";
+        "\"max_tokens\":65536}";
     CHECK(k3_openai_parse_chat_request(
               compatibility_json, strlen(compatibility_json),
               TEST_MAX_OUTPUT_TOKENS,
@@ -189,6 +191,17 @@ int main(void) {
           error);
     CHECK(compatibility_request.max_tokens == TEST_MAX_OUTPUT_TOKENS,
           "null max_completion_tokens did not fall back to max_tokens");
+
+    static const char medium_reasoning_json[] =
+        "{\"model\":\"moonshine\",\"messages\":[{\"role\":\"user\","
+        "\"content\":\"x\"}],\"reasoning_effort\":\"medium\"}";
+    CHECK(k3_openai_parse_chat_request(
+              medium_reasoning_json, strlen(medium_reasoning_json),
+              TEST_MAX_OUTPUT_TOKENS,
+              &medium_request, error, sizeof(error)),
+          error);
+    CHECK(strcmp(medium_request.reasoning_effort, "medium") == 0,
+          "medium reasoning effort was not preserved");
 
     static const char null_limits_json[] =
         "{\"model\":\"moonshine\",\"messages\":[{\"role\":\"user\","
@@ -203,7 +216,7 @@ int main(void) {
 
     static const char over_limit_json[] =
         "{\"model\":\"moonshine\",\"messages\":[{\"role\":\"user\","
-        "\"content\":\"x\"}],\"max_tokens\":32769}";
+        "\"content\":\"x\"}],\"max_tokens\":65537}";
     CHECK(!k3_openai_parse_chat_request(
               over_limit_json, strlen(over_limit_json),
               TEST_MAX_OUTPUT_TOKENS,
@@ -211,7 +224,7 @@ int main(void) {
           "configured output ceiling was not enforced");
     CHECK(strcmp(
               error,
-              "max tokens must be an integer in [1,32768]") == 0,
+              "max tokens must be an integer in [1,65536]") == 0,
           "configured output ceiling error changed");
     static const char valid_integer_forms[] =
         "{\"greeting\":\"hello\",\"count\":2.0}";
@@ -417,7 +430,7 @@ int main(void) {
         "\"parallel_tool_calls\":\"false\"}",
         "{\"model\":\"moonshine\",\"messages\":["
         "{\"role\":\"user\",\"content\":\"x\"}],"
-        "\"reasoning_effort\":\"medium\"}",
+        "\"reasoning_effort\":\"ultra\"}",
         "{\"model\":\"moonshine\",\"messages\":["
         "{\"role\":\"user\",\"content\":\"x\"}],"
         "\"response_format\":{\"type\":\"json_schema\","
@@ -481,6 +494,7 @@ cleanup:
     k3_openai_chat_request_free(&specific_request);
     k3_openai_chat_request_free(&schema_request);
     k3_openai_chat_request_free(&compatibility_request);
+    k3_openai_chat_request_free(&medium_request);
     k3_openai_chat_request_free(&default_request);
     k3_openai_chat_request_free(&over_limit_request);
     return exit_code;

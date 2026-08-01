@@ -30,7 +30,7 @@ as ordinary text, preventing a marker-looking user string from changing chat
 structure.
 
 The renderer covers named or unnamed system, user, assistant, and tool
-messages; thinking/non-thinking response channels; optional low/high/max
+messages; thinking/non-thinking response channels; optional low/medium/high/max
 thinking effort; global and dynamically loaded tool declarations; typed or
 raw-JSON tool calls; call-ID-resolved tool results; request-local tool choice;
 and the open assistant generation prompt. Images and structured response
@@ -87,7 +87,7 @@ The initial server is a deliberately bounded HTTP/1.1 implementation:
 - standard OpenAI error envelopes and usage accounting;
 - OpenAI function tools, parallel call output, matching tool-result history,
   `auto`/`required`/`none`, and forced named-function selection;
-- K3 preserved-thinking history, `low`/`high`/`max` effort, and separate
+- K3 preserved-thinking history, `low`/`medium`/`high`/`max` effort, and separate
   reasoning/content fields in JSON and SSE;
 - native `json_object` and bounded `json_schema` response directives with
   validated, deferred SSE content;

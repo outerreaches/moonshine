@@ -50,9 +50,11 @@ CMA-plus-4-GiB guard. Do not weaken the guard to make that configuration pass.
 
 For the Hermes ad hoc gate, record its effective `model.max_tokens`,
 `model.context_length`, `agent.reasoning_effort`, API timeout, and streaming
-read timeout. The Moonshine 0.2 profile requires at most 32,768 output tokens
-and one of `low`, `high`, or `max`; Hermes's generic custom-provider defaults
-of 65,536 and `medium` are not compatible. Test with the profile documented in
+read timeout. Qualify the 128K Moonshine 0.2 profile at 65,536 output tokens
+and `reasoning_effort: medium`; confirm acceptance at the ceiling, rejection
+at 65,537, remaining-context clamping, and an ordinary naturally stopped
+response. Lower-context/server-ceiling profiles must override Hermes's generic
+65,536-token default. Test with the profile documented in
 `docs/deployment-profiles.md`.
 
 Run a final audit:

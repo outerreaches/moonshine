@@ -1299,11 +1299,12 @@ bool k3_openai_parse_chat_request(
                 &document, reasoning_effort,
                 &decoded_effort, error, error_size) ||
             (strcmp(decoded_effort, "low") != 0 &&
+             strcmp(decoded_effort, "medium") != 0 &&
              strcmp(decoded_effort, "high") != 0 &&
              strcmp(decoded_effort, "max") != 0)) {
             free(decoded_effort);
             set_error(error, error_size,
-                      "reasoning_effort must be low, high, or max");
+                      "reasoning_effort must be low, medium, high, or max");
             goto cleanup;
         }
         free(request->reasoning_effort);

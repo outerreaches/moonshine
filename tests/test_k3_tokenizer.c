@@ -387,6 +387,21 @@ int main(int argc, char **argv) {
           token_hash(&tokens) == UINT64_C(0xe215c5053c6bbc41),
           "official max-thinking XTML oracle changed");
 
+    const k3_chat_options thinking_medium = {
+        .add_generation_prompt = true,
+        .thinking = true,
+        .thinking_effort = "medium",
+    };
+    CHECK(k3_tokenizer_encode_chat(
+              tokenizer, hello_messages,
+              sizeof(hello_messages) / sizeof(hello_messages[0]),
+              &thinking_medium, &tokens, error, sizeof(error)) &&
+          k3_tokenizer_decode(
+              tokenizer, tokens.data, tokens.count, true,
+              &text, error, sizeof(error)) &&
+          strstr(text.data, "thinking_effort=medium") != NULL,
+          "medium thinking effort was not rendered into XTML");
+
     static const k3_chat_message multi_messages[] = {
         {
             .role = K3_CHAT_ROLE_SYSTEM,
@@ -921,7 +936,7 @@ int main(int argc, char **argv) {
            K3_TOKEN_VOCAB_SIZE, 163584u);
     printf("  official oracles: ASCII, contractions/numbers, Han, "
            "multilingual, special-token safety\n");
-    printf("  XTML: non-thinking hello exact; thinking/max and "
+    printf("  XTML: non-thinking hello exact; thinking/medium/max and "
            "multi-turn hashes exact; tools/results, append-prefix, and "
            "hidden request-directive prefixes exact\n");
     result = 0;

@@ -30,7 +30,7 @@ AMD architectures, and not source-precision equivalent.
   tool-choice directives at their original message boundaries.
 - A real SSE function-loop qualification that reused all 196 retained tokens
   and evaluated only the 42-token tool-result suffix.
-- K3 preserved thinking with `low`/`high`/`max` effort, native reasoning
+- K3 preserved thinking with `low`/`medium`/`high`/`max` effort, native reasoning
   parsing, JSON `reasoning_content`, and live SSE reasoning deltas.
 - A two-turn live reasoning qualification whose continuation reused all 127
   prior prompt/generated tokens and evaluated only a 25-token suffix.
@@ -88,7 +88,7 @@ AMD architectures, and not source-precision equivalent.
   prefix-reuse admission, including edited-same-length history and count-
   arithmetic boundaries. It runs in CPU-only CI without ROCm or model weights.
 - A configurable server output ceiling through `--max-output-tokens`, with an
-  8K default, a bounded 32K maximum, context-aware clamping, and advertised
+  8K default, a bounded 64K maximum, context-aware clamping, and advertised
   context/output limits in health and model discovery.
 - A persistent-server 128K qualification with 30 expert slots per layer,
   covering two independent requests while retaining the CMA-aware memory

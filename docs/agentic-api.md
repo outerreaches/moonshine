@@ -25,7 +25,7 @@ and the [Kimi K3 quickstart](https://platform.kimi.ai/docs/guide/kimi-k3-quickst
 - ordinary JSON responses and indexed SSE `delta.tool_calls` chunks;
 - `finish_reason: "tool_calls"` whenever calls are returned;
 - K3 preserved thinking on every API request, with `reasoning_effort` values
-  `low`, `high`, and `max` (default `max`);
+  `low`, `medium`, `high`, and `max` (default `max`);
 - separate JSON `reasoning_content` and live SSE
   `delta.reasoning_content` before response content;
 - complete assistant reasoning history rendered back into native `<think>`
@@ -195,8 +195,8 @@ suffix layer-major. A fresh live API requalification is recorded separately.
 ## Preserved-thinking qualification
 
 K3's current model contract always enables thinking. Moonshine now defaults
-the API to `reasoning_effort: "max"`; callers can select `low`, `high`, or
-`max`. The generated-token limit covers reasoning, response, tools, and
+the API to `reasoning_effort: "max"`; callers can select `low`, `medium`,
+`high`, or `max`. The generated-token limit covers reasoning, response, tools, and
 structural tokens together.
 
 An 8K SSE smoke test used `reasoning_effort: "low"` and `Say hello.`. The

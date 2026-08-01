@@ -27,7 +27,7 @@ enum {
     K3_SERVER_DEFAULT_EXPERTS = 32,
     K3_SERVER_DEFAULT_STAGING = 16,
     K3_SERVER_DEFAULT_MAX_OUTPUT_TOKENS = 8192,
-    K3_SERVER_MAX_OUTPUT_TOKENS = 32768,
+    K3_SERVER_MAX_OUTPUT_TOKENS = 65536,
     K3_SERVER_MAX_HEADERS = 64 * 1024,
     K3_SERVER_DEFAULT_MAX_BODY = 8 * 1024 * 1024,
     K3_SERVER_MAX_SESSION_ID = 128,
@@ -133,7 +133,7 @@ static void usage(FILE *stream, const char *program) {
         "  --experts N           Resident expert slots per layer (default 32)\n"
         "  --staging N           Expert staging slots (default 16)\n"
         "  --max-output-tokens N Per-request output ceiling\n"
-        "                        (default 8192; maximum 32768)\n"
+        "                        (default 8192; maximum 65536)\n"
         "  --range-backend NAME  Diagnostic range backend: default|kda-blas\n"
         "  --max-body BYTES      Maximum JSON request body (default 8388608)\n"
         "  --clear-expert-cache-per-request\n"

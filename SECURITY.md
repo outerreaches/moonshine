@@ -9,8 +9,9 @@ untrusted network without an API key and additional network controls.
 
 | Version | Support |
 |---|---|
-| `main` before the first release | Best effort |
-| `0.1.x` after release | Security fixes planned |
+| `main` | Best effort |
+| `0.2.x` research preview | Security fixes planned |
+| `0.1.x` research preview | Superseded by `0.2.x` |
 
 ## Reporting a vulnerability
 

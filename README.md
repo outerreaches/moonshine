@@ -312,7 +312,7 @@ Start a loopback-only 128K-capacity service:
   --port 8080 \
   --context 131072 \
   --experts 30 \
-  --max-output-tokens 32768
+  --max-output-tokens 65536
 ```
 
 The initial surface provides `GET /health`, `GET /v1/models`, and
@@ -321,16 +321,18 @@ are supported. Health and model discovery report `context_length` and the
 effective `max_output_tokens` ceiling.
 
 The server's default per-request output ceiling is 8,192 tokens. Set
-`--max-output-tokens` to raise it as high as 32,768; the effective ceiling is
+`--max-output-tokens` to raise it as high as 65,536; the effective ceiling is
 never larger than the configured context. Requests may use either
 `max_completion_tokens` or legacy `max_tokens`, in that order. Explicit
 `null` is treated as unspecified for client compatibility. If neither field
 supplies a value, Moonshine uses 256 or the server ceiling when it is smaller.
 Generation can stop naturally before the cap and is always clamped to the
-context remaining after the prompt and required XTML trailers. The 32K setting
-qualifies request admission and capacity accounting, not a 32K uninterrupted
-decode workload; at the measured decode rate such a workload would take many
-hours.
+context remaining after the prompt and required XTML trailers. The 64K source
+setting is qualified for API admission, remaining-context clamping, and two
+independent short requests in one persistent 128K/30-expert process. It does
+not qualify a 64K uninterrupted decode workload; at the measured decode rate
+such a workload would take many hours. See
+[64K output and medium-reasoning qualification](docs/qualification-output-64k.md).
 
 On the qualified 128 GB host, use `--experts 30` for a long-lived 128K server.
 The original configured-capacity qualification used 32 slots and proved one
@@ -371,17 +373,19 @@ matching `tool_call_id` for each result. Multiple calls are supported and
 tool-result messages are normalized into call order.
 
 Kimi K3 thinking is enabled on every API request. `reasoning_effort` accepts
-`low`, `high`, or `max` and defaults to `max`. Ordinary responses include
-`reasoning_content`; SSE emits live `delta.reasoning_content` chunks before
+`low`, `medium`, `high`, or `max` and defaults to `max`. Ordinary responses
+include `reasoning_content`; SSE emits live `delta.reasoning_content` chunks before
 `delta.content`. Send the complete returned assistant message—including
 `reasoning_content`, `content`, and any `tool_calls`—back in the next request.
 Preserved reasoning then participates in the same exact causal-prefix gate.
 
-Hermes Agent needs explicit compatibility overrides. Its generic custom-
-provider defaults (`max_tokens: 65536` and `reasoning_effort: medium`) exceed
-or fall outside Moonshine's accepted contract. Set Hermes `model.max_tokens`
-to 32,768 or less, set reasoning to `low`, `high`, or `max`, and use extended
-API/read timeouts for this engine's prefill and decode rate. Copy-pasteable
+Hermes Agent's generic custom-provider defaults (`max_tokens: 65536` and
+`reasoning_effort: medium`) match the 128K/64K Moonshine 0.2.0 source
+profile. A running server built before this change still advertises and
+enforces 32,768 and rejects `medium`; lower-context profiles also require a
+smaller Hermes output cap. Always use the discovered server limits and extend
+API/read timeouts to at least 30 minutes: Hermes's full system/tool prompt can
+exhaust a 15-minute path before first output. Copy-pasteable
 8K, 16K, 32K, and persistent-128K profiles are in [Deployment profiles and
 Hermes Agent](docs/deployment-profiles.md).
 
