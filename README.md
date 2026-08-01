@@ -17,14 +17,16 @@ OpenAI-compatible HTTP service. It is deliberately narrow:
 - Linux and ROCm only;
 - tested on `gfx1151` with ROCm 7.2;
 - the pinned official 96-shard Kimi K3 SafeTensors layout only;
-- dynamically allocated context, qualified at 8K, 16K, and 32K;
+- dynamically allocated context, capacity-qualified through 128K;
 - greedy next-token inference;
 - one large model process at a time.
 
 The accepted Q8/32 configuration uses about 55.27 GiB for resident static
 weights and 48.11 GiB for the online routed-expert cache. Runtime state is
-0.920 GiB at 8K or 1.566 GiB at 32K, plus 0.262 GiB of mapped staging.
-Fully resident BF16 is intentionally rejected on the tested 128 GB machine.
+0.920 GiB at 8K, 1.566 GiB at 32K, or 4.150 GiB at 128K, plus 0.262 GiB of
+mapped staging. The 128K configuration accounts for about 107.793 GiB before
+allocator/driver overhead. Fully resident BF16 is intentionally rejected on
+the tested 128 GB machine.
 
 ## How the engine works
 
@@ -82,11 +84,17 @@ They are engineering fixtures, not cross-project benchmark claims.
 | Native chat `Say hello.` completion | 0.500 tok/s |
 | OpenAI HTTP/SSE chat at 32K, prompt | 0.437–0.438 tok/s |
 | OpenAI HTTP/SSE chat at 32K, completion | 0.499 tok/s |
+| Locked chat at 128K capacity, prompt | 0.430 tok/s |
+| Locked chat at 128K capacity, completion | 0.508 tok/s |
+| OpenAI JSON chat at 128K capacity, prompt | 0.438 tok/s |
+| OpenAI JSON chat at 128K capacity, completion | 0.498 tok/s |
 
 The default range path matches the locked sequential state oracle exactly.
 The faster KDA dequantize-plus-hipBLAS path preserves the tested greedy token
 but changes selected values and causal-state hashes because its BF16 reduction
 order differs. It remains diagnostic and opt-in pending broader quality tests.
+The complete 128K capacity evidence and its limits are recorded in
+[128K configured-context qualification](docs/qualification-128k.md).
 
 ## Requirements
 
@@ -102,9 +110,12 @@ order differs. It remains diagnostic and opt-in pending broader quality tests.
   `9f62e4e9fffbd0a83ddd60e1c209d828994b3569`.
 
 Other AMD architectures, ROCm releases, filesystems, model revisions, memory
-sizes, and contexts above 32K are not qualified yet. The official text config
-advertises 1,048,576 positions, but that is an architectural limit rather than
-a practical claim for this 128 GB implementation.
+sizes, and contexts above 128K are not qualified yet. The 128K result covers
+allocation, startup, a locked 24-token prompt/18-token completion, and the
+OpenAI-compatible request path; filled-128K prefill latency and long-context
+quality are not qualified. The official text config advertises 1,048,576
+positions, but that is an architectural limit rather than a practical claim
+for this 128 GB implementation.
 
 ## Build
 
@@ -192,7 +203,7 @@ semantic state. `--system`, `--load`, and `--save` are also available; run
 Use a larger qualified context without changing the weight residency:
 
 ```sh
-./moonshine-chat /path/to/moonshotai__Kimi-K3 --context 32768
+./moonshine-chat /path/to/moonshotai__Kimi-K3 --context 131072
 ```
 
 ## Run the OpenAI-compatible API
@@ -210,13 +221,13 @@ exact token-prefix extension. Edited, forked, shorter, mismatched, missing, or
 different-session histories fall back to an isolated semantic reset and full
 prefill. Clients must still send the complete OpenAI message history.
 
-Start a loopback-only 32K service:
+Start a loopback-only 128K-capacity service:
 
 ```sh
 ./moonshine-server /path/to/moonshotai__Kimi-K3 \
   --host 127.0.0.1 \
   --port 8080 \
-  --context 32768
+  --context 131072
 ```
 
 The initial surface provides `GET /health`, `GET /v1/models`, and
@@ -311,13 +322,16 @@ available and that swap is idle:
 free -h
 pgrep -a -f 'llama|ds4|k3'
 make test-engine-hello MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3
+make test-engine-hello \
+  MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3 \
+  MOONSHINE_CONTEXT=131072
 ```
 
 This loads the accepted Q8/32 residency and runs a hard-coded, tokenizer-
 verified `Say hello.` chat fixture. A passing run should end with:
 
 ```text
-K3 8K hello: PASS
+K3 hello: PASS
 ```
 
 The fixture reports token IDs, startup time, prompt/decode rate, and cumulative
@@ -375,10 +389,11 @@ engine.
 ## Project status
 
 Versioned causal-state export/import, the official native tokenizer, the
-text-only XTML chat renderer, deterministic stateful CLI, dynamic 8K–32K
-context allocation, and one-slot OpenAI-compatible HTTP/SSE service are now
-locked. Tool declarations/calls/results and structured responses remain
-required for the broader agentic surface.
+text-only XTML chat renderer, deterministic stateful CLI, dynamic context
+allocation capacity-qualified through 128K, and one-slot OpenAI-compatible
+HTTP/SSE service are now locked. Filled-128K workload behavior is still an
+open qualification item. Tool declarations/calls/results and structured
+responses remain required for the broader agentic surface.
 
 See [Architecture](docs/architecture.md) for the correctness model and
 [Provenance](docs/provenance.md) for code lineage, references, and

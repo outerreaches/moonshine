@@ -142,6 +142,15 @@ int main(int argc, char **argv) {
               oracle.batch_workspace_bytes &&
           larger_context.context_remaining == 32768u,
           "32K context preserves prompt workspace accounting");
+    CHECK(k3_prefill_plan_build(
+              &model, 2u, 131072u, 32u, 16u,
+              K3_PREFILL_CACHE_RETAIN,
+              &larger_context, error, sizeof(error)),
+          "128K context plan");
+    CHECK(larger_context.batch_workspace_bytes ==
+              oracle.batch_workspace_bytes &&
+          larger_context.context_remaining == 131072u,
+          "128K context preserves prompt workspace accounting");
     CHECK(!k3_prefill_plan_build(
               &model, 2u, 1048577u, 32u, 16u,
               K3_PREFILL_CACHE_RETAIN,

@@ -15,6 +15,7 @@ ICU_LDLIBS ?= $(shell pkg-config --libs icu-i18n 2>/dev/null || \
 	echo -licui18n -licuuc -licudata)
 
 MOONSHINE_MODEL ?=
+MOONSHINE_CONTEXT ?= 8192
 MOONSHINE_PREFILL_TOKENS ?= 512
 MOONSHINE_STATE_DIR ?= /tmp
 
@@ -92,10 +93,10 @@ help:
 	@echo "                               Validate the pinned 96-shard layout and plan"
 	@echo "  make test-model-components MOONSHINE_MODEL=/path/to/Kimi-K3"
 	@echo "                               Run bounded real-weight component oracles"
-	@echo "  make test-engine-init MOONSHINE_MODEL=/path/to/Kimi-K3"
-	@echo "                               Allocate the full Q8/32 residency (~105 GiB)"
-	@echo "  make test-engine-hello MOONSHINE_MODEL=/path/to/Kimi-K3"
-	@echo "                               Run the locked 8K greedy hello fixture"
+	@echo "  make test-engine-init MOONSHINE_MODEL=/path/to/Kimi-K3 MOONSHINE_CONTEXT=8192"
+	@echo "                               Allocate and validate the selected context"
+	@echo "  make test-engine-hello MOONSHINE_MODEL=/path/to/Kimi-K3 MOONSHINE_CONTEXT=8192"
+	@echo "                               Run the locked greedy hello at the selected context"
 	@echo "  make test-chat-hello MOONSHINE_MODEL=/path/to/Kimi-K3"
 	@echo "                               Run native tokenizer-to-text chat end to end"
 	@echo "  make test-state-checkpoint MOONSHINE_MODEL=/path/to/Kimi-K3"
@@ -223,10 +224,11 @@ test-model-components: check-model \
 	./tests/test_k3_moe_smoke "$(MOONSHINE_MODEL)"
 
 test-engine-init: check-model tests/test_k3_engine_init
-	./tests/test_k3_engine_init "$(MOONSHINE_MODEL)"
+	./tests/test_k3_engine_init "$(MOONSHINE_MODEL)" "$(MOONSHINE_CONTEXT)"
 
 test-engine-hello: check-model tests/test_k3_engine_hello
-	./tests/test_k3_engine_hello "$(MOONSHINE_MODEL)" q8 32
+	./tests/test_k3_engine_hello \
+		"$(MOONSHINE_MODEL)" q8 32 "$(MOONSHINE_CONTEXT)"
 
 test-chat-hello: check-model tests/test_k3_chat_session
 	./tests/test_k3_chat_session "$(MOONSHINE_MODEL)"

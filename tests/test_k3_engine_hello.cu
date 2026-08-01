@@ -45,7 +45,8 @@ int main(int argc, char **argv) {
         } else {
             fprintf(
                 stderr,
-                "usage: %s [MODEL_ROOT [q8|bf16 [EXPERTS_PER_LAYER]]]\n",
+                "usage: %s [MODEL_ROOT [q8|bf16 "
+                "[EXPERTS_PER_LAYER [CONTEXT]]]]\n",
                 argv[0]);
             return 2;
         }
@@ -61,26 +62,40 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
+    const uint16_t experts_per_layer =
+        (uint16_t)parsed_experts;
+    uint32_t context = 8192u;
     if (argc > 4) {
+        char *end = NULL;
+        const unsigned long parsed = strtoul(argv[4], &end, 10);
+        if (!end || end == argv[4] || *end != '\0' ||
+            parsed < 64ul || parsed > 1048576ul) {
+            fprintf(stderr, "invalid context: %s\n", argv[4]);
+            return 2;
+        }
+        context = (uint32_t)parsed;
+    }
+    if (argc > 5) {
         fprintf(
             stderr,
-            "usage: %s [MODEL_ROOT [q8|bf16 [EXPERTS_PER_LAYER]]]\n",
+            "usage: %s [MODEL_ROOT [q8|bf16 "
+            "[EXPERTS_PER_LAYER [CONTEXT]]]]\n",
             argv[0]);
         return 2;
     }
-    const uint16_t experts_per_layer =
-        (uint16_t)parsed_experts;
     int device_count = 0;
     HIP_CHECK(hipGetDeviceCount(&device_count));
     if (device_count == 0) {
-        printf("K3 8K hello: SKIP (no ROCm device)\n");
+        printf("K3 hello: SKIP (no ROCm device)\n");
         return 0;
     }
     HIP_CHECK(hipSetDevice(0));
     hipDeviceProp_t properties;
     HIP_CHECK(hipGetDeviceProperties(&properties, 0));
-    printf("K3 8K hello on %s (%s); static=%s; experts/layer=%u\n",
+    printf("K3 hello on %s (%s); context=%u; static=%s; "
+           "experts/layer=%u\n",
            properties.name, properties.gcnArchName,
+           context,
            q8_projections ? "q8" : "bf16",
            experts_per_layer);
 
@@ -88,7 +103,7 @@ int main(int argc, char **argv) {
     k3_engine *engine = NULL;
     k3_engine_stats stats;
     CHECK(k3_engine_create(
-              &engine, root, 8192u, experts_per_layer, 16u,
+              &engine, root, context, experts_per_layer, 16u,
               q8_projections,
               &stats, error, sizeof(error)),
           error);
@@ -169,8 +184,8 @@ int main(int argc, char **argv) {
         elapsed_seconds(prompt_start, prompt_end);
     const double decode_seconds =
         elapsed_seconds(decode_start, decode_end);
-    printf("  configured context: 8192; prompt tokens: %u\n",
-           prompt_count);
+    printf("  configured context: %u; prompt tokens: %u\n",
+           context, prompt_count);
     printf("  static mode: %s; experts/layer: %u; "
            "resident static: %.3f GiB; cache: %.3f GiB\n",
            q8_projections ? "q8" : "bf16",
@@ -205,6 +220,6 @@ int main(int argc, char **argv) {
                    (double)cache.accesses :
                0.0);
     k3_engine_destroy(engine);
-    printf("K3 8K hello: PASS\n");
+    printf("K3 hello: PASS\n");
     return 0;
 }

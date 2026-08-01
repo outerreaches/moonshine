@@ -171,9 +171,17 @@ The MLA cache and attention workspace are allocated from the requested
 context instead of a compile-time 8K constant. Together they add exactly
 28,224 bytes per configured token; the workspace also has a fixed 96 KiB
 latent output. Real-residency startup and short-generation checks pass at 8K,
-16K, and 32K. The model config names a 1,048,576-position architectural
-maximum, but memory preflight and latency make that a limit, not a qualified
-operating point.
+16K, 32K, and 128K. Runtime state is 4,455,923,712 bytes (4.150 GiB) at 128K;
+the accepted Q8/32 allocation totals 115,741,620,224 bytes (107.793 GiB)
+before allocator and driver overhead. On the qualified 128 GB host, the clean
+128K run retained 9.3 GiB `MemAvailable` and did not increase swap use.
+
+This is a configured-capacity qualification: it covers exact state sizing,
+full residency, a locked 24-token prompt/18-token completion, and a real JSON
+Chat Completions request. It does not establish filled-128K prefill latency or
+long-context quality. The model config names a 1,048,576-position
+architectural maximum, but memory preflight and latency make that a limit, not
+a qualified operating point.
 
 AttnRes retains block inputs and performs the model's learned residual mixing
 at exact 12-layer boundaries. Engine state also tracks the current token

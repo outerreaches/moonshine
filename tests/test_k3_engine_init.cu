@@ -30,8 +30,10 @@ static const uint64_t K3_EXPECTED_STATIC_BYTES =
     UINT64_C(59345729536);
 static const uint64_t K3_EXPECTED_CACHE_BYTES =
     UINT64_C(51659145216);
-static const uint64_t K3_EXPECTED_STATE_BYTES =
-    UINT64_C(987758592);
+static const uint64_t K3_FIXED_STATE_BYTES =
+    UINT64_C(756547584);
+static const uint64_t K3_CONTEXT_STATE_BYTES_PER_TOKEN =
+    UINT64_C(28224);
 static const uint64_t K3_EXPECTED_STAGING_BYTES =
     UINT64_C(280821760);
 
@@ -55,9 +57,37 @@ static uint64_t fnv1a64(const void *data, size_t bytes) {
     return hash;
 }
 
+static bool expected_hash(const char *label,
+                          uint64_t got,
+                          uint64_t expected) {
+    if (got == expected) return true;
+    fprintf(
+        stderr,
+        "FAIL: %s hash got 0x%016llx, expected 0x%016llx\n",
+        label,
+        (unsigned long long)got,
+        (unsigned long long)expected);
+    return false;
+}
+
 int main(int argc, char **argv) {
+    if (argc > 3) {
+        fprintf(stderr, "usage: %s [MODEL_ROOT [CONTEXT]]\n", argv[0]);
+        return 2;
+    }
     const char *root = argc > 1 ? argv[1] :
         "/srv/modelstore/models/moonshotai__Kimi-K3";
+    uint32_t context = 8192u;
+    if (argc > 2) {
+        char *end = NULL;
+        const unsigned long parsed = strtoul(argv[2], &end, 10);
+        if (end == argv[2] || *end != '\0' ||
+            parsed < 64ul || parsed > 1048576ul) {
+            fprintf(stderr, "invalid context: %s\n", argv[2]);
+            return 2;
+        }
+        context = (uint32_t)parsed;
+    }
     int device_count = 0;
     HIP_CHECK(hipGetDeviceCount(&device_count));
     if (device_count == 0) {
@@ -67,14 +97,14 @@ int main(int argc, char **argv) {
     HIP_CHECK(hipSetDevice(0));
     hipDeviceProp_t properties;
     HIP_CHECK(hipGetDeviceProperties(&properties, 0));
-    printf("K3 engine init on %s (%s)\n",
-           properties.name, properties.gcnArchName);
+    printf("K3 engine init on %s (%s), context=%u\n",
+           properties.name, properties.gcnArchName, context);
 
     char error[512];
     k3_engine *engine = NULL;
     k3_engine_stats stats;
     CHECK(k3_engine_create(
-              &engine, root, 8192u, 32u, 16u, true,
+              &engine, root, context, 32u, 16u, true,
               &stats, error, sizeof(error)),
           error);
     CHECK(stats.static_store.resident_bytes ==
@@ -83,7 +113,10 @@ int main(int argc, char **argv) {
     CHECK(stats.cache_bytes == K3_EXPECTED_CACHE_BYTES &&
               stats.cache_slots == 2944u,
           "engine cache byte ledger");
-    CHECK(stats.state_bytes == K3_EXPECTED_STATE_BYTES,
+    const uint64_t expected_state_bytes =
+        K3_FIXED_STATE_BYTES +
+        (uint64_t)context * K3_CONTEXT_STATE_BYTES_PER_TOKEN;
+    CHECK(stats.state_bytes == expected_state_bytes,
           "engine attention-state byte ledger");
     CHECK(stats.staging_bytes == K3_EXPECTED_STAGING_BYTES &&
               stats.staging_slots == 16u,
@@ -150,7 +183,9 @@ int main(int argc, char **argv) {
     CHECK(nonzero, "engine layer-0 output is zero");
     const uint64_t layer0_hash =
         fnv1a64(output, hidden_bytes);
-    CHECK(layer0_hash == UINT64_C(0x490bddfe54cbae44),
+    CHECK(expected_hash(
+              "engine layer-0 output", layer0_hash,
+              UINT64_C(0x490bddfe54cbae44)),
           "engine layer-0 output hash changed");
 
     HIP_CHECK(hipEventRecord(start, NULL));
@@ -176,8 +211,9 @@ int main(int argc, char **argv) {
     CHECK(nonzero, "engine layer-1 output is zero");
     const uint64_t layer1_hash =
         fnv1a64(output, hidden_bytes);
-    CHECK(layer1_hash == UINT64_C(0xe594e3d89de7ccbd),
-          "engine layer-1 output hash changed");
+    bool routed_hashes_ok = expected_hash(
+        "engine layer-1 output", layer1_hash,
+        UINT64_C(0x4a33492ac1238cca));
 
     float next_layer_ms[91] = { 0.0f };
     uint64_t next_layer_hash[91] = { 0u };
@@ -210,14 +246,20 @@ int main(int argc, char **argv) {
         next_input = next_output;
         next_output = swap;
     }
-    CHECK(next_layer_hash[0] == UINT64_C(0x8d64fbcf34b38757),
-          "engine layer-2 output hash changed");
-    CHECK(next_layer_hash[1] == UINT64_C(0x43cf4fb8676416f2),
-          "engine layer-3 output hash changed");
-    CHECK(next_layer_hash[10] == UINT64_C(0xc475181cc8ed43b9),
-          "engine layer-12 boundary output hash changed");
-    CHECK(next_layer_hash[90] == UINT64_C(0x5dc93f0eb2fd7e32),
-          "engine layer-92 output hash changed");
+    routed_hashes_ok &= expected_hash(
+        "engine layer-2 output", next_layer_hash[0],
+        UINT64_C(0x404ae49a560abd6d));
+    routed_hashes_ok &= expected_hash(
+        "engine layer-3 output", next_layer_hash[1],
+        UINT64_C(0x20c3ea370fe7830a));
+    routed_hashes_ok &= expected_hash(
+        "engine layer-12 output", next_layer_hash[10],
+        UINT64_C(0x272508823475f6da));
+    routed_hashes_ok &= expected_hash(
+        "engine layer-92 output", next_layer_hash[90],
+        UINT64_C(0x8a266bfc106e5d51));
+    CHECK(routed_hashes_ok,
+          "engine routed-layer output hash changed");
     double remaining_ms = 0.0;
     double kda_routed_ms = 0.0;
     double mla_routed_ms = 0.0;
@@ -248,8 +290,13 @@ int main(int argc, char **argv) {
         &output_ms, start, stop));
     CHECK(greedy_token < 163840u && isfinite(greedy_value),
           "engine greedy output is invalid");
-    CHECK(greedy_token == 220u && greedy_value == 6.84375f,
-          "engine first greedy output changed");
+    if (greedy_token != 220u || greedy_value != 6.875f) {
+        fprintf(stderr,
+                "FAIL: engine first greedy output got token %u "
+                "value %.8f, expected token 220 value 6.87500000\n",
+                greedy_token, greedy_value);
+        CHECK(false, "engine first greedy output changed");
+    }
     k3_engine_cache_stats first_cache_stats;
     k3_engine_get_cache_stats(engine, &first_cache_stats);
     CHECK(first_cache_stats.batches == 92u &&

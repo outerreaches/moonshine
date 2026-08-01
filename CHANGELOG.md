@@ -5,6 +5,21 @@ Semantic Versioning once its first research-preview tag is published.
 
 ## [Unreleased]
 
+### Added
+
+- Configurable-context full-residency and locked hello fixtures through the
+  `MOONSHINE_CONTEXT` make variable.
+- A payload-free 128K prefill-plan regression and real 128K configured-
+  capacity qualification on the accepted Q8/32 host.
+
+### Changed
+
+- Extend the documented qualified configured-context capacity from 32K to
+  128K. Filled-128K latency and long-context quality remain unqualified.
+- Re-lock the synthetic routed-layer hashes and first-token BF16 score against
+  the current public engine; the public release qualification had covered the
+  locked real-chat fixture but not this imported prototype oracle.
+
 ## [0.1.0-research-preview] - 2026-07-30
 
 First public research preview. Reproduces the native Kimi K3 SafeTensors/ROCm

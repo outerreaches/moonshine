@@ -146,9 +146,12 @@ Ensure approximately 120 GiB is available and swap has not begun growing:
 ```sh
 free -h
 make test-engine-init MOONSHINE_MODEL="$MOONSHINE_MODEL"
+make test-engine-init \
+  MOONSHINE_MODEL="$MOONSHINE_MODEL" \
+  MOONSHINE_CONTEXT=131072
 ```
 
-Expected ledger:
+Expected default 8K ledger:
 
 ```text
 resident static: 59,345,729,536 bytes
@@ -157,6 +160,12 @@ runtime state:      987,758,592 bytes
 staging:            280,821,760 bytes
 ```
 
+At 128K, runtime state is 4,455,923,712 bytes (4.150 GiB), and the
+static/cache/state/staging ledger totals 115,741,620,224 bytes (107.793 GiB)
+before allocator and driver overhead. Start with at least 120 GiB
+`MemAvailable`, stop other large model processes and storage transfers, and
+confirm that swap is not actively growing.
+
 The test also runs and hashes every layer. A preflight refusal is a safe
 failure. Do not bypass it or retry BF16 residency on a 128 GB host.
 
@@ -164,11 +173,18 @@ failure. Do not bypass it or retry BF16 residency on a 128 GB host.
 
 ```sh
 make test-engine-hello MOONSHINE_MODEL="$MOONSHINE_MODEL"
+make test-engine-hello \
+  MOONSHINE_MODEL="$MOONSHINE_MODEL" \
+  MOONSHINE_CONTEXT=131072
 ```
 
 The fixture embeds a tokenizer-verified rendering of `Say hello.`, walks the
 complete graph, verifies the expected token sequence, and reports startup,
 prompt, decode, and cache statistics.
+
+The 128K fixture qualifies configured capacity with a short locked request.
+It does not fill the context, measure filled-128K prefill, or establish
+long-context quality.
 
 ## 10. Run native chat
 
@@ -203,13 +219,13 @@ make test-chat-hello MOONSHINE_MODEL="$MOONSHINE_MODEL"
 
 ## 11. Run the OpenAI-compatible server
 
-Start a loopback-only 32K service:
+Start a loopback-only 128K-capacity service:
 
 ```sh
 ./moonshine-server "$MOONSHINE_MODEL" \
   --host 127.0.0.1 \
   --port 8080 \
-  --context 32768
+  --context 131072
 ```
 
 Verify discovery:

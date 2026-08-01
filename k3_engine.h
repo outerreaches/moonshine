@@ -89,6 +89,8 @@ typedef enum {
  * Create the single-node K3 decode residency. The model advertises up to
  * 1,048,576 positions; MLA cache and attention workspace scale with context:
  * approximately 27.6 KiB and 576 bytes per configured token, respectively.
+ * The accepted Q8/32 host is configured-capacity qualified through 131,072
+ * positions; filled-context latency and quality are separate qualifications.
  *   - source-precision or streamed/Q8 permanent static weights;
  *   - device-resident per-layer expert cache;
  *   - mapped fixed-registered O_DIRECT staging slots;
