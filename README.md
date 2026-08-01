@@ -55,10 +55,11 @@ state, convolution state, compressed MLA cache, AttnRes state, and routed
 expert-cache contents between tokens.
 
 Prefill is layer-major. A token range visits the routed store once per layer
-in physical shard/offset order and groups all rows selecting each expert. This
-amortizes a roughly 1.447 TB routed sweep over the whole chunk. Cold prefill
-can borrow an explicitly accounted portion of the empty decode cache for
-batch workspace.
+and groups all rows selecting each expert. After routing, it reads only the
+unique selected experts in physical shard/offset order. The payload-free plan
+retains a roughly 1.447 TB full-store ceiling; actual traffic follows the
+per-layer route union. Cold prefill can borrow an explicitly accounted portion
+of the empty decode cache for batch workspace.
 
 See [Architecture](docs/architecture.md) for the full graph, memory, I/O, and
 correctness model.
@@ -76,9 +77,9 @@ They are engineering fixtures, not cross-project benchmark claims.
 | Startup, Q8 static + 32 experts/layer | 38.1 s |
 | Short 24-token sequential prompt | 0.438 tok/s |
 | Post-TTFT greedy decode | 0.509 tok/s |
-| Layer-major prefill, 512 positions | 2.145 tok/s |
-| Layer-major prefill, 8,192 positions | 7.768 tok/s |
-| Diagnostic KDA hipBLAS prefill, 8,192 positions | 10.448 tok/s |
+| Selected layer-major prefill, 512 positions | 4.145 tok/s |
+| Selected layer-major prefill, 8,192 positions | 8.126 tok/s |
+| Historical full-store diagnostic KDA hipBLAS, 8,192 positions | 10.448 tok/s |
 | Causal-state export after 2 positions | 1.043 s |
 | Causal-state import after 2 positions | 0.841 s |
 | Native chat `Say hello.` prompt | 0.439 tok/s |
@@ -102,11 +103,19 @@ They are engineering fixtures, not cross-project benchmark claims.
 | Structured JSON object, 52-token completion | 123.780 s / 0.420 tok/s |
 | Structured JSON Schema, 205-token prompt | 215.865 s / 0.950 tok/s |
 | Structured JSON Schema, 57-token completion | 137.230 s / 0.415 tok/s |
-| Structured continuation, 117 of 354 evaluated | 210.464 s / 0.556 tok/s |
+| Full-store structured continuation, 117 of 354 evaluated | 210.464 s / 0.556 tok/s |
+| Selected structured first turn, 184 tokens | 129.058 s / 1.426 tok/s |
+| Selected structured continuation, 117 of 354 evaluated | 104.469 s / 1.120 tok/s |
 | Official Python SDK tool prompt, 216 tokens | 216.773 s / 0.996 tok/s |
 | Official Python SDK tool call, 72 tokens | 185.008 s / 0.389 tok/s |
 
 The default range path matches the locked sequential state oracle exactly.
+Selected-only routed reads reduce the exact two-token range from 203.638 to
+7.961 seconds and the locked 512-token range from 239.325 to 123.519 seconds.
+The representative 117-token structured continuation drops from 211.473 to
+104.469 seconds while preserving its complete 237-token causal prefix and
+validated output. Filled 8K remains exact and improves from 1,054.547 to
+1,008.104 seconds while avoiding 30.2% of full-store reads.
 The faster KDA dequantize-plus-hipBLAS path preserves the tested greedy token
 but changes selected values and causal-state hashes because its BF16 reduction
 order differs. It remains diagnostic and opt-in pending broader quality tests.
@@ -205,10 +214,9 @@ Stop every other large model process first, then run:
 Enter one user message per line. The engine stays resident and retains causal
 and expert-cache state across turns. Short prompts use token-major execution
 through 92 tokens; prompts of 93 tokens or more use layer-major prefill. The
-92.4-token crossover is derived from the measured
-`n / 0.440 tok/s` sequential cost and
-`203.638 s + 0.0682 s/token` layer-major cost rather than an arbitrary round
-number.
+92-token boundary is the prior conservative full-sweep crossover. Selected-
+expert prefill materially lowers range cost, so a new matched crossover sweep
+is pending before lowering the production threshold.
 
 One-shot mode writes response text to stdout and telemetry to stderr:
 
@@ -379,10 +387,11 @@ In a two-turn JSON Schema continuation, Moonshine reconstructed the prior
 schema directive and reused all 237 retained prompt/generated tokens. It
 evaluated only the 117-token suffix of the 354-token second prompt and returned
 validated `{"greeting":"goodbye"}`. That suffix still exceeds the measured
-93-token layer-major crossover, so it required a full routed sweep and 210.464
-seconds of prefill. Exact reuse removes history-length growth, but structured
-directive size keeps compact schema turns above the low-latency token-major
-regime.
+93-token layer-major threshold. Selected-only routed I/O reduced its prefill
+from the paired 211.473-second full-store baseline to 104.469 seconds while
+preserving exact causal reuse and output. Exact reuse removes history-length
+growth; route-union service removes the unused-expert tax from the remaining
+suffix.
 
 Set `MOONSHINE_API_KEY` or pass `--api-key` to require bearer authentication.
 The server refuses a non-loopback bind without a key. It accepts text-only

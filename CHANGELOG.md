@@ -46,6 +46,14 @@ Semantic Versioning once its first research-preview tag is published.
 - A two-turn live schema qualification that reused all 237 retained tokens,
   evaluated only the 117-token suffix, and returned validated
   `{"greeting":"goodbye"}`.
+- Physical-order selected-expert range prefill with exact dynamic request/byte
+  ledgers and per-layer route-union telemetry.
+- Exact selected-prefill gates reducing the two-token range from 203.638 to
+  7.961 seconds and the locked 512-token range from 239.325 to 123.519 seconds.
+- A paired live structured continuation whose 117-token prefill fell from
+  211.473 to 104.469 seconds while retaining all 237 prior causal tokens.
+- A filled-8K exact-output gate at 1,008.104 seconds / 8.126 tok/s, with 30.2%
+  fewer reads than the full-store ceiling and no dense-routing regression.
 
 ### Changed
 
@@ -59,6 +67,8 @@ Semantic Versioning once its first research-preview tag is published.
 - Preserve the exact mismatch/full-prefill gate while allowing session-local
   tool-result and structured-response turns to continue the actual hidden-
   directive causal history.
+- Treat payload-free routed I/O totals as validated full-store ceilings;
+  runtime now reads and exactly accounts only each layer's routed union.
 - Reject required-tool generations that exhaust their token budget without
   producing a call instead of returning an unsatisfied length-stopped turn.
 

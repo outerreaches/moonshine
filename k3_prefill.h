@@ -31,6 +31,7 @@ typedef struct {
     uint32_t context_remaining;
     uint32_t routed_layers;
     uint32_t routed_layer_sweeps;
+    /* Full-store ceilings; actual routed reads depend on router unions. */
     uint32_t expert_read_requests;
     uint32_t shard_segments;
 
@@ -46,6 +47,7 @@ typedef struct {
     uint64_t incremental_workspace_bytes;
     uint64_t mla_append_bytes;
 
+    /* Full-store ceilings; runtime selected-union totals are in engine stats. */
     uint64_t routed_layer_payload_bytes;
     uint64_t routed_store_payload_bytes;
     uint64_t routed_store_requested_read_bytes;
@@ -64,8 +66,10 @@ typedef struct {
  * Build a payload-free memory and I/O plan for one layer-major K3 chunk.
  *
  * This validates every routed expert's six-tensor physical span while
- * deriving the exact logical payload, O_DIRECT request bytes, sweep count,
- * per-token workspace, MLA cache growth, and cache-lease ownership.
+ * deriving full-store I/O ceilings, the exact sweep count, per-token
+ * workspace, MLA cache growth, and cache-lease ownership. Runtime reads only
+ * the physical-order union selected by each layer and reports its exact
+ * dynamic request/byte ledger in k3_engine_prefill_stats.
  */
 bool k3_prefill_plan_build(
         const k3_st_model       *model,

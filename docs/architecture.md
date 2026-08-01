@@ -296,14 +296,22 @@ executes one layer across the range before advancing:
 
 1. batch the attention and router projections;
 2. invert top-16 routes into expert-to-token lists;
-3. visit all experts in physical `(shard, offset)` order;
+3. visit only the unique selected experts in physical `(shard, offset)` order;
 4. run one expert for all rows that selected it;
 5. complete the shared/routed MoE tail;
 6. advance to the next layer.
 
-A 512- or 8,192-token chunk therefore performs the same 92 routed-layer sweeps
-and 82,432 expert reads, totaling 1,446,793,422,960 logical bytes. The fixed
-sweep is amortized across the range.
+Every chunk performs 92 routed-layer sweeps. The payload-free plan validates
+all 82,432 expert spans and treats 1,446,793,422,960 physical bytes as the
+full-store ceiling because routes do not exist until execution. Runtime
+compacts each layer's sorted layout to the actual route union, submits one
+read per unique expert, and checks that dynamic request/byte ledger exactly.
+The locked 512-token fixture selected 234–611 experts per layer, averaging
+385.9, and reduced traffic to 623,090,706,040 bytes across 35,501 reads.
+At filled 8K the union became denser but still averaged only 625.3 experts per
+layer (262–876), reducing traffic to 1,009,747,090,312 bytes across 57,531
+reads. Its locked token/value stayed exact and wall time improved from
+1,054.547 to 1,008.104 seconds.
 
 Cold prefill may borrow a precisely planned slice of the empty 48.111 GiB
 decode cache for workspace. Warm continuation must retain the useful cache and

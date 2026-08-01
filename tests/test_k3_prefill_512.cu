@@ -27,7 +27,7 @@
         }                                                                   \
     } while (0)
 
-static const uint64_t K3_ROUTED_PHYSICAL_BYTES =
+static const uint64_t K3_ROUTED_PHYSICAL_BYTES_CEILING =
     UINT64_C(1446793422960);
 
 int main(int argc, char **argv) {
@@ -125,9 +125,18 @@ int main(int argc, char **argv) {
               "8192-token output changed");
     }
     CHECK(measured.routed_layer_sweeps == 92u &&
-          measured.expert_read_requests == 82432u &&
-          measured.routed_physical_read_bytes ==
-              K3_ROUTED_PHYSICAL_BYTES,
+          measured.expert_read_requests ==
+              measured.unique_experts_across_layers &&
+          measured.expert_read_requests > 0u &&
+          measured.expert_read_requests <= 82432u &&
+          measured.selected_expert_routes ==
+              (uint64_t)92u * token_count * 16u &&
+          measured.routed_physical_read_bytes > 0u &&
+          measured.routed_physical_read_bytes <=
+              K3_ROUTED_PHYSICAL_BYTES_CEILING &&
+          (token_count > 512u ||
+           measured.routed_physical_read_bytes <
+               K3_ROUTED_PHYSICAL_BYTES_CEILING),
           "scale-token runtime I/O ledger");
 
     printf("K3 prefill scale: %u tokens: PASS\n",
@@ -136,10 +145,15 @@ int main(int argc, char **argv) {
            next, value, measured.wall_seconds,
            token_count / measured.wall_seconds);
     printf("  routed reads=%" PRIu64
-           " bytes; sweeps=%u; requests=%u\n",
+           " bytes; sweeps=%u; requests=%u; "
+           "unique=%u/%.1f/%u per layer\n",
            measured.routed_physical_read_bytes,
            measured.routed_layer_sweeps,
-           measured.expert_read_requests);
+           measured.expert_read_requests,
+           measured.min_unique_experts_per_layer,
+           (double)measured.unique_experts_across_layers /
+               measured.routed_layer_sweeps,
+           measured.max_unique_experts_per_layer);
     printf("  workspace/cache loan=%.3f GiB; startup=%.3f s\n",
            plan.batch_workspace_bytes / 1073741824.0,
            startup.startup_seconds);

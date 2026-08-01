@@ -81,7 +81,8 @@ program in DS4. The K3 engine carries forward its measured lessons:
 - plan memory and physical I/O before allocation;
 - keep a persistent, layer-aware online expert cache;
 - make decode and prefill separate schedules;
-- use large layer-major prefill chunks to amortize routed sweeps;
+- use layer-major batches and read only their physical-order selected-expert
+  union, with full-store ceilings retained in the payload-free plan;
 - preserve hot cache state across agentic turns;
 - prioritize exact completed-turn state reuse over repeatedly prefilling the
   same history.

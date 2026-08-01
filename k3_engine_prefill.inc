@@ -1002,6 +1002,19 @@ static bool prefill_stream_routed_layer(
         k3_engine_prefill_stats *stats,
         char *error,
         size_t error_size) {
+    bool selected_experts[K3_ENGINE_EXPERTS] = { false };
+    const uint64_t route_count =
+        (uint64_t)workspace->token_count * K3_ENGINE_TOP_K;
+    for (uint64_t route = 0u; route < route_count; route++) {
+        const uint32_t expert = workspace->route_ids_host[route];
+        if (expert >= K3_ENGINE_EXPERTS) {
+            engine_error(error, error_size,
+                         "layer-%u selected expert %u is invalid",
+                         layer, expert);
+            return false;
+        }
+        selected_experts[expert] = true;
+    }
     k3_prefill_expert_layout layouts[K3_ENGINE_EXPERTS];
     for (uint32_t expert = 0u;
          expert < K3_ENGINE_EXPERTS; expert++) {
@@ -1035,10 +1048,51 @@ static bool prefill_stream_routed_layer(
         }
     }
 
+    uint32_t layout_count = 0u;
+    for (uint32_t index = 0u;
+         index < K3_ENGINE_EXPERTS; index++) {
+        if (selected_experts[layouts[index].expert]) {
+            layouts[layout_count++] = layouts[index];
+        }
+    }
+    if (layout_count == 0u) {
+        engine_error(error, error_size,
+                     "layer-%u prefill selected no experts", layer);
+        return false;
+    }
+    const uint32_t requests_before = stats->expert_read_requests;
+    const uint64_t bytes_before = stats->routed_physical_read_bytes;
+    uint64_t expected_physical_bytes = 0u;
+    for (uint32_t index = 0u; index < layout_count; index++) {
+        const k3_engine_expert_layout *layout =
+            &layouts[index].layout;
+        if (layout->aligned_start >
+            UINT64_MAX - layout->aligned_bytes) {
+            engine_error(error, error_size,
+                         "layer-%u selected request end overflow", layer);
+            return false;
+        }
+        const uint64_t request_end =
+            layout->aligned_start + layout->aligned_bytes;
+        const uint64_t physical_end =
+            request_end > engine->model.shards[layout->shard].file_bytes ?
+                engine->model.shards[layout->shard].file_bytes :
+                request_end;
+        if (physical_end < layout->aligned_start ||
+            expected_physical_bytes >
+                UINT64_MAX - (physical_end - layout->aligned_start)) {
+            engine_error(error, error_size,
+                         "layer-%u selected-read ledger overflow", layer);
+            return false;
+        }
+        expected_physical_bytes +=
+            physical_end - layout->aligned_start;
+    }
+
     uint32_t next = 0u;
     k3_io_request requests[K3_ENGINE_STREAM_QD];
     uint16_t initial = 0u;
-    while (next < K3_ENGINE_EXPERTS &&
+    while (next < layout_count &&
            initial < K3_ENGINE_STREAM_QD) {
         const k3_engine_expert_layout *layout =
             &layouts[next].layout;
@@ -1063,7 +1117,7 @@ static bool prefill_stream_routed_layer(
         subphase_start);
 
     uint32_t completed = 0u;
-    while (completed < K3_ENGINE_EXPERTS) {
+    while (completed < layout_count) {
         k3_io_completion completions[K3_ENGINE_STREAM_QD];
         uint16_t completion_count = 0u;
         clock_gettime(CLOCK_MONOTONIC, &subphase_start);
@@ -1083,7 +1137,7 @@ static bool prefill_stream_routed_layer(
              completion < completion_count; completion++) {
             const uint32_t index =
                 (uint32_t)completions[completion].user_data;
-            if (index >= K3_ENGINE_EXPERTS) {
+            if (index >= layout_count) {
                 engine_error(error, error_size,
                              "layer-%u prefill completion "
                              "index %u is invalid",
@@ -1140,36 +1194,37 @@ static bool prefill_stream_routed_layer(
             prefill_add_host_subphase(
                 &stats->routed_index_seconds,
                 subphase_start);
-            if (selected_count != 0u) {
-                uint8_t *base =
-                    (uint8_t *)engine->
-                        staging_device[buffer] +
-                    (selected->layout.physical_start -
-                     selected->layout.aligned_start);
-                clock_gettime(
-                    CLOCK_MONOTONIC,
-                    &subphase_start);
-                if (!launch_prefill_expert(
-                        engine, workspace, base,
-                        &selected->layout,
-                        selected_count) ||
-                    hipStreamSynchronize(
-                        engine->expert_stream) != hipSuccess) {
-                    engine_error(
-                        error, error_size,
-                        "layer-%u prefill expert %u "
-                        "batch failed",
-                        layer, selected->expert);
-                    abort_prefill_io(engine);
-                    return false;
-                }
-                prefill_add_host_subphase(
-                    &stats->routed_expert_pipeline_seconds,
-                    subphase_start);
+            if (selected_count == 0u) {
+                engine_error(
+                    error, error_size,
+                    "layer-%u selected expert %u has no routes",
+                    layer, selected->expert);
+                abort_prefill_io(engine);
+                return false;
             }
+            uint8_t *base =
+                (uint8_t *)engine->staging_device[buffer] +
+                (selected->layout.physical_start -
+                 selected->layout.aligned_start);
+            clock_gettime(CLOCK_MONOTONIC, &subphase_start);
+            if (!launch_prefill_expert(
+                    engine, workspace, base,
+                    &selected->layout, selected_count) ||
+                hipStreamSynchronize(
+                    engine->expert_stream) != hipSuccess) {
+                engine_error(
+                    error, error_size,
+                    "layer-%u prefill expert %u batch failed",
+                    layer, selected->expert);
+                abort_prefill_io(engine);
+                return false;
+            }
+            prefill_add_host_subphase(
+                &stats->routed_expert_pipeline_seconds,
+                subphase_start);
             completed++;
 
-            if (next < K3_ENGINE_EXPERTS) {
+            if (next < layout_count) {
                 const k3_engine_expert_layout *layout =
                     &layouts[next].layout;
                 refills[refill_count].fd =
@@ -1207,6 +1262,22 @@ static bool prefill_stream_routed_layer(
                      "layer-%u retained prefill reads",
                      layer);
         abort_prefill_io(engine);
+        return false;
+    }
+    if (stats->expert_read_requests - requests_before !=
+            layout_count ||
+        stats->routed_physical_read_bytes - bytes_before !=
+            expected_physical_bytes) {
+        engine_error(
+            error, error_size,
+            "layer-%u selected-read ledger mismatch: "
+            "requests %u/%u bytes %llu/%llu",
+            layer,
+            stats->expert_read_requests - requests_before,
+            layout_count,
+            (unsigned long long)(
+                stats->routed_physical_read_bytes - bytes_before),
+            (unsigned long long)expected_physical_bytes);
         return false;
     }
     return true;
@@ -1417,6 +1488,8 @@ static bool prefill_routed_layer(
                      layer, hipGetErrorString(status));
         return false;
     }
+    bool selected_experts[K3_ENGINE_EXPERTS] = { false };
+    uint32_t unique_experts = 0u;
     for (uint32_t route = 0u;
          route < tokens * K3_ENGINE_TOP_K; route++) {
         if (workspace->route_ids_host[route] >=
@@ -1427,7 +1500,22 @@ static bool prefill_routed_layer(
                          workspace->route_ids_host[route]);
             return false;
         }
+        const uint32_t expert = workspace->route_ids_host[route];
+        if (!selected_experts[expert]) {
+            selected_experts[expert] = true;
+            unique_experts++;
+        }
     }
+    stats->selected_expert_routes +=
+        (uint64_t)tokens * K3_ENGINE_TOP_K;
+    if (stats->unique_experts_across_layers == 0u ||
+        unique_experts < stats->min_unique_experts_per_layer) {
+        stats->min_unique_experts_per_layer = unique_experts;
+    }
+    if (unique_experts > stats->max_unique_experts_per_layer) {
+        stats->max_unique_experts_per_layer = unique_experts;
+    }
+    stats->unique_experts_across_layers += unique_experts;
     clock_gettime(CLOCK_MONOTONIC, &phase_end);
     stats->router_seconds +=
         elapsed_seconds(phase_start, phase_end);
@@ -1698,13 +1786,13 @@ static bool k3_engine_forward_range_impl(
     if (ok &&
         (measured.routed_layer_sweeps !=
              plan.routed_layer_sweeps ||
-         measured.expert_read_requests !=
+         measured.expert_read_requests >
              plan.expert_read_requests ||
-         measured.routed_physical_read_bytes !=
+         measured.routed_physical_read_bytes >
              plan.routed_store_physical_read_bytes)) {
         engine_error(
             error, error_size,
-            "K3 prefill I/O ledger mismatch: "
+            "K3 prefill I/O ceiling violation: "
             "sweeps %u/%u requests %u/%u bytes %llu/%llu",
             measured.routed_layer_sweeps,
             plan.routed_layer_sweeps,

@@ -178,10 +178,15 @@ static void print_turn_stats(const k3_chat_turn_result *result) {
         K3_CHAT_PREFILL_LAYER_MAJOR) {
         fprintf(
             stderr,
-            "[prefill I/O=%" PRIu64 " bytes; sweeps=%u; requests=%u]\n",
+            "[prefill I/O=%" PRIu64 " bytes; sweeps=%u; requests=%u; "
+            "unique experts=%u/%.1f/%u per layer]\n",
             result->range_stats.routed_physical_read_bytes,
             result->range_stats.routed_layer_sweeps,
-            result->range_stats.expert_read_requests);
+            result->range_stats.expert_read_requests,
+            result->range_stats.min_unique_experts_per_layer,
+            (double)result->range_stats.unique_experts_across_layers /
+                result->range_stats.routed_layer_sweeps,
+            result->range_stats.max_unique_experts_per_layer);
     }
 }
 

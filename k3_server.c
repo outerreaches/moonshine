@@ -1146,6 +1146,27 @@ static void log_result(const char *id,
         (unsigned long long)cache_accesses,
         (unsigned long long)result->cache_after.hits,
         (unsigned long long)result->cache_after.accesses);
+    if (result->range_stats.routed_layer_sweeps != 0u) {
+        const double average_unique =
+            (double)result->range_stats.unique_experts_across_layers /
+            result->range_stats.routed_layer_sweeps;
+        fprintf(
+            stderr,
+            "request %s range: unique_experts=%u/%.1f/%u "
+            "routes=%llu read=%.3fGiB read_wait=%.3fs "
+            "expert_pipeline=%.3fs routed=%.3fs\n",
+            id,
+            result->range_stats.min_unique_experts_per_layer,
+            average_unique,
+            result->range_stats.max_unique_experts_per_layer,
+            (unsigned long long)
+                result->range_stats.selected_expert_routes,
+            (double)result->range_stats.routed_physical_read_bytes /
+                (1024.0 * 1024.0 * 1024.0),
+            result->range_stats.routed_read_wait_seconds,
+            result->range_stats.routed_expert_pipeline_seconds,
+            result->range_stats.routed_stream_seconds);
+    }
 }
 
 static void handle_chat_completion(int fd, k3_chat_session *session,

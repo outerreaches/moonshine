@@ -26,7 +26,7 @@
         }                                                                   \
     } while (0)
 
-static const uint64_t K3_ROUTED_PHYSICAL_BYTES =
+static const uint64_t K3_ROUTED_PHYSICAL_BYTES_CEILING =
     UINT64_C(1446793422960);
 
 int main(int argc, char **argv) {
@@ -115,7 +115,7 @@ int main(int argc, char **argv) {
     CHECK(plan.routed_layer_sweeps == 92u &&
           plan.expert_read_requests == 82432u &&
           plan.routed_store_physical_read_bytes ==
-              K3_ROUTED_PHYSICAL_BYTES,
+              K3_ROUTED_PHYSICAL_BYTES_CEILING,
           "range preflight I/O ledger");
 
     uint32_t range_next = 0u;
@@ -170,9 +170,14 @@ int main(int argc, char **argv) {
               "experimental range causal-state digest changed");
     }
     CHECK(measured.routed_layer_sweeps == 92u &&
-          measured.expert_read_requests == 82432u &&
-          measured.routed_physical_read_bytes ==
-              K3_ROUTED_PHYSICAL_BYTES,
+          measured.expert_read_requests ==
+              measured.unique_experts_across_layers &&
+          measured.expert_read_requests >= 92u * 16u &&
+          measured.expert_read_requests <= 92u * 32u &&
+          measured.selected_expert_routes == 92u * 2u * 16u &&
+          measured.routed_physical_read_bytes > 0u &&
+          measured.routed_physical_read_bytes <
+              K3_ROUTED_PHYSICAL_BYTES_CEILING,
           "range runtime I/O ledger");
 
     printf("K3 prefill chunk: 2-token layer-major %s: PASS\n",
@@ -191,10 +196,15 @@ int main(int argc, char **argv) {
                measured.kda_blas_seconds);
     }
     printf("  routed reads=%" PRIu64
-           " bytes; sweeps=%u; requests=%u\n",
+           " bytes; sweeps=%u; requests=%u; "
+           "unique=%u/%.1f/%u per layer\n",
            measured.routed_physical_read_bytes,
            measured.routed_layer_sweeps,
-           measured.expert_read_requests);
+           measured.expert_read_requests,
+           measured.min_unique_experts_per_layer,
+           (double)measured.unique_experts_across_layers /
+               measured.routed_layer_sweeps,
+           measured.max_unique_experts_per_layer);
     printf("  wall=%.3f s (%.4f tok/s); "
            "workspace=%.3f MiB\n",
            measured.wall_seconds,

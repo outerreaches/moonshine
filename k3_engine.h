@@ -39,6 +39,10 @@ typedef struct {
     uint64_t embedding_physical_read_bytes;
     uint32_t routed_layer_sweeps;
     uint32_t expert_read_requests;
+    uint64_t selected_expert_routes;
+    uint64_t unique_experts_across_layers;
+    uint32_t min_unique_experts_per_layer;
+    uint32_t max_unique_experts_per_layer;
     double   layer0_seconds;
     double   attention_seconds;
     double   kda_attention_seconds;

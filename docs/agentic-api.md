@@ -309,14 +309,28 @@ continued the exact returned reasoning/content and requested
 | schema continuation | 354 | 117 | 237 | 210.464 s | 35 | 89.079 s |
 
 The continuation returned validated `{"greeting":"goodbye"}` and retained
-the complete 184-token prompt plus 53-token completion. This proves exact
-causal reconstruction, but it also localizes the next latency boundary: the
-117-token suffix remains above the measured 93-token layer-major crossover.
-It therefore performs one full routed-expert sweep, so its prefill wall time
-is close to the first turn even though history replay was eliminated. Prefix
-recovery prevents latency from growing with the 354-token history; reducing
-structured-turn latency further requires improving the small layer-major
-suffix path or shrinking the current response directive.
+the complete 184-token prompt plus 53-token completion. This proved exact
+causal reconstruction and localized the remaining latency to the layer-major
+routed sweep.
+
+Moonshine then measured the actual router union before changing that schedule.
+The 117-token suffix selected only 230–640 of 896 experts per layer, averaging
+422.9, while the old path still read every expert: 1,347.431 GiB and 172.447
+seconds of read wait. The accepted selected-only path preserves the same
+physical ordering and expert arithmetic but omits layouts with zero routes.
+
+The paired live result is:
+
+| phase | old prefill | selected prefill | old/new reads | result |
+|---|---:|---:|---:|---|
+| first schema turn, 184 tokens | 214.702 s | 129.058 s | 1,347.431 / 777.676 GiB | `greeting=hello` |
+| continued suffix, 117 tokens | 211.473 s | 104.469 s | 1,347.431 / 636.038 GiB | `greeting=goodbye` |
+
+The target continuation is 50.6% faster in prefill and 35.6% faster end to
+end (300.566 to 193.553 seconds, 1.55x), while still reusing all 237 retained
+tokens. The exact two-token range also falls from 203.638 to 7.961 seconds
+with every causal hash unchanged, and the locked 512-token fixture falls from
+239.325 to 123.519 seconds with the same next token and selected value.
 
 ## Non-parallel tool calls
 

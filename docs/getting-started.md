@@ -320,9 +320,9 @@ make test-prefill-kda-blas \
   MOONSHINE_PREFILL_TOKENS=8192
 ```
 
-The 8K tests are long, high-memory runs. The default path took about
-17.6 minutes and the diagnostic path about 13.1 minutes on the qualified
-machine.
+The 8K tests are long, high-memory runs. The selected-expert default path took
+about 16.8 minutes; the historical full-store diagnostic path took about 13.1
+minutes on the qualified machine and needs requalification with selected I/O.
 
 ## 13. Verify exact state persistence
 
