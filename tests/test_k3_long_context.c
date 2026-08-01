@@ -224,6 +224,19 @@ int main(int argc, char **argv) {
         target_prompt = (uint32_t)parsed;
     }
     const uint32_t minimum_prompt = target_prompt - 200u;
+    k3_prefill_projection_backend range_backend =
+        K3_PREFILL_PROJECTION_DEFAULT;
+    const char *backend_text = getenv("MOONSHINE_RETRIEVAL_BACKEND");
+    if (backend_text != NULL && backend_text[0] != '\0') {
+        if (strcmp(backend_text, "kda-blas") != 0) {
+            fprintf(stderr,
+                    "invalid MOONSHINE_RETRIEVAL_BACKEND: %s\n",
+                    backend_text);
+            return 2;
+        }
+        range_backend =
+            K3_PREFILL_PROJECTION_KDA_DEQUANT_BLAS_EXPERIMENT;
+    }
     int result = 1;
     char error[512] = { 0 };
     char *prompt_text = NULL;
@@ -289,10 +302,12 @@ int main(int argc, char **argv) {
               "32K retrieval prompt construction changed");
     }
     printf("K3 long-context retrieval plan: %zu/%u tokens, %u records, "
-           "needles=%u/%u/%u, text=%zu bytes\n",
+           "needles=%u/%u/%u, text=%zu bytes, backend=%s\n",
            tokens.count, target_prompt, low,
            alpha_record, bravo_record, charlie_record,
-           prompt_size);
+           prompt_size,
+           range_backend == K3_PREFILL_PROJECTION_DEFAULT ?
+               "default" : "kda-blas");
     fflush(stdout);
     if (plan_only) {
         result = 0;
@@ -312,6 +327,7 @@ int main(int argc, char **argv) {
         .experts_per_layer = 32u,
         .staging_slots = 16u,
         .q8_projections = true,
+        .range_backend = range_backend,
     };
     CHECK(k3_chat_session_create(
               &session, &config, &engine_stats,

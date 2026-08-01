@@ -378,9 +378,18 @@ The changed reduction order shifts selected values and causal hashes, so it is
 not the default. Promotion does not require impossible bit-identical hashes
 across different reduction orders. It requires paired same-schedule replay
 distributions as a numerical control envelope plus sequence-level natural-text
-and task-quality tests showing no schedule-specific decline. hipBLASLt exposes
-block-scale types but returned no usable native MXFP4/BF16 algorithms on the
-tested `gfx1151` stack.
+and task-quality tests showing no schedule-specific decline.
+
+The first bounded quality gate used a deterministic 472-token, nine-record
+retrieval prompt. The default and two diagnostic runs returned the identical
+`saffron|7319|Nivens` answer with natural stops. The diagnostic runs repeated
+their route/read ledger exactly and reduced prompt time from 186.045 seconds
+to 173.046 and 172.318 seconds. A live OpenAI Python SDK loop also completed a
+required weather call and a causally reused tool-result answer through the
+diagnostic backend. This is sufficient to expose the backend for explicit
+qualification, not to promote it: broader prompts, task suites, and review are
+still required. hipBLASLt exposes block-scale types but returned no usable
+native MXFP4/BF16 algorithms on the tested `gfx1151` stack.
 
 ## Correctness model
 

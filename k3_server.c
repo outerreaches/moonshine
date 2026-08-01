@@ -51,6 +51,7 @@ typedef struct {
     uint16_t    experts;
     uint16_t    staging;
     size_t      max_body;
+    k3_prefill_projection_backend range_backend;
     bool        clear_expert_cache_per_request;
 } server_config;
 
@@ -128,6 +129,7 @@ static void usage(FILE *stream, const char *program) {
         "  --sequential-limit N  Token-major prompt limit (default 7)\n"
         "  --experts N           Resident expert slots per layer (default 32)\n"
         "  --staging N           Expert staging slots (default 16)\n"
+        "  --range-backend NAME  Diagnostic range backend: default|kda-blas\n"
         "  --max-body BYTES      Maximum JSON request body (default 8388608)\n"
         "  --clear-expert-cache-per-request\n"
         "                        Force cold-cache request benchmarks\n"
@@ -178,6 +180,7 @@ static bool parse_args(int argc, char **argv, server_config *config) {
             strcmp(argument, "--sequential-limit") == 0 ||
             strcmp(argument, "--experts") == 0 ||
             strcmp(argument, "--staging") == 0 ||
+            strcmp(argument, "--range-backend") == 0 ||
             strcmp(argument, "--max-body") == 0) {
             if (++i >= argc) {
                 fprintf(stderr, "error: %s needs a value\n", argument);
@@ -220,6 +223,18 @@ static bool parse_args(int argc, char **argv, server_config *config) {
                     return false;
                 }
                 config->staging = (uint16_t)parsed;
+            } else if (strcmp(argument, "--range-backend") == 0) {
+                if (strcmp(value, "default") == 0) {
+                    config->range_backend =
+                        K3_PREFILL_PROJECTION_DEFAULT;
+                } else if (strcmp(value, "kda-blas") == 0) {
+                    config->range_backend =
+                        K3_PREFILL_PROJECTION_KDA_DEQUANT_BLAS_EXPERIMENT;
+                } else {
+                    fprintf(stderr,
+                            "error: invalid range backend %s\n", value);
+                    return false;
+                }
             } else {
                 if (!parse_u32(value, 1024u, UINT32_MAX, &parsed)) {
                     fprintf(stderr, "error: invalid maximum body %s\n", value);
@@ -1449,6 +1464,7 @@ int main(int argc, char **argv) {
         .experts_per_layer = config.experts,
         .staging_slots = config.staging,
         .q8_projections = true,
+        .range_backend = config.range_backend,
     };
     if (!k3_chat_session_create(
             &session, &session_config, &stats,
@@ -1461,14 +1477,16 @@ int main(int argc, char **argv) {
         stderr,
         "ready: http://%s:%u model=%s context=%u load=%.3fs "
         "static=%.3f GiB cache=%.3f GiB state=%.3f GiB "
-        "slot=1 auth=%s\n",
+        "slot=1 auth=%s range_backend=%s\n",
         config.host, config.port, MOONSHINE_MODEL_ID,
         config.context, stats.startup_seconds,
         (double)stats.static_store.resident_bytes /
             (1024.0 * 1024.0 * 1024.0),
         (double)stats.cache_bytes / (1024.0 * 1024.0 * 1024.0),
         (double)stats.state_bytes / (1024.0 * 1024.0 * 1024.0),
-        config.api_key == NULL ? "off" : "on");
+        config.api_key == NULL ? "off" : "on",
+        config.range_backend == K3_PREFILL_PROJECTION_DEFAULT ?
+            "default" : "kda-blas");
 
     char active_session_id[K3_SERVER_MAX_SESSION_ID + 1u] = { 0 };
     while (!stop_requested) {

@@ -417,3 +417,25 @@ swap growth.
 
 The SDK is a qualification-only dependency; Moonshine's engine, server, and
 native client still require no Python runtime.
+
+### Diagnostic KDA backend replay
+
+The same live fixture was repeated with the opt-in range projection backend
+selected by `moonshine-server --range-backend kda-blas`. The default server
+path is unchanged. The diagnostic path uses the same per-layer progress
+callback, so long prefill retains SSE keepalives before the first model token.
+
+| phase | prompt total | evaluated | reused | prefill | generated | decode | finish |
+|---|---:|---:|---:|---:|---:|---:|---|
+| required weather call | 216 | 216 | 0 | 137.073 s | 72 | 184.806 s | `tool_calls` |
+| weather result answer | 330 | 42 | 288 | 55.925 s | 37 | 85.663 s | `stop` |
+
+OpenAI Python SDK 2.52.0 accepted both SSE responses. The first turn exposed
+non-empty reasoning and exactly one `get_weather({"city":"Toronto"})` call;
+the continuation reused all 288 causal tokens, accepted the synthetic
+sunny/22 C result, exposed reasoning, made no extra call, and answered with
+Toronto, sunny, and 22 C. Terminal usage was `216/72/288` then `330/37/367`.
+
+This is a structure and task-quality gate, not a cross-run performance claim.
+The backend changes the floating-point reduction schedule and remains an
+explicit diagnostic pending broader quality evaluation and review.

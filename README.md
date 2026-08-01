@@ -80,6 +80,7 @@ They are engineering fixtures, not cross-project benchmark claims.
 | Selected layer-major prefill, 512 positions | 4.145 tok/s |
 | Selected layer-major prefill, 8,192 positions | 8.126 tok/s |
 | Historical full-store diagnostic KDA hipBLAS, 8,192 positions | 10.448 tok/s |
+| Diagnostic KDA natural retrieval, 472 positions | 2.739 tok/s |
 | Causal-state export after 2 positions | 1.043 s |
 | Causal-state import after 2 positions | 0.841 s |
 | Native chat `Say hello.` prompt | 0.439 tok/s |
@@ -119,9 +120,11 @@ The representative 117-token structured continuation drops from 211.473 to
 104.469 seconds while preserving its complete 237-token causal prefix and
 validated output. Filled 8K remains exact and improves from 1,054.547 to
 1,008.104 seconds while avoiding 30.2% of full-store reads.
-The faster KDA dequantize-plus-hipBLAS path preserves the tested greedy token
-but changes selected values and causal-state hashes because its BF16 reduction
-order differs. It remains diagnostic and opt-in pending broader quality tests.
+The faster KDA dequantize-plus-hipBLAS path changes selected values and causal-
+state hashes because its BF16 reduction order differs. It now passes a paired,
+repeatable 472-token natural-text retrieval gate and a complete official-SDK
+tool loop, but remains diagnostic and opt-in pending review and broader task
+quality tests.
 The complete 128K capacity evidence and its limits are recorded in
 [128K configured-context qualification](docs/qualification-128k.md).
 
@@ -541,6 +544,20 @@ make test-prefill-kda-blas \
   MOONSHINE_PREFILL_TOKENS=8192
 ```
 
+Run the bounded natural-text retrieval gate through that projection backend:
+
+```sh
+make test-long-context-retrieval \
+  MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3 \
+  MOONSHINE_RETRIEVAL_TARGET=512 \
+  MOONSHINE_RETRIEVAL_BACKEND=kda-blas
+```
+
+The same diagnostic can be selected for chat/API qualification with
+`moonshine-server --range-backend kda-blas`. The default remains `default`;
+the option affects multi-token range execution only and retains per-layer SSE
+prefill progress keepalives.
+
 ## Save and restore causal state
 
 The version-1 state file contains KDA recurrent and convolution state,
@@ -574,9 +591,10 @@ Agentic hidden-directive prefix recovery and the real SSE tool wire are also
 qualified locally, along with preserved thinking history and live reasoning
 deltas. Bounded JSON Schema responses and serial non-parallel tool loops are
 also locally qualified. The official Python SDK now consumes reasoning and
-indexed tool-call SSE across a complete two-request loop. Filled-128K workload
-behavior and broader numerical/quality qualification of the faster diagnostic
-KDA backend remain open.
+indexed tool-call SSE across a complete two-request loop. The diagnostic KDA
+backend passes the bounded natural-retrieval and SDK tool-loop gates, but
+promotion and broader task quality remain open. Filled-128K workload behavior
+also remains open.
 
 See [Architecture](docs/architecture.md) for the correctness model and
 [Provenance](docs/provenance.md) for code lineage, references, and

@@ -20,6 +20,7 @@ MOONSHINE_CONTEXT ?= 8192
 MOONSHINE_PREFILL_TOKENS ?= 512
 MOONSHINE_CROSSOVER_TOKENS ?= 2 3 4 6 8 12 16 24 32 42
 MOONSHINE_RETRIEVAL_TARGET ?= 16000
+MOONSHINE_RETRIEVAL_BACKEND ?=
 MOONSHINE_STATE_DIR ?= /tmp
 
 K3_OBJS := \
@@ -291,6 +292,7 @@ test-prefill-crossover: check-model tests/test_k3_prefill_crossover
 
 test-long-context-retrieval: check-model tests/test_k3_long_context
 	MOONSHINE_RETRIEVAL_TARGET="$(MOONSHINE_RETRIEVAL_TARGET)" \
+	MOONSHINE_RETRIEVAL_BACKEND="$(MOONSHINE_RETRIEVAL_BACKEND)" \
 		./tests/test_k3_long_context "$(MOONSHINE_MODEL)"
 
 test-mla-batch-determinism: tests/test_k3_mla_batch_determinism

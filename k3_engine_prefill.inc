@@ -1868,6 +1868,26 @@ extern "C" bool k3_engine_forward_range_with_projection_backend(
         NULL, NULL, error, error_size);
 }
 
+extern "C" bool
+k3_engine_forward_range_with_projection_backend_and_progress(
+        k3_engine *engine,
+        const uint32_t *input_tokens,
+        uint32_t token_count,
+        k3_prefill_projection_backend backend,
+        uint32_t *next_token,
+        float *token_value,
+        k3_engine_prefill_stats *stats,
+        k3_engine_prefill_progress_callback progress_callback,
+        void *progress_data,
+        char *error,
+        size_t error_size) {
+    return k3_engine_forward_range_impl(
+        engine, input_tokens, token_count, backend,
+        next_token, token_value, stats,
+        progress_callback, progress_data,
+        error, error_size);
+}
+
 extern "C" bool k3_engine_forward_range_with_progress(
         k3_engine *engine,
         const uint32_t *input_tokens,

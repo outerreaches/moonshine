@@ -266,6 +266,19 @@ bool k3_engine_forward_range_with_projection_backend(
         char                           *error,
         size_t                          error_size);
 
+bool k3_engine_forward_range_with_projection_backend_and_progress(
+        k3_engine                          *engine,
+        const uint32_t                     *input_tokens,
+        uint32_t                            token_count,
+        k3_prefill_projection_backend       backend,
+        uint32_t                           *next_token,
+        float                              *token_value,
+        k3_engine_prefill_stats            *stats,
+        k3_engine_prefill_progress_callback progress_callback,
+        void                               *progress_data,
+        char                               *error,
+        size_t                              error_size);
+
 /*
  * Return semantic continuation state to the zero-position model state without
  * reloading static weights. When clear_expert_cache is true, forget all routed

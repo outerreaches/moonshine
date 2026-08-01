@@ -27,6 +27,8 @@ typedef struct {
     uint16_t    experts_per_layer;
     uint16_t    staging_slots;
     bool        q8_projections;
+    /* Diagnostic range backend; zero keeps the release/default schedule. */
+    k3_prefill_projection_backend range_backend;
 } k3_chat_session_config;
 
 typedef enum {

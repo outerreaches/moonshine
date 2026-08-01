@@ -25,6 +25,7 @@ struct k3_chat_session {
     char         *system_prompt;
     uint32_t      context;
     uint32_t      sequential_prefill_limit;
+    k3_prefill_projection_backend range_backend;
     uint32_t      position;
     k3_token_buffer retained_tokens;
     k3_tool_choice_marker *historical_tool_choices;
@@ -452,6 +453,15 @@ bool k3_chat_session_create(
         config->sequential_prefill_limit == 0u ?
             K3_CHAT_MEASURED_SEQUENTIAL_LIMIT :
             config->sequential_prefill_limit;
+    if (config->range_backend != K3_PREFILL_PROJECTION_DEFAULT &&
+        config->range_backend !=
+            K3_PREFILL_PROJECTION_KDA_DEQUANT_BLAS_EXPERIMENT) {
+        set_error(error, error_size,
+                  "chat session range backend is invalid");
+        k3_chat_session_destroy(session);
+        return false;
+    }
+    session->range_backend = config->range_backend;
     session->healthy = true;
     if (config->system_prompt != NULL &&
         config->system_prompt[0] != '\0') {
@@ -602,12 +612,24 @@ static bool execute_prompt(
             .callback = progress_callback,
             .data = progress_data,
         };
-        ok = k3_engine_forward_range_with_progress(
-            session->engine, prompt->data,
-            (uint32_t)prompt->count,
-            predicted, &value, &result->range_stats,
-            report_layer_progress, &bridge,
-            error, error_size);
+        if (session->range_backend ==
+            K3_PREFILL_PROJECTION_DEFAULT) {
+            ok = k3_engine_forward_range_with_progress(
+                session->engine, prompt->data,
+                (uint32_t)prompt->count,
+                predicted, &value, &result->range_stats,
+                report_layer_progress, &bridge,
+                error, error_size);
+        } else {
+            ok =
+                k3_engine_forward_range_with_projection_backend_and_progress(
+                session->engine, prompt->data,
+                (uint32_t)prompt->count,
+                session->range_backend,
+                predicted, &value, &result->range_stats,
+                report_layer_progress, &bridge,
+                error, error_size);
+        }
     }
     clock_gettime(CLOCK_MONOTONIC, &end);
     result->prompt_seconds = elapsed_seconds(start, end);
