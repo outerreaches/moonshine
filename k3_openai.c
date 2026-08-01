@@ -1789,11 +1789,13 @@ bool k3_openai_build_chat_response(
         "\"role\":\"assistant\",\"content\":%s%s%s},"
         "\"finish_reason\":\"%s\"}],"
         "\"usage\":{\"prompt_tokens\":%u,"
-        "\"completion_tokens\":%u,\"total_tokens\":%u}}",
+        "\"completion_tokens\":%u,\"total_tokens\":%u,"
+        "\"prompt_tokens_details\":{\"cached_tokens\":%u}}}",
         escaped_id, (long long)created, escaped_model,
         escaped_content, reasoning_fragment, tool_calls_fragment, finish,
         result->prompt_tokens, result->generated_tokens,
-        result->prompt_tokens + result->generated_tokens);
+        result->prompt_tokens + result->generated_tokens,
+        result->prompt_reused_tokens);
     if (required < 0) {
         set_error(error, error_size,
                   "formatting OpenAI response failed");
@@ -1814,11 +1816,13 @@ bool k3_openai_build_chat_response(
         "\"role\":\"assistant\",\"content\":%s%s%s},"
         "\"finish_reason\":\"%s\"}],"
         "\"usage\":{\"prompt_tokens\":%u,"
-        "\"completion_tokens\":%u,\"total_tokens\":%u}}",
+        "\"completion_tokens\":%u,\"total_tokens\":%u,"
+        "\"prompt_tokens_details\":{\"cached_tokens\":%u}}}",
         escaped_id, (long long)created, escaped_model,
         escaped_content, reasoning_fragment, tool_calls_fragment, finish,
         result->prompt_tokens, result->generated_tokens,
-        result->prompt_tokens + result->generated_tokens);
+        result->prompt_tokens + result->generated_tokens,
+        result->prompt_reused_tokens);
     *json = output;
     if (json_size != NULL) {
         *json_size = (size_t)required;

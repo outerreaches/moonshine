@@ -60,15 +60,15 @@ forced trailer count, and committed position. Export/import delegates to the
 exact semantic checkpoint API.
 
 `moonshine-chat` is a thin one-shot or interactive shell over this shared
-layer. `moonshine-server` uses the same layer for Chat Completions. Stateless
-requests zero-reset causal storage while retaining immutable expert-cache
-mappings. Requests carrying the same `X-Moonshine-Session` identifier may
-reuse retained in-process state only when the newly rendered full history is
-an exact token-prefix extension. Historical hidden tool-choice, serial-call,
-and response-format directives are restored at their original message
-boundaries before this comparison so ordinary OpenAI history can continue the
-actual causal stream. Any mismatch resets causal state and prefills the
-canonical full history.
+layer. `moonshine-server` uses the same layer for Chat Completions. It
+automatically compares each newly rendered full history with the one retained
+in-process causal state. An exact token-prefix extension reuses that state;
+any mismatch zero-resets causal storage and prefills the canonical full
+history. Historical hidden tool-choice, serial-call, and response-format
+directives are restored at their original message boundaries before the same
+exact comparison so an ordinary OpenAI client can continue the actual causal
+stream without a custom header. Immutable expert-cache mappings survive both
+paths.
 
 ## OpenAI-compatible transport
 
@@ -81,10 +81,10 @@ The initial server is a deliberately bounded HTTP/1.1 implementation:
 - strict native JSON parsing with an 8 MiB default body limit;
 - ordinary JSON completion responses and incremental SSE chunks;
 - SSE comment keepalives with token/layer prefill progress;
-- opt-in single-session append-prefix reuse through
-  `X-Moonshine-Session`;
+- automatic one-slot append-prefix reuse selected by exact token content;
 - UTF-8 boundary buffering so tokenizer byte fragments never corrupt a stream;
-- standard OpenAI error envelopes and usage accounting;
+- standard OpenAI error envelopes and usage accounting, including cached
+  prompt tokens in `usage.prompt_tokens_details`;
 - OpenAI function tools, parallel call output, matching tool-result history,
   `auto`/`required`/`none`, and forced named-function selection;
 - K3 preserved-thinking history, `low`/`medium`/`high`/`max` effort, and separate

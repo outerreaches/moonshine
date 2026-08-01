@@ -153,25 +153,23 @@ assistant turn, but is not part of the assistant message returned to the
 client. A canonical second request therefore cannot directly extend the
 retained token stream from the first request.
 
-For a continuing `X-Moonshine-Session`, Moonshine now records only the prior
-directive's message boundary and value. On the next request it renders a
-candidate history with that hidden directive restored immediately before the
-assistant message it caused. This recreates the actual causal history while
-the client continues to send an ordinary, complete OpenAI message list.
+Moonshine records only the prior directive's message boundary and value. On
+the next request it renders a candidate history with that hidden directive
+restored immediately before the assistant message it caused. This recreates
+the actual causal history while the client sends an ordinary, complete OpenAI
+message list with no custom session header.
 
 The candidate is accepted only when every retained token is byte-for-byte
 identical and the new prompt has a non-empty suffix. A changed tool schema,
-edited/forked/shorter history, changed session identifier, missing header,
-cold-cache benchmark request, invalid marker, or allocation failure takes the
-existing semantic reset and canonical full-prefill path. No state file or
-approximate matching is involved. Forced named-tool requests also remain
-safe: widening the exposed declaration on the next turn changes the prefix
-and triggers full replay.
+edited/forked/shorter history, cold-cache benchmark request, invalid marker,
+or allocation failure takes the existing semantic reset and canonical
+full-prefill path. No state file or approximate matching is involved. Forced
+named-tool requests also remain safe: widening the exposed declaration on the
+next turn changes the prefix and triggers full replay.
 
 ### Live SSE qualification
 
-The same two-request weather loop was repeated through real SSE with
-`X-Moonshine-Session: agentic-prefix-qualification`:
+The same two-request weather loop was repeated through real SSE:
 
 | phase | actual prompt | evaluated | reused | prompt time | generation | decode |
 |---|---:|---:|---:|---:|---:|---:|

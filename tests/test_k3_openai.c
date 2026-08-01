@@ -271,6 +271,7 @@ int main(void) {
         result.reasoning_content.size + 1u;
     result.thinking = true;
     result.prompt_tokens = 24u;
+    result.prompt_reused_tokens = 10u;
     result.generated_tokens = 18u;
     result.finish_reason = K3_CHAT_FINISH_END_OF_MESSAGE;
     CHECK(k3_openai_build_chat_response(
@@ -322,6 +323,16 @@ int main(void) {
               &total) &&
           total == 42u,
           "usage token count");
+    const int32_t prompt_details = k3_json_object_get(
+        &response_document, usage, "prompt_tokens_details");
+    uint32_t cached = 0u;
+    CHECK(k3_json_u32(
+              &response_document,
+              k3_json_object_get(
+                  &response_document, prompt_details, "cached_tokens"),
+              &cached) &&
+          cached == 10u,
+          "cached prompt token count");
     CHECK(!k3_openai_validate_response_format(
               &request, &result, error, sizeof(error)),
           "non-JSON structured response was accepted");

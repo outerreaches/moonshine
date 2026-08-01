@@ -30,7 +30,6 @@ enum {
     K3_SERVER_MAX_OUTPUT_TOKENS = 65536,
     K3_SERVER_MAX_HEADERS = 64 * 1024,
     K3_SERVER_DEFAULT_MAX_BODY = 8 * 1024 * 1024,
-    K3_SERVER_MAX_SESSION_ID = 128,
     K3_SERVER_KEEPALIVE_SECONDS = 10,
 };
 
@@ -40,7 +39,6 @@ typedef struct {
     char  *body;
     size_t body_size;
     char  *authorization;
-    char  *session_id;
 } http_request;
 
 typedef struct {
@@ -456,28 +454,7 @@ static void http_request_free(http_request *request) {
     }
     free(request->body);
     free(request->authorization);
-    free(request->session_id);
     memset(request, 0, sizeof(*request));
-}
-
-static bool valid_session_id(const char *value) {
-    const size_t size = strlen(value);
-    if (size == 0u || size > K3_SERVER_MAX_SESSION_ID) {
-        return false;
-    }
-    for (size_t i = 0u; i < size; i++) {
-        const unsigned char byte = (unsigned char)value[i];
-        const bool valid =
-            (byte >= 'a' && byte <= 'z') ||
-            (byte >= 'A' && byte <= 'Z') ||
-            (byte >= '0' && byte <= '9') ||
-            byte == '-' || byte == '_' ||
-            byte == '.' || byte == ':';
-        if (!valid) {
-            return false;
-        }
-    }
-    return true;
 }
 
 static char *trim_header_value(char *value) {
@@ -610,26 +587,6 @@ static bool receive_request(int fd, size_t max_body,
                 *http_status = 500;
                 set_error(error, error_size,
                           "allocating authorization header failed");
-                free(headers);
-                return false;
-            }
-        } else if (strcasecmp(
-                       line, "X-Moonshine-Session") == 0) {
-            if (request->session_id != NULL ||
-                !valid_session_id(value)) {
-                set_error(
-                    error, error_size,
-                    "X-Moonshine-Session must be one unique "
-                    "1-128 character identifier using "
-                    "letters, digits, '.', '_', '-', or ':'");
-                free(headers);
-                return false;
-            }
-            request->session_id = strdup(value);
-            if (request->session_id == NULL) {
-                *http_status = 500;
-                set_error(error, error_size,
-                          "allocating session header failed");
                 free(headers);
                 return false;
             }
@@ -1090,11 +1047,13 @@ static void stream_end(stream_state *stream,
             "\"choices\":[{\"index\":0,\"delta\":{},"
             "\"finish_reason\":\"%s\"}],"
             "\"usage\":{\"prompt_tokens\":%u,"
-            "\"completion_tokens\":%u,\"total_tokens\":%u}}",
+            "\"completion_tokens\":%u,\"total_tokens\":%u,"
+            "\"prompt_tokens_details\":{\"cached_tokens\":%u}}}",
             stream->completion_id, (long long)stream->created,
             MOONSHINE_MODEL_ID, finish,
             result->prompt_tokens, result->generated_tokens,
-            result->prompt_tokens + result->generated_tokens);
+            result->prompt_tokens + result->generated_tokens,
+            result->prompt_reused_tokens);
         if (size > 0 && (size_t)size < sizeof(event)) {
             (void)stream_send_event(stream, event, (size_t)size);
         } else {
@@ -1210,8 +1169,7 @@ static void log_result(const char *id,
 
 static void handle_chat_completion(int fd, k3_chat_session *session,
                                    const http_request *http,
-                                   const server_config *config,
-                                   char *active_session_id) {
+                                   const server_config *config) {
     char error[1024];
     k3_openai_chat_request request;
     memset(&request, 0, sizeof(request));
@@ -1237,13 +1195,6 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
     make_completion_id(completion_id, sizeof(completion_id), created);
     k3_chat_turn_result result;
     memset(&result, 0, sizeof(result));
-    const bool reuse_requested =
-        http->session_id != NULL &&
-        active_session_id[0] != '\0' &&
-        strcmp(
-            http->session_id,
-            active_session_id) == 0;
-    active_session_id[0] = '\0';
     bool ok;
     if (request.stream) {
         stream_state stream = {
@@ -1259,7 +1210,7 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
             return;
         }
         const k3_chat_completion_options completion_options = {
-            .reuse_prefix = reuse_requested,
+            .reuse_prefix = true,
             .clear_expert_cache =
                 config->clear_expert_cache_per_request,
             .progress_callback = stream_progress,
@@ -1275,8 +1226,7 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
                 request.tool_count != 0u,
             .response_format = request.response_format,
             .response_schema_json = request.response_schema_json,
-            .preserve_request_directive_history =
-                http->session_id != NULL,
+            .preserve_request_directive_history = true,
         };
         ok = k3_chat_session_complete_messages_with_options(
             session, request.messages, request.message_count,
@@ -1293,11 +1243,6 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
                 &request, &result, error, sizeof(error));
         }
         if (ok) {
-            if (http->session_id != NULL) {
-                memcpy(
-                    active_session_id, http->session_id,
-                    strlen(http->session_id) + 1u);
-            }
             stream_end(&stream, &result);
             log_result(completion_id, &result, true, !stream.failed);
         } else {
@@ -1307,7 +1252,7 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
         }
     } else {
         const k3_chat_completion_options completion_options = {
-            .reuse_prefix = reuse_requested,
+            .reuse_prefix = true,
             .clear_expert_cache =
                 config->clear_expert_cache_per_request,
             .thinking = request.thinking,
@@ -1319,8 +1264,7 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
                 request.tool_count != 0u,
             .response_format = request.response_format,
             .response_schema_json = request.response_schema_json,
-            .preserve_request_directive_history =
-                http->session_id != NULL,
+            .preserve_request_directive_history = true,
         };
         ok = k3_chat_session_complete_messages_with_options(
             session, request.messages, request.message_count,
@@ -1340,11 +1284,6 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
                     completion_id, error);
             (void)send_json_error(fd, 500, error);
         } else {
-            if (http->session_id != NULL) {
-                memcpy(
-                    active_session_id, http->session_id,
-                    strlen(http->session_id) + 1u);
-            }
             char *json = NULL;
             size_t json_size = 0u;
             ok = k3_openai_build_chat_response(
@@ -1381,8 +1320,7 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
 }
 
 static void handle_request(int fd, k3_chat_session *session,
-                           const server_config *config,
-                           char *active_session_id) {
+                           const server_config *config) {
     http_request request;
     int status = 400;
     char error[1024];
@@ -1405,7 +1343,7 @@ static void handle_request(int fd, k3_chat_session *session,
                 "\"engine\":\"" MOONSHINE_NAME "\","
                 "\"version\":\"" MOONSHINE_VERSION "\","
                 "\"expert_cache\":\"persistent\","
-                "\"prefix_reuse\":\"X-Moonshine-Session\","
+                "\"prefix_reuse\":\"automatic_exact_prefix\","
                 "\"context_length\":%u,"
                 "\"max_output_tokens\":%u,"
                 "\"slots\":1}",
@@ -1461,8 +1399,7 @@ static void handle_request(int fd, k3_chat_session *session,
             (void)send_json_error(fd, 405, "method not allowed");
         } else {
             handle_chat_completion(
-                fd, session, &request, config,
-                active_session_id);
+                fd, session, &request, config);
         }
     } else {
         (void)send_json_error(fd, 404, "endpoint not found");
@@ -1538,7 +1475,6 @@ int main(int argc, char **argv) {
         config.range_backend == K3_PREFILL_PROJECTION_DEFAULT ?
             "default" : "kda-blas");
 
-    char active_session_id[K3_SERVER_MAX_SESSION_ID + 1u] = { 0 };
     while (!stop_requested) {
         const int client = accept(listener, NULL, NULL);
         if (client < 0) {
@@ -1550,9 +1486,7 @@ int main(int argc, char **argv) {
             }
             break;
         }
-        handle_request(
-            client, session, &config,
-            active_session_id);
+        handle_request(client, session, &config);
         close(client);
     }
     fprintf(stderr, "shutting down\n");

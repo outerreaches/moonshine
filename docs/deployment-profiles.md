@@ -90,6 +90,10 @@ model:
 
 agent:
   reasoning_effort: medium
+
+auxiliary:
+  title_generation:
+    enabled: false
 ```
 
 `low`, `high`, and `max` are also valid. Restart Hermes after changing the
@@ -108,10 +112,11 @@ HERMES_STREAM_READ_TIMEOUT=1800
 
 These are seconds. Hermes normally raises the stream read timeout for LAN and
 loopback endpoints, but explicit values remove endpoint-detection ambiguity.
-On Sparky, a Hermes turn with its full system/tool prompt exhausted an
-effective 15-minute path before Moonshine produced output. Use at least 1,800
-seconds for both request and stream-read timeouts there; the large framework
-prompt makes this necessary even when the user's visible prompt is short.
+An early test was manually interrupted after 14 minutes 49 seconds while it
+was still inside the API call; Hermes did not log a timeout exception. The
+successful retry finished in 663.7 seconds. Use at least 1,800 seconds for both
+request and stream-read timeouts to leave margin for prompt and decode
+variation even when the user's visible prompt is short.
 For deliberately long 16K/32K prompts, start with 7,200 seconds for both
 values. The qualified filled-32K prefill took about 73 minutes before decode,
 so the ordinary 30-minute tier is not sufficient for that workload.
@@ -120,6 +125,26 @@ The timeout only prevents premature client cancellation. It does not change
 Moonshine's single-request slot, model speed, context accounting, or output
 ceiling. Prefer streaming for Hermes so progress keepalives can traverse the
 connection; ordinary JSON responses cannot emit keepalives.
+
+Hermes title generation is a separate non-streaming request with its own
+30-second default timeout. The observed helper made repeated 30-second
+attempts after the successful agent turn and then failed. Do not merely raise
+that timeout while using Moonshine's single request slot: the title prompt is
+not an append-only continuation and replaces the one retained conversation
+prefix. Keep it disabled as above, or configure a separate fast auxiliary
+provider for title generation.
+
+The first successful Hermes/Moonshine integration turn supplied 3,849 input
+tokens—not the estimated 10K--11K—and generated 64 tokens. Moonshine spent
+513.140 seconds on prefill at 7.501 tokens/s and 150.376 seconds on decode at
+0.426 tokens/s; Hermes measured 663.7 seconds end to end. This confirms that
+the 30-minute main-request tier is adequate for this initial prompt while also
+showing why the auxiliary helper's 30-second tier cannot work.
+
+Moonshine selects append-only reuse automatically by exact token content, so
+Hermes does not need a nonstandard request header. Confirm a continuation hit
+through the standard `usage.prompt_tokens_details.cached_tokens` field. A
+zero value means the request did not exactly extend the retained prefix.
 
 ## Client-side failure map
 

@@ -94,6 +94,8 @@ AMD architectures, and not source-precision equivalent.
   covering two independent requests while retaining the CMA-aware memory
   guard; the 32-slot 128K configured-capacity result remains a single-request
   fixture.
+- Standard cached-prefix accounting through
+  `usage.prompt_tokens_details.cached_tokens` in JSON and terminal SSE usage.
 
 ### Changed
 
@@ -116,6 +118,9 @@ AMD architectures, and not source-precision equivalent.
   producing a call instead of returning an unsatisfied length-stopped turn.
 - Make the OpenAI request parser enforce the active server output ceiling
   instead of a transport-global 8K constant.
+- Select the server's one retained causal prefix automatically by exact token
+  content. Standard OpenAI clients no longer need `X-Moonshine-Session`, and
+  hidden tool/structured-output directives are retained for headerless turns.
 
 ### Fixed
 

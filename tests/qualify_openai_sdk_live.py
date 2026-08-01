@@ -15,7 +15,7 @@ def consume_stream(stream):
     content: list[str] = []
     calls: dict[int, dict[str, str]] = {}
     finish_reason: str | None = None
-    usage: tuple[int, int, int] | None = None
+    usage: tuple[int, int, int, int] | None = None
     for chunk in stream:
         choice = chunk.choices[0]
         piece = getattr(choice.delta, "reasoning_content", None)
@@ -37,10 +37,13 @@ def consume_stream(stream):
         if choice.finish_reason is not None:
             finish_reason = choice.finish_reason
         if chunk.usage is not None:
+            details = chunk.usage.prompt_tokens_details
             usage = (
                 chunk.usage.prompt_tokens,
                 chunk.usage.completion_tokens,
                 chunk.usage.total_tokens,
+                0 if details is None or details.cached_tokens is None
+                else details.cached_tokens,
             )
     if usage is None or usage[2] != usage[0] + usage[1]:
         raise AssertionError(f"invalid terminal usage {usage!r}")
@@ -75,7 +78,6 @@ def main() -> None:
             },
         },
     }]
-    headers = {"X-Moonshine-Session": "openai-sdk-live-qualification"}
     first_stream = client.chat.completions.create(
         model="moonshine",
         messages=messages,
@@ -84,7 +86,6 @@ def main() -> None:
         reasoning_effort="low",
         max_completion_tokens=192,
         stream=True,
-        extra_headers=headers,
     )
     reasoning, content, calls, finish_reason, first_usage = consume_stream(
         first_stream
@@ -133,7 +134,6 @@ def main() -> None:
         reasoning_effort="low",
         max_completion_tokens=192,
         stream=True,
-        extra_headers=headers,
     )
     second_reasoning, answer, second_calls, second_finish, second_usage = (
         consume_stream(second_stream)
@@ -144,6 +144,12 @@ def main() -> None:
         )
     if not second_reasoning:
         raise AssertionError("result turn omitted reasoning_content")
+    if first_usage[3] != 0 or second_usage[3] == 0:
+        raise AssertionError(
+            "automatic exact-prefix reuse was not reported through "
+            f"usage.prompt_tokens_details.cached_tokens: "
+            f"{first_usage[3]} -> {second_usage[3]}"
+        )
     answer_lower = answer.lower()
     if not all(piece in answer_lower for piece in ("toronto", "sunny", "22")):
         raise AssertionError(f"unexpected result answer {answer!r}")
@@ -151,7 +157,8 @@ def main() -> None:
         "OpenAI Python SDK live Moonshine tool loop: PASS "
         f"(openai {openai.__version__}, "
         f"usage={first_usage[0]}/{first_usage[1]}/{first_usage[2]} -> "
-        f"{second_usage[0]}/{second_usage[1]}/{second_usage[2]})"
+        f"{second_usage[0]}/{second_usage[1]}/{second_usage[2]}, "
+        f"cached={first_usage[3]}->{second_usage[3]})"
     )
 
 

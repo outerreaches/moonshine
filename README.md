@@ -289,20 +289,16 @@ Use a larger qualified context without changing the weight residency:
 
 The server keeps one Q8 engine resident, defaults to 32 expert-cache slots per
 layer, and processes one request at a time.
-Requests are semantically stateless by default: the engine zero-resets causal
-state and renders the complete supplied text history. It preserves the routed
-expert cache across requests because the cache contains immutable model
-weights, not conversation state.
-
-Append-only prefix reuse is opt-in through `X-Moonshine-Session`. The server
-retains one completed session—the most recently successful identifier—and
-reuses its in-process causal state only when the next rendered history is an
-exact token-prefix extension. Edited, forked, shorter, mismatched, missing, or
-different-session histories fall back to an isolated semantic reset and full
-prefill. Moonshine restores prior hidden tool-choice, serial-call, and
+Every request still supplies and renders the complete OpenAI message history.
+The server retains causal state from the most recently completed request and
+automatically reuses it when the next rendered history is an exact token-prefix
+extension. No custom session header is required. Edited, forked, shorter, or
+otherwise mismatched histories fall back to an isolated semantic reset and
+full prefill. Moonshine restores prior hidden tool-choice, serial-call, and
 structured-response directives at their original message boundaries before
-applying the same exact token-prefix gate. Clients must still send the complete
-OpenAI message history.
+applying the same exact token-prefix gate. The routed expert cache remains
+persistent across both paths because it contains immutable model weights, not
+conversation state.
 
 Start a loopback-only 128K-capacity service:
 
@@ -384,8 +380,10 @@ Hermes Agent's generic custom-provider defaults (`max_tokens: 65536` and
 profile. A running server built before this change still advertises and
 enforces 32,768 and rejects `medium`; lower-context profiles also require a
 smaller Hermes output cap. Always use the discovered server limits and extend
-API/read timeouts to at least 30 minutes: Hermes's full system/tool prompt can
-exhaust a 15-minute path before first output. Copy-pasteable
+API/read timeouts to at least 30 minutes. Disable Hermes's automatic title
+generation or route it to a separate fast model: its independent 30-second
+timeout and retries are unsuitable for Moonshine's one slow request slot and
+the divergent prompt replaces the one retained causal prefix. Copy-pasteable
 8K, 16K, 32K, and persistent-128K profiles are in [Deployment profiles and
 Hermes Agent](docs/deployment-profiles.md).
 
@@ -433,17 +431,17 @@ responses send spec-legal SSE comment keepalives during prefill, with token or
 layer progress throttled to ten seconds and emitted at completed-unit
 boundaries. Ordinary JSON responses cannot send keepalives.
 
-To reuse an append-only conversation, send the same identifier on consecutive
-requests:
+Append-only reuse is automatic; send each turn with the complete history:
 
 ```sh
 curl --max-time 0 http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -H 'X-Moonshine-Session: agent-1' \
   --data-binary @request-with-complete-history.json
 ```
 
-Non-streaming responses report evaluated and reused prompt tokens in
+All responses report reused prompt tokens through the standard
+`usage.prompt_tokens_details.cached_tokens` field. Non-streaming responses
+also report evaluated and reused prompt tokens in
 `X-Moonshine-Prompt-Evaluated-Tokens` and
 `X-Moonshine-Prompt-Reused-Tokens`. SSE streams report the same values in a
 final comment. Use `--clear-expert-cache-per-request` only for explicit cold

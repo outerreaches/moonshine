@@ -279,11 +279,11 @@ accordingly; use `curl --max-time 0` for manual checks. Streaming requests emit
 SSE comment keepalives with token/layer progress during prefill.
 
 The server preserves immutable expert-cache mappings between requests.
-Append-only causal-state reuse is opt-in: send the same
-`X-Moonshine-Session` value with consecutive requests and keep supplying the
-complete OpenAI message history. Only the most recently completed session is
-resident. An exact token-prefix extension reuses prior state; any mismatch or
-different identifier performs a semantic reset and full prefill.
+Append-only causal-state reuse is automatic while the next request extends the
+one retained exact token prefix. Keep supplying the complete OpenAI message
+history; no custom session header is needed. A mismatch performs a semantic
+reset and full prefill. Read the standard
+`usage.prompt_tokens_details.cached_tokens` value to confirm reuse.
 
 Use `--clear-expert-cache-per-request` only to reproduce cold-cache
 benchmarks.
@@ -312,9 +312,13 @@ For Hermes Agent against the 128K/64K 0.2.0 profile, set
 and smaller server profiles require a lower output cap; confirm the effective
 limits through discovery before testing. Use `HERMES_API_TIMEOUT` and
 `HERMES_STREAM_READ_TIMEOUT` of at least 1,800 seconds for ordinary agentic
-use. Hermes's full system/tool prompt can make prefill exceed a 15-minute
-effective timeout even when the visible user prompt is short. Begin at 7,200
-seconds for deliberately long 16K/32K prompts. The
+use. The qualified first Hermes turn took 663.7 seconds end to end, and an
+earlier attempt was still inside the API call when manually interrupted after
+14 minutes 49 seconds. Begin at 7,200 seconds for deliberately long 16K/32K
+prompts. Disable Hermes automatic title
+generation or send it to a separate fast auxiliary model so its independent
+30-second request path does not occupy Moonshine's only slot or replace the
+retained conversation prefix. The
 complete example and failure map are in [Deployment profiles and Hermes
 Agent](deployment-profiles.md).
 

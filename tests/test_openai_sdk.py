@@ -27,8 +27,8 @@ class MoonshineFixtureHandler(BaseHTTPRequestHandler):
             type(self).request_json = json.loads(self.rfile.read(size))
             if self.headers.get("Authorization") != "Bearer local-test":
                 raise AssertionError("SDK bearer authorization is missing")
-            if self.headers.get("X-Moonshine-Session") != "sdk-fixture":
-                raise AssertionError("Moonshine session header is missing")
+            if self.headers.get("X-Moonshine-Session") is not None:
+                raise AssertionError("SDK fixture unexpectedly used a custom session header")
         except Exception as exc:  # report the handler-thread failure in main
             type(self).request_error = str(exc)
             self.send_error(400)
@@ -100,6 +100,7 @@ class MoonshineFixtureHandler(BaseHTTPRequestHandler):
                     "prompt_tokens": 151,
                     "completion_tokens": 45,
                     "total_tokens": 196,
+                    "prompt_tokens_details": {"cached_tokens": 127},
                 },
             },
         ]
@@ -152,12 +153,12 @@ def main() -> None:
             reasoning_effort="medium",
             max_completion_tokens=64,
             stream=True,
-            extra_headers={"X-Moonshine-Session": "sdk-fixture"},
         )
         reasoning: list[str] = []
         calls: list[object] = []
         finish_reason: str | None = None
         usage_total: int | None = None
+        cached_tokens: int | None = None
         for chunk in stream:
             choice = chunk.choices[0]
             piece = getattr(choice.delta, "reasoning_content", None)
@@ -169,6 +170,8 @@ def main() -> None:
                 finish_reason = choice.finish_reason
             if chunk.usage is not None:
                 usage_total = chunk.usage.total_tokens
+                details = chunk.usage.prompt_tokens_details
+                cached_tokens = None if details is None else details.cached_tokens
 
         if MoonshineFixtureHandler.request_error is not None:
             raise AssertionError(MoonshineFixtureHandler.request_error)
@@ -193,7 +196,11 @@ def main() -> None:
             or call.function.arguments != '{"city":"Toronto"}'
         ):
             raise AssertionError(f"unexpected SDK tool call {call!r}")
-        if finish_reason != "tool_calls" or usage_total != 196:
+        if (
+            finish_reason != "tool_calls"
+            or usage_total != 196
+            or cached_tokens != 127
+        ):
             raise AssertionError("terminal chunk or usage was not preserved")
         print(
             "OpenAI Python SDK Moonshine SSE fixture: PASS "
