@@ -270,6 +270,24 @@ in [Agentic API and tool use](agentic-api.md). Unsupported keywords fail
 before inference. Structured SSE response content arrives only after complete
 validation; reasoning still streams live.
 
+To qualify client compatibility without loading K3, install the pinned
+official Python SDK into an isolated environment and run the replay fixture:
+
+```sh
+python3 -m venv .venv-sdk
+.venv-sdk/bin/python -m pip install -r tests/requirements-sdk.txt
+make test-openai-sdk PYTHON=.venv-sdk/bin/python
+```
+
+With an 8K server already listening on port 18084, the optional real-model
+gate is:
+
+```sh
+.venv-sdk/bin/python tests/qualify_openai_sdk_live.py
+```
+
+Neither command is part of the native runtime dependency set.
+
 ## 12. Run prefill fixtures
 
 Exact sequential/range comparison:

@@ -3,6 +3,7 @@ AR ?= ar
 HIPCC ?= $(shell command -v hipcc 2>/dev/null || echo /opt/rocm/bin/hipcc)
 ROCM_HOME ?= /opt/rocm
 ROCM_ARCH ?= gfx1151
+PYTHON ?= python3
 
 CFLAGS ?= -O3 -ffast-math -g -fno-finite-math-only -march=native \
 	-Wall -Wextra -std=c99 -D_GNU_SOURCE
@@ -77,7 +78,8 @@ ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS)
 .PHONY: all help tests test test-cpu check-model \
 	test-model-layout test-model-components test-engine-init \
 	test-engine-hello test-chat-hello test-state-checkpoint test-tokenizer \
-	test-prefill-2 test-prefill-scale test-prefill-kda-blas clean
+	test-prefill-2 test-prefill-scale test-prefill-kda-blas \
+	test-openai-sdk clean
 
 all: libmoonshine.a moonshine-chat moonshine-server
 
@@ -89,6 +91,7 @@ help:
 	@echo "  make tests                   Build every test binary"
 	@echo "  make test-cpu                Run portable tests without ROCm or weights"
 	@echo "  make test                    Run model-free CPU/ROCm tests"
+	@echo "  make test-openai-sdk         Run the optional official Python SDK SSE fixture"
 	@echo "  make test-model-layout MOONSHINE_MODEL=/path/to/Kimi-K3"
 	@echo "                               Validate the pinned 96-shard layout and plan"
 	@echo "  make test-model-components MOONSHINE_MODEL=/path/to/Kimi-K3"
@@ -193,6 +196,11 @@ test: \
 	./tests/test_k3_kda_recurrent
 	./tests/test_k3_mla_decode
 	./tests/test_k3_prefill_ops
+
+test-openai-sdk:
+	@$(PYTHON) -c 'import openai' 2>/dev/null || \
+		{ echo "error: install tests/requirements-sdk.txt in an isolated environment"; exit 2; }
+	$(PYTHON) tests/test_openai_sdk.py
 
 check-model:
 	@test -n "$(MOONSHINE_MODEL)" || \

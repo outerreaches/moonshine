@@ -39,6 +39,8 @@ Semantic Versioning once its first research-preview tag is published.
 - A three-turn serial tool qualification that called weather and time one at
   a time, reused 496 then 690 causal tokens, and produced a final combined
   answer.
+- A pinned official OpenAI Python SDK 2.52.0 SSE replay fixture plus a live
+  8K tool-call qualification against Moonshine.
 
 ### Changed
 

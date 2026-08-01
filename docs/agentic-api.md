@@ -325,5 +325,26 @@ without a call. The normal 256-token default completed the call. This is also
 a latency finding: conflicting multi-operation prompts can spend substantial
 reasoning tokens deciding call order even at low effort.
 
-The next agentic gate is an SDK-level fixture for live reasoning and indexed
-tool-call SSE.
+## Official Python SDK qualification
+
+The optional `test-openai-sdk` target pins the official Python client at
+2.52.0 in an isolated environment. Its local HTTP fixture replays Moonshine's
+exact SSE shape and proves that the client:
+
+- ignores Moonshine comment keepalives;
+- preserves the extension `delta.reasoning_content` field;
+- parses the complete indexed function call, opaque ID, name, and arguments;
+- preserves `finish_reason=tool_calls` and terminal usage;
+- transmits `parallel_tool_calls=false` and the session header.
+
+The real-model gate then connected the same SDK directly to an 8K Moonshine
+server. It exposed non-empty reasoning, parsed
+`get_weather({"city":"Toronto"})`, preserved its generated call ID and
+terminal usage, and completed with `tool_calls`:
+
+| prompt | prompt time/rate | generation | decode time/rate | usage |
+|---:|---:|---:|---:|---:|
+| 216 | 216.773 s / 0.996 t/s | 72 | 185.008 s / 0.389 t/s | 216/72/288 |
+
+The SDK is a qualification-only dependency; Moonshine's engine, server, and
+native client still require no Python runtime.

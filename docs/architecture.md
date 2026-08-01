@@ -87,6 +87,8 @@ The initial server is a deliberately bounded HTTP/1.1 implementation:
   reasoning/content fields in JSON and SSE;
 - native `json_object` and bounded `json_schema` response directives with
   validated, deferred SSE content;
+- an optional official Python SDK fixture for keepalives, reasoning
+  extensions, indexed function calls, usage, and stream termination;
 - fixed greedy execution, with unsupported schema vocabulary rejected before
   inference and non-parallel tool calls hard-checked after parsing.
 

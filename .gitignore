@@ -10,6 +10,7 @@ tests/test_k3_*
 !tests/test_k3_*.cu
 __pycache__/
 *.pyc
+.venv-sdk/
 moonshine-pre-public-history-*.bundle
 .DS_Store
 .*.swp

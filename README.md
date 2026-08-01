@@ -100,6 +100,10 @@ They are engineering fixtures, not cross-project benchmark claims.
 | Preserved-thinking continuation, 25 of 152 evaluated | 59.473 s / 0.420 tok/s |
 | Structured JSON object, 149-token prompt | 212.342 s / 0.702 tok/s |
 | Structured JSON object, 52-token completion | 123.780 s / 0.420 tok/s |
+| Structured JSON Schema, 205-token prompt | 215.865 s / 0.950 tok/s |
+| Structured JSON Schema, 57-token completion | 137.230 s / 0.415 tok/s |
+| Official Python SDK tool prompt, 216 tokens | 216.773 s / 0.996 tok/s |
+| Official Python SDK tool call, 72 tokens | 185.008 s / 0.389 tok/s |
 
 The default range path matches the locked sequential state oracle exactly.
 The faster KDA dequantize-plus-hipBLAS path preserves the tested greedy token
@@ -159,6 +163,19 @@ Portable publication CI can run without ROCm or model weights:
 ```sh
 make test-cpu
 ```
+
+The optional SDK wire fixture uses an isolated Python environment and does not
+add Python to Moonshine's build or runtime dependencies:
+
+```sh
+python3 -m venv .venv-sdk
+.venv-sdk/bin/python -m pip install -r tests/requirements-sdk.txt
+make test-openai-sdk PYTHON=.venv-sdk/bin/python
+```
+
+It runs the official OpenAI Python client against a local replay of
+Moonshine's exact SSE wire, including comment keepalives, reasoning deltas,
+indexed function calls, terminal usage, and `[DONE]`.
 
 ## Verify the native tokenizer and XTML renderer
 
