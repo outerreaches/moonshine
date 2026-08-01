@@ -354,6 +354,10 @@ context. A finite output alone is not a qualification: record the exact next
 token/value, complete phase ledger, selected read union, memory/swap counters,
 SSD thermals, and a separate long-context quality probe.
 
+The accepted 16K default gate ends with token `6244`, value `26.875`, and
+7.929 tok/s. See [filled-context qualification](qualification-filled-context.md)
+before attempting the substantially longer 32K arm.
+
 Diagnostic KDA hipBLAS filled-8K test:
 
 ```sh

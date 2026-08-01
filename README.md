@@ -484,6 +484,17 @@ make test-prefill-scale \
   MOONSHINE_PREFILL_TOKENS=512
 ```
 
+| Qualified selected-prefill fixture | Throughput |
+| --- | ---: |
+| Filled 8,192 positions | 8.126 tok/s |
+| Filled 16,384 positions | 7.929 tok/s |
+
+The 16K result retains 97.6% of the 8K throughput while doubling the filled
+prefix. Its routed-weight traffic rises only 4.9%, although attention time
+rises 2.206x and is now the first measured superlinear pressure. See the
+[filled-context qualification](docs/qualification-filled-context.md) for the
+complete phase ledger, host evidence, and the 32K decision boundary.
+
 For the graduated filled-context program, set both values explicitly and run
 16K before 32K:
 
@@ -494,8 +505,8 @@ make test-prefill-scale \
   MOONSHINE_PREFILL_TOKENS=16384
 ```
 
-The maximum tested 8K run takes roughly 13–18 minutes depending on backend.
-The faster backend is diagnostic:
+The accepted selected-expert 16K run took about 34.4 minutes. The historical
+8K full-store backend below is diagnostic:
 
 ```sh
 make test-prefill-kda-blas \

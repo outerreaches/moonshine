@@ -316,6 +316,14 @@ layer (262–876), reducing traffic to 1,009,747,090,312 bytes across 57,531
 reads. Its locked token/value stayed exact and wall time improved from
 1,054.547 to 1,008.104 seconds.
 
+At filled 16K the selected union averaged 656.2 experts per layer (276–889),
+reading 1,059,505,184,536 bytes across 60,366 requests. Wall time was
+2,066.332 seconds / 7.929 token/s with locked token `6244` and value `26.875`.
+Compared with selected 8K, routed expert-pipeline time scales 1.996x, but the
+attention phase scales 2.206x; this is the first measured filled-context
+pressure. The complete evidence and 32K decision boundary are in
+[filled-context qualification](qualification-filled-context.md).
+
 The matched crossover fixture warms the decode cache, then executes the same
 fixed token prefix sequentially and as one selected range on a single
 resident engine. Every point must match the greedy token, float bits, token
