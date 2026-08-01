@@ -21,6 +21,8 @@ typedef struct {
     size_t           message_count;
     uint32_t         max_tokens;
     bool             stream;
+    bool             thinking;
+    char            *reasoning_effort;
     char            *tools_json;
     size_t           tool_count;
     k3_tool_choice   tool_choice;

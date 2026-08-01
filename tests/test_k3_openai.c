@@ -23,11 +23,13 @@ int main(void) {
         "\"messages\":["
         "{\"role\":\"developer\",\"content\":\"Be concise.\"},"
         "{\"role\":\"user\",\"content\":\"First\"},"
-        "{\"role\":\"assistant\",\"content\":\"Done\"},"
+        "{\"role\":\"assistant\",\"reasoning_content\":\"Checked.\","
+        "\"content\":\"Done\"},"
         "{\"role\":\"user\",\"content\":["
         "{\"type\":\"text\",\"text\":\"Say \"},"
         "{\"type\":\"input_text\",\"text\":\"hello 👋\"}]}],"
         "\"max_completion_tokens\":64,"
+        "\"reasoning_effort\":\"low\","
         "\"stream\":true,"
         "\"n\":1,"
         "\"tools\":[]"
@@ -55,7 +57,10 @@ int main(void) {
               request.messages[3].content,
               "Say hello 👋") == 0,
           "content-part concatenation");
-    CHECK(request.max_tokens == 64u && request.stream,
+    CHECK(request.max_tokens == 64u && request.stream &&
+          request.thinking &&
+          strcmp(request.reasoning_effort, "low") == 0 &&
+          strcmp(request.messages[2].reasoning_content, "Checked.") == 0,
           "generation parameters");
 
     static const char agent_request_json[] =
@@ -123,6 +128,14 @@ int main(void) {
           "response allocation");
     result.response.size = strlen(result.response.data);
     result.response.capacity = result.response.size + 1u;
+    result.reasoning_content.data = strdup("I checked readiness.");
+    CHECK(result.reasoning_content.data != NULL,
+          "reasoning allocation");
+    result.reasoning_content.size =
+        strlen(result.reasoning_content.data);
+    result.reasoning_content.capacity =
+        result.reasoning_content.size + 1u;
+    result.thinking = true;
     result.prompt_tokens = 24u;
     result.generated_tokens = 18u;
     result.finish_reason = K3_CHAT_FINISH_END_OF_MESSAGE;
@@ -156,6 +169,15 @@ int main(void) {
           "escaped response content");
     free(content);
     content = NULL;
+    char *reasoning = NULL;
+    CHECK(k3_json_string_dup(
+              &response_document,
+              k3_json_object_get(
+                  &response_document, message, "reasoning_content"),
+              &reasoning, error, sizeof(error)) &&
+          strcmp(reasoning, "I checked readiness.") == 0,
+          "reasoning response content");
+    free(reasoning);
     const int32_t usage = k3_json_object_get(
         &response_document, response_document.root, "usage");
     uint32_t total = 0u;
@@ -241,6 +263,9 @@ int main(void) {
         "{\"role\":\"user\",\"content\":\"x\"}],"
         "\"parallel_tool_calls\":false}",
         "{\"model\":\"moonshine\",\"messages\":["
+        "{\"role\":\"user\",\"content\":\"x\"}],"
+        "\"reasoning_effort\":\"medium\"}",
+        "{\"model\":\"moonshine\",\"messages\":["
         "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":["
         "{\"id\":\"a\",\"type\":\"function\",\"function\":{"
         "\"name\":\"f\",\"arguments\":\"{}\"}}]},"
@@ -264,6 +289,7 @@ int main(void) {
 cleanup:
     k3_json_document_free(&response_document);
     free(response_json);
+    free(result.reasoning_content.data);
     free(result.response.data);
     k3_openai_chat_request_free(&request);
     k3_openai_chat_request_free(&agent_request);

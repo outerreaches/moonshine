@@ -90,6 +90,7 @@ typedef struct {
 } k3_chat_options;
 
 typedef struct {
+    k3_text_buffer reasoning;
     k3_text_buffer response;
     k3_tool_call  *tool_calls;
     size_t         tool_call_count;
@@ -149,12 +150,14 @@ bool k3_tokenizer_encode_chat(k3_tokenizer        *tokenizer,
 
 /*
  * Parse the model-produced suffix after the generation prompt's open
- * <response> tag. Tool arguments are returned as OpenAI JSON object strings.
+ * <think> or <response> tag. Tool arguments are returned as OpenAI JSON
+ * object strings.
  */
 bool k3_tokenizer_parse_assistant_output(
     const k3_tokenizer       *tokenizer,
     const uint32_t           *tokens,
     size_t                    token_count,
+    bool                      thinking,
     k3_assistant_output      *output,
     char                     *error,
     size_t                    error_size);

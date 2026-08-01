@@ -523,9 +523,12 @@ static bool parse_message(
         }
         message->name = decoded_name;
     }
-    const int32_t reasoning =
-        k3_json_object_get(
-            document, token, "reasoning_content");
+    int32_t reasoning = k3_json_object_get(
+        document, token, "reasoning_content");
+    if (reasoning < 0) {
+        reasoning = k3_json_object_get(
+            document, token, "reasoning");
+    }
     if (reasoning >= 0 &&
         !token_type(document, reasoning, K3_JSON_NULL)) {
         if (message->role != K3_CHAT_ROLE_ASSISTANT) {
@@ -598,6 +601,7 @@ void k3_openai_chat_request_free(
         free(request->messages[i].tool_calls);
     }
     free(request->messages);
+    free(request->reasoning_effort);
     free(request->tools_json);
     free(request->model);
     memset(request, 0, sizeof(*request));
@@ -763,12 +767,20 @@ bool k3_openai_parse_chat_request(
     }
     memset(request, 0, sizeof(*request));
     request->max_tokens = 256u;
+    request->thinking = true;
+    request->reasoning_effort = strdup("max");
+    if (request->reasoning_effort == NULL) {
+        set_error(error, error_size,
+                  "allocating default reasoning effort failed");
+        return false;
+    }
     request->tool_choice = K3_TOOL_CHOICE_AUTO;
     request->parallel_tool_calls = true;
     k3_json_document document;
     if (!k3_json_parse(
             &document, json, json_size,
             error, error_size)) {
+        k3_openai_chat_request_free(request);
         return false;
     }
     bool ok = false;
@@ -843,6 +855,26 @@ bool k3_openai_parse_chat_request(
         set_error(error, error_size,
                   "max tokens must be an integer in [1,8192]");
         goto cleanup;
+    }
+    const int32_t reasoning_effort =
+        k3_json_object_get(
+            &document, document.root, "reasoning_effort");
+    if (reasoning_effort >= 0 &&
+        !token_type(&document, reasoning_effort, K3_JSON_NULL)) {
+        char *decoded_effort = NULL;
+        if (!k3_json_string_dup(
+                &document, reasoning_effort,
+                &decoded_effort, error, error_size) ||
+            (strcmp(decoded_effort, "low") != 0 &&
+             strcmp(decoded_effort, "high") != 0 &&
+             strcmp(decoded_effort, "max") != 0)) {
+            free(decoded_effort);
+            set_error(error, error_size,
+                      "reasoning_effort must be low, high, or max");
+            goto cleanup;
+        }
+        free(request->reasoning_effort);
+        request->reasoning_effort = decoded_effort;
     }
     const int32_t stream =
         k3_json_object_get(
@@ -1079,6 +1111,8 @@ bool k3_openai_build_chat_response(
     char *escaped_id = NULL;
     char *escaped_model = NULL;
     char *escaped_content = NULL;
+    char *escaped_reasoning = NULL;
+    char *reasoning_fragment = NULL;
     char *tool_calls_fragment = NULL;
     bool ok =
         k3_json_escape(
@@ -1092,11 +1126,38 @@ bool k3_openai_build_chat_response(
                 result->response.data,
             result->response.size,
             &escaped_content, NULL, error, error_size) &&
+        (!result->thinking || k3_json_escape(
+            result->reasoning_content.data == NULL ? "" :
+                result->reasoning_content.data,
+            result->reasoning_content.size,
+            &escaped_reasoning, NULL, error, error_size)) &&
         build_tool_calls_fragment(
             completion_id, result, &tool_calls_fragment,
             error, error_size);
     if (!ok) {
         goto cleanup;
+    }
+    if (result->thinking) {
+        const int reasoning_required = snprintf(
+            NULL, 0, ",\"reasoning_content\":%s",
+            escaped_reasoning);
+        reasoning_fragment = reasoning_required < 0 ? NULL :
+            (char *)malloc((size_t)reasoning_required + 1u);
+        if (reasoning_fragment == NULL) {
+            set_error(error, error_size,
+                      "allocating reasoning response field failed");
+            goto cleanup;
+        }
+        snprintf(
+            reasoning_fragment, (size_t)reasoning_required + 1u,
+            ",\"reasoning_content\":%s", escaped_reasoning);
+    } else {
+        reasoning_fragment = strdup("");
+        if (reasoning_fragment == NULL) {
+            set_error(error, error_size,
+                      "allocating empty reasoning response field failed");
+            goto cleanup;
+        }
     }
     if (result->tool_call_count != 0u &&
         result->response.size == 0u) {
@@ -1118,12 +1179,12 @@ bool k3_openai_build_chat_response(
         "\"created\":%lld,\"model\":%s,"
         "\"system_fingerprint\":\"" MOONSHINE_SYSTEM_FINGERPRINT "\","
         "\"choices\":[{\"index\":0,\"message\":{"
-        "\"role\":\"assistant\",\"content\":%s%s},"
+        "\"role\":\"assistant\",\"content\":%s%s%s},"
         "\"finish_reason\":\"%s\"}],"
         "\"usage\":{\"prompt_tokens\":%u,"
         "\"completion_tokens\":%u,\"total_tokens\":%u}}",
         escaped_id, (long long)created, escaped_model,
-        escaped_content, tool_calls_fragment, finish,
+        escaped_content, reasoning_fragment, tool_calls_fragment, finish,
         result->prompt_tokens, result->generated_tokens,
         result->prompt_tokens + result->generated_tokens);
     if (required < 0) {
@@ -1143,12 +1204,12 @@ bool k3_openai_build_chat_response(
         "\"created\":%lld,\"model\":%s,"
         "\"system_fingerprint\":\"" MOONSHINE_SYSTEM_FINGERPRINT "\","
         "\"choices\":[{\"index\":0,\"message\":{"
-        "\"role\":\"assistant\",\"content\":%s%s},"
+        "\"role\":\"assistant\",\"content\":%s%s%s},"
         "\"finish_reason\":\"%s\"}],"
         "\"usage\":{\"prompt_tokens\":%u,"
         "\"completion_tokens\":%u,\"total_tokens\":%u}}",
         escaped_id, (long long)created, escaped_model,
-        escaped_content, tool_calls_fragment, finish,
+        escaped_content, reasoning_fragment, tool_calls_fragment, finish,
         result->prompt_tokens, result->generated_tokens,
         result->prompt_tokens + result->generated_tokens);
     *json = output;
@@ -1158,6 +1219,8 @@ bool k3_openai_build_chat_response(
     ok = true;
 
 cleanup:
+    free(reasoning_fragment);
+    free(escaped_reasoning);
     free(tool_calls_fragment);
     free(escaped_content);
     free(escaped_model);

@@ -21,6 +21,10 @@ Semantic Versioning once its first research-preview tag is published.
   tool-choice directives at their original message boundaries.
 - A real SSE function-loop qualification that reused all 196 retained tokens
   and evaluated only the 42-token tool-result suffix.
+- K3 preserved thinking with `low`/`high`/`max` effort, native reasoning
+  parsing, JSON `reasoning_content`, and live SSE reasoning deltas.
+- A two-turn live reasoning qualification whose continuation reused all 127
+  prior prompt/generated tokens and evaluated only a 25-token suffix.
 
 ### Changed
 

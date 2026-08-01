@@ -46,6 +46,7 @@ typedef enum {
 } k3_chat_prefill_progress_unit;
 
 typedef struct {
+    k3_text_buffer           reasoning_content;
     k3_text_buffer           response;
     k3_tool_call            *tool_calls;
     size_t                   tool_call_count;
@@ -57,6 +58,7 @@ typedef struct {
     uint32_t                 generated_tokens;
     uint32_t                 forced_trailer_tokens;
     uint32_t                 position;
+    bool                     thinking;
     double                   prompt_seconds;
     double                   decode_seconds;
     double                   tokens_per_second;
@@ -94,6 +96,11 @@ typedef struct {
     bool                              clear_expert_cache;
     k3_chat_prefill_progress_callback progress_callback;
     void                             *progress_data;
+    bool                              thinking;
+    const char                       *thinking_effort;
+    /* Optional token-live callback for the generated <think> channel. */
+    k3_chat_text_callback             reasoning_callback;
+    void                             *reasoning_data;
     const char                       *tools_json;
     k3_tool_choice                    tool_choice;
     /* Retain hidden request directives for exact session-history replay. */

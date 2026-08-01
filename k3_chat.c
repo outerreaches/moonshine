@@ -263,17 +263,16 @@ static bool feed_token(k3_chat_session *session,
 
 static size_t trailer_prefix_already_generated(
         const uint32_t *tail,
-        size_t tail_count) {
-    const size_t trailer_count =
-        sizeof(K3_RESPONSE_TRAILER) /
-        sizeof(K3_RESPONSE_TRAILER[0]);
+        size_t tail_count,
+        const uint32_t *trailer,
+        size_t trailer_count) {
     size_t matched = tail_count < trailer_count ?
         tail_count : trailer_count;
     for (;;) {
         if (matched == 0u ||
             memcmp(
                 tail + tail_count - matched,
-                K3_RESPONSE_TRAILER,
+                trailer,
                 matched * sizeof(*tail)) == 0) {
             return matched;
         }
@@ -281,12 +280,10 @@ static size_t trailer_prefix_already_generated(
     }
 }
 
-static void append_tail(uint32_t tail[7],
+static void append_tail(uint32_t *tail,
                         size_t *tail_count,
+                        size_t capacity,
                         uint32_t token) {
-    const size_t capacity =
-        sizeof(K3_RESPONSE_TRAILER) /
-        sizeof(K3_RESPONSE_TRAILER[0]);
     if (*tail_count < capacity) {
         tail[(*tail_count)++] = token;
         return;
@@ -379,6 +376,7 @@ void k3_chat_turn_result_free(k3_chat_turn_result *result) {
     if (result == NULL) {
         return;
     }
+    k3_text_buffer_free(&result->reasoning_content);
     k3_text_buffer_free(&result->response);
     for (size_t i = 0u; i < result->tool_call_count; i++) {
         free((char *)result->tool_calls[i].id);
@@ -495,6 +493,9 @@ static bool execute_encoded_turn(
         uint32_t max_generated_tokens,
         k3_chat_prefill_progress_callback progress_callback,
         void *progress_data,
+        bool thinking,
+        k3_chat_text_callback reasoning_callback,
+        void *reasoning_data,
         k3_chat_text_callback callback,
         void *callback_data,
         k3_chat_turn_result *result,
@@ -502,8 +503,20 @@ static bool execute_encoded_turn(
         size_t error_size) {
     k3_text_buffer token_piece = { 0 };
     k3_token_buffer generated_tokens = { 0 };
+    k3_token_buffer thinking_trailer = { 0 };
     bool ok = true;
     bool mutated = false;
+    if (thinking && !k3_tokenizer_encode(
+            session->tokenizer,
+            "<|close|>think<|sep|><|open|>response<|sep|>"
+            "<|close|>response<|sep|><|close|>message<|sep|>"
+            "<|end_of_msg|>",
+            true, &thinking_trailer, error, error_size)) {
+        ok = false;
+        goto cleanup;
+    }
+    const uint32_t *initial_trailer = thinking ?
+        thinking_trailer.data : K3_RESPONSE_TRAILER;
     if (prompt->count < 2u || prompt->count > UINT32_MAX) {
         set_error(error, error_size,
                   "rendered prompt token count %zu is invalid",
@@ -511,13 +524,33 @@ static bool execute_encoded_turn(
         ok = false;
         goto cleanup;
     }
-    const size_t trailer_count =
+    const size_t response_trailer_count =
         sizeof(K3_RESPONSE_TRAILER) /
         sizeof(K3_RESPONSE_TRAILER[0]);
+    const size_t initial_trailer_count = thinking ?
+        thinking_trailer.count : response_trailer_count;
+    if (thinking &&
+        (initial_trailer_count <= response_trailer_count ||
+         memcmp(
+             thinking_trailer.data + initial_trailer_count -
+                 response_trailer_count,
+             K3_RESPONSE_TRAILER,
+             response_trailer_count *
+                 sizeof(*K3_RESPONSE_TRAILER)) != 0)) {
+        set_error(error, error_size,
+                  "thinking trailer does not end with response closure");
+        ok = false;
+        goto cleanup;
+    }
+    const size_t thinking_transition_count = thinking ?
+        initial_trailer_count - response_trailer_count : 0u;
+    const size_t maximum_trailer_count =
+        initial_trailer_count > response_trailer_count ?
+            initial_trailer_count : response_trailer_count;
     if (session->position > session->context ||
         prompt->count > session->context - session->position ||
         session->context - session->position -
-            (uint32_t)prompt->count <= trailer_count) {
+            (uint32_t)prompt->count <= maximum_trailer_count) {
         set_error(error, error_size,
                   "chat turn does not fit the remaining %u-token context",
                   session->context - session->position);
@@ -526,7 +559,7 @@ static bool execute_encoded_turn(
     }
     uint32_t available =
         session->context - session->position -
-        (uint32_t)prompt->count - (uint32_t)trailer_count;
+        (uint32_t)prompt->count - (uint32_t)maximum_trailer_count;
     uint32_t generation_limit =
         max_generated_tokens < available ?
             max_generated_tokens : available;
@@ -540,7 +573,7 @@ static bool execute_encoded_turn(
     if (!reserve_retained_tokens(
             session,
             prompt->count + (size_t)generation_limit +
-                trailer_count,
+                maximum_trailer_count,
             error, error_size)) {
         ok = false;
         goto cleanup;
@@ -550,6 +583,7 @@ static bool execute_encoded_turn(
     result->prompt_evaluated_tokens =
         (uint32_t)prompt->count;
     result->prompt_reused_tokens = reused_prompt_tokens;
+    result->thinking = thinking;
     k3_engine_get_cache_stats(
         session->engine, &result->cache_before);
     uint32_t predicted = 0u;
@@ -568,9 +602,17 @@ static bool execute_encoded_turn(
         goto cleanup;
     }
 
-    bool response_open = true;
+    typedef enum {
+        K3_OUTPUT_REASONING = 0,
+        K3_OUTPUT_BETWEEN_CHANNELS = 1,
+        K3_OUTPUT_RESPONSE = 2,
+        K3_OUTPUT_CLOSED = 3,
+    } k3_output_channel;
+    k3_output_channel channel = thinking ?
+        K3_OUTPUT_REASONING : K3_OUTPUT_RESPONSE;
+    size_t thinking_transition_progress = 0u;
     bool natural_stop = false;
-    uint32_t tail[7];
+    uint32_t tail[32];
     size_t tail_count = 0u;
     struct timespec decode_start;
     struct timespec decode_end;
@@ -580,7 +622,9 @@ static bool execute_encoded_turn(
          generated++) {
         const uint32_t token = predicted;
         result->generated_tokens++;
-        append_tail(tail, &tail_count, token);
+        append_tail(
+            tail, &tail_count,
+            sizeof(tail) / sizeof(tail[0]), token);
         if (!append_generated_token(
                 &generated_tokens, token,
                 error, error_size)) {
@@ -606,23 +650,58 @@ static bool execute_encoded_turn(
             break;
         }
 
-        if (response_open && token == K3_TOKEN_CLOSE) {
-            response_open = false;
-        } else if (response_open && token < K3_TOKEN_BOS) {
+        k3_text_buffer *channel_output = NULL;
+        k3_chat_text_callback channel_callback = NULL;
+        void *channel_data = NULL;
+        if (channel == K3_OUTPUT_REASONING) {
+            if (token == K3_TOKEN_CLOSE) {
+                channel = K3_OUTPUT_BETWEEN_CHANNELS;
+                thinking_transition_progress = 1u;
+            } else if (token < K3_TOKEN_BOS) {
+                channel_output = &result->reasoning_content;
+                channel_callback = reasoning_callback;
+                channel_data = reasoning_data;
+            }
+        } else if (channel == K3_OUTPUT_BETWEEN_CHANNELS) {
+            if (thinking_transition_progress >=
+                    thinking_transition_count ||
+                token != initial_trailer[
+                    thinking_transition_progress]) {
+                set_error(error, error_size,
+                          "model emitted an invalid think/response transition");
+                ok = false;
+                goto cleanup;
+            }
+            thinking_transition_progress++;
+            if (thinking_transition_progress ==
+                thinking_transition_count) {
+                channel = K3_OUTPUT_RESPONSE;
+            }
+        } else if (channel == K3_OUTPUT_RESPONSE) {
+            if (token == K3_TOKEN_CLOSE) {
+                channel = K3_OUTPUT_CLOSED;
+            } else if (token < K3_TOKEN_BOS) {
+                channel_output = &result->response;
+                channel_callback = callback;
+                channel_data = callback_data;
+            }
+        }
+        if (channel_output != NULL) {
             if (!k3_tokenizer_decode(
                     session->tokenizer, &token, 1u, false,
                     &token_piece, error, error_size) ||
                 !append_response_bytes(
-                    &result->response,
+                    channel_output,
                     token_piece.data, token_piece.size,
                     error, error_size)) {
                 ok = false;
                 goto cleanup;
             }
-            if (callback != NULL && token_piece.size != 0u) {
-                callback(
+            if (channel_callback != NULL &&
+                token_piece.size != 0u) {
+                channel_callback(
                     token_piece.data, token_piece.size,
-                    callback_data);
+                    channel_data);
             }
         }
 
@@ -641,18 +720,30 @@ static bool execute_encoded_turn(
     }
 
     if (!natural_stop) {
-        const size_t matched =
-            trailer_prefix_already_generated(tail, tail_count);
+        const bool still_reasoning =
+            channel == K3_OUTPUT_REASONING;
+        const bool between_channels =
+            channel == K3_OUTPUT_BETWEEN_CHANNELS;
+        const uint32_t *trailer = between_channels ?
+            initial_trailer + thinking_transition_progress :
+            (still_reasoning ? initial_trailer : K3_RESPONSE_TRAILER);
+        const size_t trailer_count = between_channels ?
+            initial_trailer_count - thinking_transition_progress :
+            (still_reasoning ?
+                initial_trailer_count : response_trailer_count);
+        const size_t matched = between_channels ? 0u :
+            trailer_prefix_already_generated(
+                tail, tail_count, trailer, trailer_count);
         uint32_t discard = predicted;
         for (size_t i = matched; i < trailer_count; i++) {
             if (!feed_token(
-                    session, K3_RESPONSE_TRAILER[i],
+                    session, trailer[i],
                     &discard, error, error_size)) {
                 ok = false;
                 goto cleanup;
             }
             if (!append_retained_tokens(
-                    session, &K3_RESPONSE_TRAILER[i], 1u,
+                    session, &trailer[i], 1u,
                     error, error_size)) {
                 ok = false;
                 goto cleanup;
@@ -666,11 +757,14 @@ static bool execute_encoded_turn(
                 session->tokenizer,
                 generated_tokens.data,
                 generated_tokens.count,
+                thinking,
                 &parsed, error, error_size)) {
             ok = false;
             goto cleanup;
         }
+        k3_text_buffer_free(&result->reasoning_content);
         k3_text_buffer_free(&result->response);
+        result->reasoning_content = parsed.reasoning;
         result->response = parsed.response;
         result->tool_calls = parsed.tool_calls;
         result->tool_call_count = parsed.tool_call_count;
@@ -691,9 +785,11 @@ static bool execute_encoded_turn(
         session->engine, &result->cache_after);
 
 cleanup:
+    k3_token_buffer_free(&thinking_trailer);
     k3_token_buffer_free(&generated_tokens);
     k3_text_buffer_free(&token_piece);
     if (!ok) {
+        k3_text_buffer_free(&result->reasoning_content);
         k3_text_buffer_free(&result->response);
         for (size_t i = 0u; i < result->tool_call_count; i++) {
             free((char *)result->tool_calls[i].name);
@@ -742,6 +838,7 @@ bool k3_chat_session_turn(
             session, &prompt,
             (uint32_t)prompt.count, 0u,
             max_generated_tokens, NULL, NULL,
+            false, NULL, NULL,
             callback, callback_data, result,
             error, error_size);
     }
@@ -811,8 +908,9 @@ bool k3_chat_session_complete_messages_with_options(
     memset(result, 0, sizeof(*result));
     const k3_chat_options render_options = {
         .add_generation_prompt = true,
-        .thinking = false,
-        .thinking_effort = NULL,
+        .thinking = options != NULL && options->thinking,
+        .thinking_effort = options == NULL ? NULL :
+            options->thinking_effort,
         .tools_json = options == NULL ? NULL : options->tools_json,
         .tool_choice = options == NULL ? K3_TOOL_CHOICE_AUTO :
             options->tool_choice,
@@ -903,6 +1001,11 @@ bool k3_chat_session_complete_messages_with_options(
                 options->progress_callback,
             options == NULL ? NULL :
                 options->progress_data,
+            options != NULL && options->thinking,
+            options == NULL ? NULL :
+                options->reasoning_callback,
+            options == NULL ? NULL :
+                options->reasoning_data,
             callback, callback_data, result,
             error, error_size);
     }

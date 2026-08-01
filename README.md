@@ -95,6 +95,9 @@ They are engineering fixtures, not cross-project benchmark claims.
 | Agentic result turn, 25-token answer | 56.759 s / 0.440 tok/s |
 | Agentic reused result turn, 42 of 238 tokens evaluated | 104.913 s / 0.400 tok/s |
 | Agentic reused result turn, 25-token answer | 55.863 s / 0.448 tok/s |
+| Low-effort thinking hello, 92-token prompt | 230.491 s / 0.399 tok/s |
+| Low-effort thinking hello, 35-token completion | 75.353 s / 0.464 tok/s |
+| Preserved-thinking continuation, 25 of 152 evaluated | 59.473 s / 0.420 tok/s |
 
 The default range path matches the locked sequential state oracle exactly.
 The faster KDA dequantize-plus-hipBLAS path preserves the tested greedy token
@@ -271,6 +274,13 @@ complete assistant message, then appends one `role: "tool"` message with the
 matching `tool_call_id` for each result. Multiple calls are supported and
 tool-result messages are normalized into call order.
 
+Kimi K3 thinking is enabled on every API request. `reasoning_effort` accepts
+`low`, `high`, or `max` and defaults to `max`. Ordinary responses include
+`reasoning_content`; SSE emits live `delta.reasoning_content` chunks before
+`delta.content`. Send the complete returned assistant message—including
+`reasoning_content`, `content`, and any `tool_calls`—back in the next request.
+Preserved reasoning then participates in the same exact causal-prefix gate.
+
 ```sh
 curl --max-time 0 http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
@@ -338,9 +348,8 @@ Set `MOONSHINE_API_KEY` or pass `--api-key` to require bearer authentication.
 The server refuses a non-loopback bind without a key. It accepts text-only
 system/developer, user, assistant, and tool history, plus Kimi dynamic tool
 declarations on system messages. The engine is deterministic and greedy.
-`parallel_tool_calls: false`, structured response formats, reasoning output,
-sampling, parallel request slots, and HTTP request chunking are not
-implemented yet.
+`parallel_tool_calls: false`, structured response formats, sampling, parallel
+request slots, and HTTP request chunking are not implemented yet.
 
 ## Obtain the model
 
@@ -447,9 +456,10 @@ native XTML chat/tool renderer, deterministic stateful CLI, dynamic context
 allocation capacity-qualified through 128K, and one-slot OpenAI-compatible
 HTTP/SSE service with a qualified two-turn function-tool loop are now locked.
 Agentic hidden-directive prefix recovery and the real SSE tool wire are also
-qualified locally. Filled-128K workload behavior is still an open
-qualification item. Reasoning output, structured responses, and enforceable
-non-parallel tool calls remain required for the broader agentic surface.
+qualified locally, along with preserved thinking history and live reasoning
+deltas. Filled-128K workload behavior is still an open qualification item.
+Structured responses and enforceable non-parallel tool calls remain required
+for the broader agentic surface.
 
 See [Architecture](docs/architecture.md) for the correctness model and
 [Provenance](docs/provenance.md) for code lineage, references, and

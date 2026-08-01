@@ -1922,6 +1922,7 @@ void k3_assistant_output_free(k3_assistant_output *output) {
     if (output == NULL) {
         return;
     }
+    k3_text_buffer_free(&output->reasoning);
     k3_text_buffer_free(&output->response);
     for (size_t i = 0u; i < output->tool_call_count; i++) {
         free((char *)output->tool_calls[i].id);
@@ -1936,6 +1937,7 @@ bool k3_tokenizer_parse_assistant_output(
         const k3_tokenizer *tokenizer,
         const uint32_t *tokens,
         size_t token_count,
+        bool thinking,
         k3_assistant_output *output,
         char *error,
         size_t error_size) {
@@ -1955,8 +1957,26 @@ bool k3_tokenizer_parse_assistant_output(
            cursor.tokens[cursor.position] < K3_TOKEN_BOS) {
         cursor.position++;
     }
+    if (thinking) {
+        if (!decode_range(
+                &cursor, 0u, cursor.position,
+                &output->reasoning, error, error_size) ||
+            !consume_tag(
+                &cursor, K3_TOKEN_CLOSE, "think", NULL,
+                error, error_size) ||
+            !consume_tag(
+                &cursor, K3_TOKEN_OPEN, "response", NULL,
+                error, error_size)) {
+            goto fail;
+        }
+    }
+    const size_t response_begin = cursor.position;
+    while (cursor.position < cursor.count &&
+           cursor.tokens[cursor.position] < K3_TOKEN_BOS) {
+        cursor.position++;
+    }
     if (!decode_range(
-            &cursor, 0u, cursor.position,
+            &cursor, response_begin, cursor.position,
             &output->response, error, error_size) ||
         !consume_tag(
             &cursor, K3_TOKEN_CLOSE, "response", NULL,

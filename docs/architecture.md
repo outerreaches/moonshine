@@ -83,6 +83,8 @@ The initial server is a deliberately bounded HTTP/1.1 implementation:
 - standard OpenAI error envelopes and usage accounting;
 - OpenAI function tools, parallel call output, matching tool-result history,
   `auto`/`required`/`none`, and forced named-function selection;
+- K3 preserved-thinking history, `low`/`high`/`max` effort, and separate
+  reasoning/content fields in JSON and SSE;
 - fixed greedy execution, with unsupported structured response formats and
   `parallel_tool_calls: false` rejected before inference.
 
@@ -90,6 +92,14 @@ Tool-call SSE is structurally streamed at message completion: ordinary
 response bytes remain token-live, while each parsed call is emitted as one
 complete indexed `delta.tool_calls` item before the terminal chunk. This keeps
 the OpenAI wire contract without exposing half-parsed XTML attributes.
+
+Thinking SSE is token-live. The session tracks the native `<think>` close and
+`<response>` open sequence exactly, sends pre-transition text only as
+`reasoning_content`, and sends post-transition text only as `content`. Natural
+completion is parsed again as a complete XTML structure before the session is
+accepted. Preserved assistant reasoning is ordinary protected text when it is
+rendered into later history and can therefore participate in exact prefix
+reuse.
 
 K3 renders `required` and `none` as hidden system messages immediately before
 the generation prompt. Those messages are absent from the assistant history

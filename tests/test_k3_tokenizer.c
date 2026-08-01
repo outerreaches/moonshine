@@ -72,6 +72,10 @@ int main(int argc, char **argv) {
     k3_token_buffer retained_tool_turn = { 0 };
     k3_token_buffer augmented_tool_history = { 0 };
     k3_token_buffer canonical_tool_history = { 0 };
+    k3_token_buffer thinking_prompt = { 0 };
+    k3_token_buffer thinking_tail = { 0 };
+    k3_token_buffer retained_thinking_turn = { 0 };
+    k3_token_buffer continued_thinking_history = { 0 };
     k3_text_buffer text = { 0 };
     k3_assistant_output assistant_output;
     memset(&assistant_output, 0, sizeof(assistant_output));
@@ -515,6 +519,7 @@ int main(int argc, char **argv) {
               &tokens, error, sizeof(error)) &&
           k3_tokenizer_parse_assistant_output(
               tokenizer, tokens.data, tokens.count,
+              false,
               &assistant_output, error, sizeof(error)),
           error);
     CHECK(assistant_output.response.size == 0u &&
@@ -536,12 +541,94 @@ int main(int argc, char **argv) {
               &tokens, error, sizeof(error)) &&
           k3_tokenizer_parse_assistant_output(
               tokenizer, tokens.data, tokens.count,
+              false,
               &assistant_output, error, sizeof(error)),
           error);
     CHECK(assistant_output.tool_call_count == 1u &&
           strcmp(assistant_output.tool_calls[0].arguments,
                  "{not valid json") == 0,
           "raw XTML json argument block was not preserved");
+    k3_assistant_output_free(&assistant_output);
+
+    static const char generated_thinking_output[] =
+        "I should answer briefly."
+        "<|close|>think<|sep|><|open|>response<|sep|>Hello."
+        "<|close|>response<|sep|>"
+        "<|close|>message<|sep|><|end_of_msg|>";
+    CHECK(k3_tokenizer_encode(
+              tokenizer, generated_thinking_output, true,
+              &tokens, error, sizeof(error)) &&
+          k3_tokenizer_parse_assistant_output(
+              tokenizer, tokens.data, tokens.count, true,
+              &assistant_output, error, sizeof(error)),
+          error);
+    CHECK(strcmp(
+              assistant_output.reasoning.data,
+              "I should answer briefly.") == 0 &&
+          strcmp(assistant_output.response.data, "Hello.") == 0 &&
+          assistant_output.tool_call_count == 0u,
+          "thinking XTML reasoning/response parse changed");
+
+    static const k3_chat_message first_thinking_request[] = {
+        {
+            .role = K3_CHAT_ROLE_USER,
+            .content = "Why?",
+        },
+    };
+    static const k3_chat_message continued_thinking_messages[] = {
+        {
+            .role = K3_CHAT_ROLE_USER,
+            .content = "Why?",
+        },
+        {
+            .role = K3_CHAT_ROLE_ASSISTANT,
+            .reasoning_content = "I should answer briefly.",
+            .content = "Hello.",
+        },
+        {
+            .role = K3_CHAT_ROLE_USER,
+            .content = "Continue.",
+        },
+    };
+    CHECK(k3_tokenizer_encode_chat(
+              tokenizer, first_thinking_request,
+              sizeof(first_thinking_request) /
+                  sizeof(first_thinking_request[0]),
+              &thinking_max, &thinking_prompt,
+              error, sizeof(error)) &&
+          k3_tokenizer_encode(
+              tokenizer, generated_thinking_output, true,
+              &thinking_tail, error, sizeof(error)),
+          error);
+    retained_thinking_turn.count =
+        thinking_prompt.count + thinking_tail.count;
+    retained_thinking_turn.capacity = retained_thinking_turn.count;
+    retained_thinking_turn.data = (uint32_t *)malloc(
+        retained_thinking_turn.count *
+            sizeof(*retained_thinking_turn.data));
+    CHECK(retained_thinking_turn.data != NULL,
+          "allocating retained thinking-turn oracle failed");
+    memcpy(
+        retained_thinking_turn.data, thinking_prompt.data,
+        thinking_prompt.count * sizeof(*thinking_prompt.data));
+    memcpy(
+        retained_thinking_turn.data + thinking_prompt.count,
+        thinking_tail.data,
+        thinking_tail.count * sizeof(*thinking_tail.data));
+    CHECK(k3_tokenizer_encode_chat(
+              tokenizer, continued_thinking_messages,
+              sizeof(continued_thinking_messages) /
+                  sizeof(continued_thinking_messages[0]),
+              &thinking_max, &continued_thinking_history,
+              error, sizeof(error)) &&
+          continued_thinking_history.count >
+              retained_thinking_turn.count &&
+          memcmp(
+              continued_thinking_history.data,
+              retained_thinking_turn.data,
+              retained_thinking_turn.count *
+                  sizeof(*retained_thinking_turn.data)) == 0,
+          "preserved reasoning history is not an exact causal prefix");
 
     printf("K3 native tokenizer/XTML: PASS\n");
     printf("  vocab=%u base=%u; ICU Unicode pre-tokenizer\n",
@@ -564,6 +651,10 @@ cleanup:
     k3_token_buffer_free(&retained_tool_turn);
     k3_token_buffer_free(&augmented_tool_history);
     k3_token_buffer_free(&canonical_tool_history);
+    k3_token_buffer_free(&thinking_prompt);
+    k3_token_buffer_free(&thinking_tail);
+    k3_token_buffer_free(&retained_thinking_turn);
+    k3_token_buffer_free(&continued_thinking_history);
     k3_tokenizer_destroy(tokenizer);
     return result;
 }

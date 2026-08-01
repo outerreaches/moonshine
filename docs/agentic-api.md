@@ -23,13 +23,18 @@ and the [Kimi K3 quickstart](https://platform.kimi.ai/docs/guide/kimi-k3-quickst
 - complete assistant history plus consecutive `role: "tool"` results matched
   by opaque `tool_call_id` and normalized into call order;
 - ordinary JSON responses and indexed SSE `delta.tool_calls` chunks;
-- `finish_reason: "tool_calls"` whenever calls are returned.
+- `finish_reason: "tool_calls"` whenever calls are returned;
+- K3 preserved thinking on every API request, with `reasoning_effort` values
+  `low`, `high`, and `max` (default `max`);
+- separate JSON `reasoning_content` and live SSE
+  `delta.reasoning_content` before response content;
+- complete assistant reasoning history rendered back into native `<think>`
+  channels for multi-turn and tool continuation.
 
 `parallel_tool_calls` defaults to true. Explicit false is rejected until the
 engine can enforce a one-call generation constraint rather than silently
-accepting a request it may violate. Structured `response_format`, thinking
-and `reasoning_content` output, image input, sampling, and concurrent request
-slots remain outside this checkpoint.
+accepting a request it may violate. Structured `response_format`, image input,
+sampling, and concurrent request slots remain outside this checkpoint.
 
 ## Minimal two-request loop
 
@@ -61,11 +66,12 @@ First request:
 }
 ```
 
-Moonshine returns an assistant message resembling:
+Moonshine returns an assistant message resembling (reasoning abbreviated):
 
 ```json
 {
   "role": "assistant",
+  "reasoning_content": "I should call the weather tool for Toronto.",
   "content": null,
   "tool_calls": [
     {
@@ -90,6 +96,7 @@ assistant message, and the matching result:
     {"role": "user", "content": "What is the weather in Toronto?"},
     {
       "role": "assistant",
+      "reasoning_content": "the exact reasoning returned above",
       "content": null,
       "tool_calls": [
         {
@@ -114,9 +121,10 @@ assistant message, and the matching result:
 ```
 
 Tool arguments are model output. Parse and validate them before executing a
-function even when its declaration uses `strict: true`.
+function even when its declaration uses `strict: true`. Preserve the complete
+assistant object—including `reasoning_content`—when continuing the loop.
 
-## 2026-08-01 baseline qualification
+## 2026-08-01 non-thinking baseline qualification
 
 The accepted 8K Q8/32 engine completed the loop above without a fallback
 parser or prompt convention:
@@ -178,6 +186,31 @@ fell from 281.686 to 160.776 seconds (42.9%, about 1.75x faster). The 42-token
 suffix remains below the measured 93-token layer-major crossover and therefore
 uses exact token-major execution.
 
-The next agentic gates are thinking/reasoning history and streaming deltas,
-structured `response_format`, and an enforceable
-`parallel_tool_calls: false` constraint.
+## Preserved-thinking qualification
+
+K3's current model contract always enables thinking. Moonshine now defaults
+the API to `reasoning_effort: "max"`; callers can select `low`, `high`, or
+`max`. The generated-token limit covers reasoning, response, tools, and
+structural tokens together.
+
+An 8K SSE smoke test used `reasoning_effort: "low"` and `Say hello.`. The
+92-token prompt completed in 230.491 seconds. K3 streamed “The user just wants
+a greeting. Keep it brief and friendly.” only through
+`delta.reasoning_content`, then streamed “Hello! How can I help you today?”
+only through `delta.content`. It stopped naturally after 35 generated tokens
+in 75.353 seconds.
+
+The exact assistant reasoning and response were then returned with `Now say
+goodbye.` under the same session:
+
+| prompt total | evaluated | reused | prefill | generated | decode | finish |
+|---:|---:|---:|---:|---:|---:|---|
+| 152 | 25 | 127 | 59.473 s | 50 | 116.434 s | `stop` |
+
+The second turn streamed reasoning first, then “Goodbye! Have a great day!
+👋”. Reusing all 127 prior prompt/generated tokens proves preserved reasoning
+history reconnects to the exact retained causal state, rather than merely
+round-tripping as unused JSON metadata.
+
+The next gates are structured `response_format`, an enforceable
+`parallel_tool_calls: false` constraint, and an SDK-level SSE fixture.

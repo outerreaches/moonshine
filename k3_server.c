@@ -61,6 +61,8 @@ typedef struct {
     char       *pending;
     size_t      pending_size;
     size_t      pending_capacity;
+    bool        pending_reasoning;
+    bool        thinking;
     struct timespec last_progress;
     bool        failed;
 } stream_state;
@@ -698,8 +700,10 @@ static bool stream_send_event(stream_state *stream,
     return !stream->failed;
 }
 
-static bool stream_send_content(stream_state *stream,
-                                const char *bytes, size_t size) {
+static bool stream_send_text_field(stream_state *stream,
+                                   const char *field,
+                                   const char *bytes,
+                                   size_t size) {
     char error[256];
     char *escaped = NULL;
     if (!k3_json_escape(
@@ -713,10 +717,10 @@ static bool stream_send_content(stream_state *stream,
         "{\"id\":\"%s\",\"object\":\"chat.completion.chunk\","
         "\"created\":%lld,\"model\":\"%s\","
         "\"system_fingerprint\":\"" MOONSHINE_SYSTEM_FINGERPRINT "\","
-        "\"choices\":[{\"index\":0,\"delta\":{\"content\":%s},"
+        "\"choices\":[{\"index\":0,\"delta\":{\"%s\":%s},"
         "\"finish_reason\":null}]}",
         stream->completion_id, (long long)stream->created,
-        MOONSHINE_MODEL_ID, escaped);
+        MOONSHINE_MODEL_ID, field, escaped);
     char *event = required < 0 ? NULL :
         (char *)malloc((size_t)required + 1u);
     if (event != NULL) {
@@ -725,10 +729,10 @@ static bool stream_send_content(stream_state *stream,
             "{\"id\":\"%s\",\"object\":\"chat.completion.chunk\","
             "\"created\":%lld,\"model\":\"%s\","
             "\"system_fingerprint\":\"" MOONSHINE_SYSTEM_FINGERPRINT "\","
-            "\"choices\":[{\"index\":0,\"delta\":{\"content\":%s},"
+            "\"choices\":[{\"index\":0,\"delta\":{\"%s\":%s},"
             "\"finish_reason\":null}]}",
             stream->completion_id, (long long)stream->created,
-            MOONSHINE_MODEL_ID, escaped);
+            MOONSHINE_MODEL_ID, field, escaped);
     }
     free(escaped);
     if (event == NULL) {
@@ -738,6 +742,20 @@ static bool stream_send_content(stream_state *stream,
     const bool ok =
         stream_send_event(stream, event, (size_t)required);
     free(event);
+    return ok;
+}
+
+static bool stream_send_pending(stream_state *stream) {
+    if (stream->pending_size == 0u) {
+        return true;
+    }
+    const char *field = stream->pending_reasoning ?
+        "reasoning_content" : "content";
+    const bool ok = stream_send_text_field(
+        stream, field, stream->pending, stream->pending_size);
+    if (ok) {
+        stream->pending_size = 0u;
+    }
     return ok;
 }
 
@@ -855,11 +873,20 @@ static size_t complete_utf8_prefix(const char *bytes, size_t size) {
     return offset;
 }
 
-static void stream_callback(const char *bytes, size_t size, void *user_data) {
+static void stream_channel_callback(const char *bytes,
+                                    size_t size,
+                                    void *user_data,
+                                    bool reasoning) {
     stream_state *stream = (stream_state *)user_data;
     if (stream->failed || size == 0u) {
         return;
     }
+    if (stream->pending_size != 0u &&
+        stream->pending_reasoning != reasoning &&
+        !stream_send_pending(stream)) {
+        return;
+    }
+    stream->pending_reasoning = reasoning;
     if (stream->pending_size > SIZE_MAX - size) {
         stream->failed = true;
         return;
@@ -890,13 +917,25 @@ static void stream_callback(const char *bytes, size_t size, void *user_data) {
     const size_t complete = complete_utf8_prefix(
         stream->pending, stream->pending_size);
     if (complete != 0u &&
-        stream_send_content(stream, stream->pending, complete)) {
+        stream_send_text_field(
+            stream,
+            reasoning ? "reasoning_content" : "content",
+            stream->pending, complete)) {
         memmove(
             stream->pending,
             stream->pending + complete,
             stream->pending_size - complete);
         stream->pending_size -= complete;
     }
+}
+
+static void stream_callback(const char *bytes, size_t size, void *user_data) {
+    stream_channel_callback(bytes, size, user_data, false);
+}
+
+static void stream_reasoning_callback(
+        const char *bytes, size_t size, void *user_data) {
+    stream_channel_callback(bytes, size, user_data, true);
 }
 
 static bool stream_begin(stream_state *stream) {
@@ -912,16 +951,18 @@ static bool stream_begin(stream_state *stream) {
         return false;
     }
     char event[1024];
+    const char *reasoning_field = stream->thinking ?
+        ",\"reasoning_content\":\"\"" : "";
     const int size = snprintf(
         event, sizeof(event),
         "{\"id\":\"%s\",\"object\":\"chat.completion.chunk\","
         "\"created\":%lld,\"model\":\"%s\","
         "\"system_fingerprint\":\"" MOONSHINE_SYSTEM_FINGERPRINT "\","
         "\"choices\":[{\"index\":0,\"delta\":{"
-        "\"role\":\"assistant\",\"content\":\"\"},"
+        "\"role\":\"assistant\",\"content\":\"\"%s},"
         "\"finish_reason\":null}]}",
         stream->completion_id, (long long)stream->created,
-        MOONSHINE_MODEL_ID);
+        MOONSHINE_MODEL_ID, reasoning_field);
     const bool ok =
         size > 0 && (size_t)size < sizeof(event) &&
         stream_send_event(stream, event, (size_t)size);
@@ -967,9 +1008,7 @@ static void stream_progress(
 static void stream_end(stream_state *stream,
                        const k3_chat_turn_result *result) {
     if (stream->pending_size != 0u && !stream->failed) {
-        (void)stream_send_content(
-            stream, stream->pending, stream->pending_size);
-        stream->pending_size = 0u;
+        (void)stream_send_pending(stream);
     }
     for (size_t i = 0u;
          i < result->tool_call_count && !stream->failed;
@@ -1163,6 +1202,7 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
             .fd = fd,
             .completion_id = completion_id,
             .created = created,
+            .thinking = request.thinking,
         };
         if (!stream_begin(&stream)) {
             k3_openai_chat_request_free(&request);
@@ -1174,6 +1214,10 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
                 config->clear_expert_cache_per_request,
             .progress_callback = stream_progress,
             .progress_data = &stream,
+            .thinking = request.thinking,
+            .thinking_effort = request.reasoning_effort,
+            .reasoning_callback = stream_reasoning_callback,
+            .reasoning_data = &stream,
             .tools_json = request.tools_json,
             .tool_choice = request.tool_choice,
             .preserve_tool_choice_history =
@@ -1206,6 +1250,8 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
             .reuse_prefix = reuse_requested,
             .clear_expert_cache =
                 config->clear_expert_cache_per_request,
+            .thinking = request.thinking,
+            .thinking_effort = request.reasoning_effort,
             .tools_json = request.tools_json,
             .tool_choice = request.tool_choice,
             .preserve_tool_choice_history =
