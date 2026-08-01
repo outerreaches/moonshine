@@ -289,6 +289,35 @@ K3 produced `{"greeting":"hello","count":1}`. Reasoning streamed live;
 the response body appeared only once, after the recursive validator accepted
 it.
 
+### Structured-session causal reuse
+
+Response-format directives are causal input immediately before generation but
+are absent from the returned assistant message, just like tool-choice
+directives. Moonshine now stores their historical message boundaries and
+formats, plus an owned copy of canonical JSON Schema text. It restores each
+directive before the assistant turn it caused and still accepts reuse only
+after exact retained-token comparison. Malformed, stale, allocation-failed,
+or mismatched marker state takes canonical full prefill.
+
+A two-turn 8K low-effort JSON Schema check returned `greeting=hello`, then
+continued the exact returned reasoning/content and requested
+`greeting=goodbye` under the same schema and session:
+
+| phase | prompt total | evaluated | reused | prefill | generated | decode |
+|---|---:|---:|---:|---:|---:|---:|
+| first schema turn | 184 | 184 | 0 | 215.694 s | 53 | 128.217 s |
+| schema continuation | 354 | 117 | 237 | 210.464 s | 35 | 89.079 s |
+
+The continuation returned validated `{"greeting":"goodbye"}` and retained
+the complete 184-token prompt plus 53-token completion. This proves exact
+causal reconstruction, but it also localizes the next latency boundary: the
+117-token suffix remains above the measured 93-token layer-major crossover.
+It therefore performs one full routed-expert sweep, so its prefill wall time
+is close to the first turn even though history replay was eliminated. Prefix
+recovery prevents latency from growing with the 354-token history; reducing
+structured-turn latency further requires improving the small layer-major
+suffix path or shrinking the current response directive.
+
 ## Non-parallel tool calls
 
 For `parallel_tool_calls: false`, Moonshine places a hidden

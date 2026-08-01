@@ -33,6 +33,9 @@ struct k3_chat_session {
     k3_single_tool_call_marker *historical_single_tool_calls;
     size_t historical_single_tool_call_count;
     size_t historical_single_tool_call_capacity;
+    k3_response_format_marker *historical_response_formats;
+    size_t historical_response_format_count;
+    size_t historical_response_format_capacity;
     bool          started;
     bool          healthy;
 };
@@ -117,14 +120,22 @@ static bool append_retained_tokens(k3_chat_session *session,
 }
 
 static void clear_request_directive_history(k3_chat_session *session) {
+    for (size_t i = 0u;
+         i < session->historical_response_format_count; i++) {
+        free((char *)session->historical_response_formats[i]
+            .response_schema_json);
+        session->historical_response_formats[i]
+            .response_schema_json = NULL;
+    }
     session->historical_tool_choice_count = 0u;
     session->historical_single_tool_call_count = 0u;
+    session->historical_response_format_count = 0u;
 }
 
 /*
- * Tool-choice history is an optimization hint, not inference output. If its
- * allocation fails or the caller presents a non-append-only boundary, discard
- * it and let the next request take the exact-prefix mismatch fallback.
+ * Request-directive history is an optimization hint, not inference output.
+ * If its allocation fails or the caller presents a non-append-only boundary,
+ * discard it and let the next request take the exact-prefix mismatch fallback.
  */
 static void remember_tool_choice(
         k3_chat_session *session,
@@ -223,6 +234,76 @@ static void remember_single_tool_call(
         session->historical_single_tool_call_count++] =
         (k3_single_tool_call_marker) {
             .after_message_count = after_message_count,
+        };
+}
+
+static void remember_response_format(
+        k3_chat_session *session,
+        size_t after_message_count,
+        k3_response_format format,
+        const char *schema_json) {
+    if (format == K3_RESPONSE_FORMAT_TEXT) {
+        return;
+    }
+    if ((format != K3_RESPONSE_FORMAT_JSON_OBJECT &&
+         format != K3_RESPONSE_FORMAT_JSON_SCHEMA) ||
+        (format == K3_RESPONSE_FORMAT_JSON_SCHEMA &&
+         (schema_json == NULL || schema_json[0] == '\0')) ||
+        (format == K3_RESPONSE_FORMAT_JSON_OBJECT &&
+         schema_json != NULL)) {
+        clear_request_directive_history(session);
+        return;
+    }
+    if (session->historical_response_format_count != 0u &&
+        session->historical_response_formats[
+            session->historical_response_format_count - 1u]
+                .after_message_count >= after_message_count) {
+        clear_request_directive_history(session);
+        return;
+    }
+    char *schema_copy = NULL;
+    if (format == K3_RESPONSE_FORMAT_JSON_SCHEMA) {
+        schema_copy = strdup(schema_json);
+        if (schema_copy == NULL) {
+            clear_request_directive_history(session);
+            return;
+        }
+    }
+    if (session->historical_response_format_count ==
+        session->historical_response_format_capacity) {
+        const size_t old_capacity =
+            session->historical_response_format_capacity;
+        if (old_capacity > SIZE_MAX / 2u) {
+            free(schema_copy);
+            clear_request_directive_history(session);
+            return;
+        }
+        const size_t capacity =
+            old_capacity == 0u ? 4u : old_capacity * 2u;
+        if (capacity > SIZE_MAX /
+                sizeof(*session->historical_response_formats)) {
+            free(schema_copy);
+            clear_request_directive_history(session);
+            return;
+        }
+        k3_response_format_marker *markers =
+            (k3_response_format_marker *)realloc(
+                session->historical_response_formats,
+                capacity * sizeof(*markers));
+        if (markers == NULL) {
+            free(schema_copy);
+            clear_request_directive_history(session);
+            return;
+        }
+        session->historical_response_formats = markers;
+        session->historical_response_format_capacity = capacity;
+    }
+    session->historical_response_formats[
+        session->historical_response_format_count++] =
+        (k3_response_format_marker) {
+            .after_message_count = after_message_count,
+            .format = format,
+            .response_schema_json = schema_copy,
         };
 }
 
@@ -418,8 +499,10 @@ void k3_chat_session_destroy(k3_chat_session *session) {
     k3_engine_destroy(session->engine);
     k3_tokenizer_destroy(session->tokenizer);
     k3_token_buffer_free(&session->retained_tokens);
+    clear_request_directive_history(session);
     free(session->historical_tool_choices);
     free(session->historical_single_tool_calls);
+    free(session->historical_response_formats);
     free(session->system_prompt);
     free(session);
 }
@@ -976,6 +1059,8 @@ bool k3_chat_session_complete_messages_with_options(
         .historical_tool_choice_count = 0u,
         .historical_single_tool_calls = NULL,
         .historical_single_tool_call_count = 0u,
+        .historical_response_formats = NULL,
+        .historical_response_format_count = 0u,
     };
     k3_token_buffer canonical_prompt = { 0 };
     k3_token_buffer augmented_prompt = { 0 };
@@ -1010,9 +1095,18 @@ bool k3_chat_session_complete_messages_with_options(
             marker_boundaries_valid = false;
         }
     }
+    for (size_t i = 0u;
+         marker_boundaries_valid &&
+         i < session->historical_response_format_count; i++) {
+        if (session->historical_response_formats[i]
+                .after_message_count > message_count) {
+            marker_boundaries_valid = false;
+        }
+    }
     if (reuse_eligible && marker_boundaries_valid &&
         (session->historical_tool_choice_count != 0u ||
-         session->historical_single_tool_call_count != 0u)) {
+         session->historical_single_tool_call_count != 0u ||
+         session->historical_response_format_count != 0u)) {
         k3_chat_options augmented_options = render_options;
         augmented_options.historical_tool_choices =
             session->historical_tool_choices;
@@ -1022,6 +1116,10 @@ bool k3_chat_session_complete_messages_with_options(
             session->historical_single_tool_calls;
         augmented_options.historical_single_tool_call_count =
             session->historical_single_tool_call_count;
+        augmented_options.historical_response_formats =
+            session->historical_response_formats;
+        augmented_options.historical_response_format_count =
+            session->historical_response_format_count;
         char ignored_error[256] = { 0 };
         if (k3_tokenizer_encode_chat(
                 session->tokenizer, messages, message_count,
@@ -1089,6 +1187,10 @@ bool k3_chat_session_complete_messages_with_options(
         remember_single_tool_call(
             session, message_count,
             options->enforce_single_tool_call);
+        remember_response_format(
+            session, message_count,
+            options->response_format,
+            options->response_schema_json);
     }
     k3_token_buffer_free(&augmented_prompt);
     k3_token_buffer_free(&canonical_prompt);

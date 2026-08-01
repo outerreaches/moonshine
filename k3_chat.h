@@ -167,10 +167,10 @@ bool k3_chat_session_complete_messages(
 /*
  * Extended completion interface. Prefix reuse is opt-in and append-only: it
  * activates only when the rendered history exactly extends every token in the
- * retained semantic state. Preserved tool-choice history can reconstruct
- * request-local hidden directives before the same exact comparison. Edited,
- * forked, shorter, or otherwise mismatched histories fall back to the same
- * isolated full-prefill behavior as the stateless interface.
+ * retained semantic state. Preserved request-directive history can reconstruct
+ * tool-choice, serial-call, and response-format controls before the same exact
+ * comparison. Edited, forked, shorter, or otherwise mismatched histories fall
+ * back to the same isolated full-prefill behavior as the stateless interface.
  */
 bool k3_chat_session_complete_messages_with_options(
     k3_chat_session                 *session,

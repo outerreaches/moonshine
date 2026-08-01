@@ -102,6 +102,7 @@ They are engineering fixtures, not cross-project benchmark claims.
 | Structured JSON object, 52-token completion | 123.780 s / 0.420 tok/s |
 | Structured JSON Schema, 205-token prompt | 215.865 s / 0.950 tok/s |
 | Structured JSON Schema, 57-token completion | 137.230 s / 0.415 tok/s |
+| Structured continuation, 117 of 354 evaluated | 210.464 s / 0.556 tok/s |
 | Official Python SDK tool prompt, 216 tokens | 216.773 s / 0.996 tok/s |
 | Official Python SDK tool call, 72 tokens | 185.008 s / 0.389 tok/s |
 
@@ -249,9 +250,10 @@ retains one completed session—the most recently successful identifier—and
 reuses its in-process causal state only when the next rendered history is an
 exact token-prefix extension. Edited, forked, shorter, mismatched, missing, or
 different-session histories fall back to an isolated semantic reset and full
-prefill. For agent loops, Moonshine restores prior hidden `required`/`none`
-directives at their original message boundaries before applying the same exact
-token-prefix gate. Clients must still send the complete OpenAI message history.
+prefill. Moonshine restores prior hidden tool-choice, serial-call, and
+structured-response directives at their original message boundaries before
+applying the same exact token-prefix gate. Clients must still send the complete
+OpenAI message history.
 
 Start a loopback-only 128K-capacity service:
 
@@ -372,6 +374,15 @@ In the qualified SSE function loop, Moonshine reconstructed the prior hidden
 tokens, and evaluated only the 42-token result-turn suffix. Prefill fell from
 the earlier full-replay 224.927 seconds to 104.913 seconds. Any reconstructed
 prefix mismatch still takes the isolated full-prefill fallback.
+
+In a two-turn JSON Schema continuation, Moonshine reconstructed the prior
+schema directive and reused all 237 retained prompt/generated tokens. It
+evaluated only the 117-token suffix of the 354-token second prompt and returned
+validated `{"greeting":"goodbye"}`. That suffix still exceeds the measured
+93-token layer-major crossover, so it required a full routed sweep and 210.464
+seconds of prefill. Exact reuse removes history-length growth, but structured
+directive size keeps compact schema turns above the low-latency token-major
+regime.
 
 Set `MOONSHINE_API_KEY` or pass `--api-key` to require bearer authentication.
 The server refuses a non-loopback bind without a key. It accepts text-only

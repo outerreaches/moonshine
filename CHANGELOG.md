@@ -41,6 +41,11 @@ Semantic Versioning once its first research-preview tag is published.
   answer.
 - A pinned official OpenAI Python SDK 2.52.0 SSE replay fixture plus a live
   8K tool-call qualification against Moonshine.
+- Exact structured-session prefix recovery by restoring historical JSON-object
+  or owned canonical JSON Schema directives at their causal boundaries.
+- A two-turn live schema qualification that reused all 237 retained tokens,
+  evaluated only the 117-token suffix, and returned validated
+  `{"greeting":"goodbye"}`.
 
 ### Changed
 
@@ -52,7 +57,8 @@ Semantic Versioning once its first research-preview tag is published.
   qualification covered component and real-chat gates but not the synthetic
   full-layer fixture.
 - Preserve the exact mismatch/full-prefill gate while allowing session-local
-  tool-result turns to continue the actual hidden-directive causal history.
+  tool-result and structured-response turns to continue the actual hidden-
+  directive causal history.
 - Reject required-tool generations that exhaust their token budget without
   producing a call instead of returning an unsatisfied length-stopped turn.
 

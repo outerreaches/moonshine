@@ -86,6 +86,14 @@ typedef struct {
 } k3_single_tool_call_marker;
 
 typedef struct {
+    /* Restore a historical structured-output directive at this boundary. */
+    size_t             after_message_count;
+    k3_response_format format;
+    /* Required only for JSON_SCHEMA; borrowed by the tokenizer. */
+    const char        *response_schema_json;
+} k3_response_format_marker;
+
+typedef struct {
     bool        add_generation_prompt;
     bool        thinking;
     /*
@@ -105,6 +113,8 @@ typedef struct {
     size_t historical_tool_choice_count;
     const k3_single_tool_call_marker *historical_single_tool_calls;
     size_t historical_single_tool_call_count;
+    const k3_response_format_marker *historical_response_formats;
+    size_t historical_response_format_count;
 } k3_chat_options;
 
 typedef struct {

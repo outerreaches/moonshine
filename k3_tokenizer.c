@@ -1606,6 +1606,60 @@ static bool validate_single_tool_call_markers(
     return true;
 }
 
+static bool validate_response_format_markers(
+        const k3_chat_options *options,
+        size_t message_count,
+        char *error,
+        size_t error_size) {
+    if (options->historical_response_format_count != 0u &&
+        options->historical_response_formats == NULL) {
+        set_error(error, error_size,
+                  "historical response formats need marker storage");
+        return false;
+    }
+    size_t previous = 0u;
+    for (size_t i = 0u;
+         i < options->historical_response_format_count; i++) {
+        const k3_response_format_marker marker =
+            options->historical_response_formats[i];
+        if (marker.format != K3_RESPONSE_FORMAT_JSON_OBJECT &&
+            marker.format != K3_RESPONSE_FORMAT_JSON_SCHEMA) {
+            set_error(error, error_size,
+                      "historical response format %zu is not structured",
+                      i);
+            return false;
+        }
+        if (marker.format == K3_RESPONSE_FORMAT_JSON_SCHEMA &&
+            (marker.response_schema_json == NULL ||
+             marker.response_schema_json[0] == '\0')) {
+            set_error(error, error_size,
+                      "historical JSON schema %zu is empty", i);
+            return false;
+        }
+        if (marker.format == K3_RESPONSE_FORMAT_JSON_OBJECT &&
+            marker.response_schema_json != NULL) {
+            set_error(error, error_size,
+                      "historical JSON object %zu unexpectedly has a schema",
+                      i);
+            return false;
+        }
+        if (marker.after_message_count > message_count) {
+            set_error(error, error_size,
+                      "historical response format %zu follows message %zu, "
+                      "but the history has only %zu messages",
+                      i, marker.after_message_count, message_count);
+            return false;
+        }
+        if (i != 0u && marker.after_message_count <= previous) {
+            set_error(error, error_size,
+                      "historical response formats are not ordered");
+            return false;
+        }
+        previous = marker.after_message_count;
+    }
+    return true;
+}
+
 bool k3_tokenizer_encode_chat(
         k3_tokenizer *tokenizer,
         const k3_chat_message *messages,
@@ -1633,6 +1687,8 @@ bool k3_tokenizer_encode_chat(
         .historical_tool_choice_count = 0u,
         .historical_single_tool_calls = NULL,
         .historical_single_tool_call_count = 0u,
+        .historical_response_formats = NULL,
+        .historical_response_format_count = 0u,
     };
     const k3_chat_options *selected =
         options == NULL ? &defaults : options;
@@ -1652,11 +1708,14 @@ bool k3_tokenizer_encode_chat(
     if (!validate_tool_choice_markers(
             selected, message_count, error, error_size) ||
         !validate_single_tool_call_markers(
+            selected, message_count, error, error_size) ||
+        !validate_response_format_markers(
             selected, message_count, error, error_size)) {
         return false;
     }
     size_t marker_index = 0u;
     size_t single_marker_index = 0u;
+    size_t response_marker_index = 0u;
     size_t tool_result_index = 0u;
     for (size_t i = 0u; i < message_count; i++) {
         while (marker_index <
@@ -1681,6 +1740,21 @@ bool k3_tokenizer_encode_chat(
                 return false;
             }
             single_marker_index++;
+        }
+        while (response_marker_index <
+                   selected->historical_response_format_count &&
+               selected->historical_response_formats[response_marker_index]
+                       .after_message_count == i) {
+            const k3_response_format_marker marker =
+                selected->historical_response_formats[
+                    response_marker_index];
+            if (!append_response_format_directive(
+                    tokenizer, marker.format,
+                    marker.response_schema_json,
+                    output, error, error_size)) {
+                return false;
+            }
+            response_marker_index++;
         }
         if (messages[i].role == K3_CHAT_ROLE_SYSTEM &&
             messages[i].tools_json != NULL) {
@@ -1728,6 +1802,19 @@ bool k3_tokenizer_encode_chat(
         }
         single_marker_index++;
     }
+    while (response_marker_index <
+               selected->historical_response_format_count &&
+           selected->historical_response_formats[response_marker_index]
+                   .after_message_count == message_count) {
+        const k3_response_format_marker marker =
+            selected->historical_response_formats[response_marker_index];
+        if (!append_response_format_directive(
+                tokenizer, marker.format, marker.response_schema_json,
+                output, error, error_size)) {
+            return false;
+        }
+        response_marker_index++;
+    }
     if (marker_index != selected->historical_tool_choice_count) {
         set_error(error, error_size,
                   "historical tool choices were not fully rendered");
@@ -1737,6 +1824,12 @@ bool k3_tokenizer_encode_chat(
             selected->historical_single_tool_call_count) {
         set_error(error, error_size,
                   "historical single-tool directives were not fully rendered");
+        return false;
+    }
+    if (response_marker_index !=
+            selected->historical_response_format_count) {
+        set_error(error, error_size,
+                  "historical response formats were not fully rendered");
         return false;
     }
     if (!append_tool_choice_directive(

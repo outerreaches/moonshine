@@ -61,10 +61,11 @@ layer. `moonshine-server` uses the same layer for Chat Completions. Stateless
 requests zero-reset causal storage while retaining immutable expert-cache
 mappings. Requests carrying the same `X-Moonshine-Session` identifier may
 reuse retained in-process state only when the newly rendered full history is
-an exact token-prefix extension. Historical hidden tool-choice directives are
-restored at their original message boundaries before this comparison so an
-ordinary OpenAI tool-result history can continue the actual causal stream.
-Any mismatch resets causal state and prefills the canonical full history.
+an exact token-prefix extension. Historical hidden tool-choice, serial-call,
+and response-format directives are restored at their original message
+boundaries before this comparison so ordinary OpenAI history can continue the
+actual causal stream. Any mismatch resets causal state and prefills the
+canonical full history.
 
 ## OpenAI-compatible transport
 
@@ -117,13 +118,16 @@ the complete check passes, avoiding delivery of an invalid partial contract;
 reasoning remains token-live.
 
 K3 renders `required` and `none` as hidden system messages immediately before
-the generation prompt. Those messages are absent from the assistant history
-returned to the client. For the retained session only, Moonshine records the
-directive value and message boundary, then restores it before the historical
-assistant turn when rendering the next candidate prompt. Reuse proceeds only
-when this reconstructed prompt exactly extends every retained token. The
-canonical full replay remains the fallback; serialized checkpoints,
-approximate prefix matching, and state rewinds are not part of this path.
+the generation prompt. Serial-call and response-format controls have the same
+request-local causal property, and JSON Schema controls additionally carry the
+canonical schema text. Those messages are absent from the assistant history
+returned to the client. For the retained session only, Moonshine records each
+directive's value and message boundary and owns a copy of any schema text,
+then restores them in their original order before the historical assistant
+turn. Reuse proceeds only when this reconstructed prompt exactly extends every
+retained token. The canonical full replay remains the fallback; serialized
+checkpoints, approximate prefix matching, and state rewinds are not part of
+this path.
 
 There is no scheduler or hidden concurrency. A disconnected streaming client
 does not interrupt model execution mid-turn; the engine completes its semantic

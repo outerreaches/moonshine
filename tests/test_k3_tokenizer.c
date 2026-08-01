@@ -75,6 +75,10 @@ int main(int argc, char **argv) {
     k3_token_buffer single_tool_prompt = { 0 };
     k3_token_buffer retained_single_tool_turn = { 0 };
     k3_token_buffer augmented_single_tool_history = { 0 };
+    k3_token_buffer generated_structured_tail = { 0 };
+    k3_token_buffer retained_structured_turn = { 0 };
+    k3_token_buffer augmented_structured_history = { 0 };
+    k3_token_buffer canonical_structured_history = { 0 };
     k3_token_buffer thinking_prompt = { 0 };
     k3_token_buffer thinking_tail = { 0 };
     k3_token_buffer retained_thinking_turn = { 0 };
@@ -251,6 +255,124 @@ int main(int argc, char **argv) {
               "<|close|>message<|sep|><|end_of_msg|>"
               "<|open|>message role=\"assistant\"") != NULL,
           "official K3 json_schema directive rendering changed");
+
+    static const char generated_structured_output[] =
+        "{\"greeting\":\"hello\",\"count\":1}"
+        "<|close|>response<|sep|><|close|>message<|sep|>"
+        "<|end_of_msg|>";
+    CHECK(k3_tokenizer_encode(
+              tokenizer, generated_structured_output, true,
+              &generated_structured_tail, error, sizeof(error)),
+          error);
+    retained_structured_turn.count =
+        structured_prompt.count + generated_structured_tail.count;
+    retained_structured_turn.capacity = retained_structured_turn.count;
+    retained_structured_turn.data = (uint32_t *)malloc(
+        retained_structured_turn.count *
+            sizeof(*retained_structured_turn.data));
+    CHECK(retained_structured_turn.data != NULL,
+          "allocating retained structured-turn oracle failed");
+    memcpy(
+        retained_structured_turn.data,
+        structured_prompt.data,
+        structured_prompt.count * sizeof(*structured_prompt.data));
+    memcpy(
+        retained_structured_turn.data + structured_prompt.count,
+        generated_structured_tail.data,
+        generated_structured_tail.count *
+            sizeof(*generated_structured_tail.data));
+    static const k3_chat_message structured_history[] = {
+        {
+            .role = K3_CHAT_ROLE_USER,
+            .content = "Say hello.",
+        },
+        {
+            .role = K3_CHAT_ROLE_ASSISTANT,
+            .content = "{\"greeting\":\"hello\",\"count\":1}",
+        },
+        {
+            .role = K3_CHAT_ROLE_USER,
+            .content = "Return another JSON object.",
+        },
+    };
+    static const k3_response_format_marker schema_marker[] = {
+        {
+            .after_message_count = 1u,
+            .format = K3_RESPONSE_FORMAT_JSON_SCHEMA,
+            .response_schema_json = response_schema,
+        },
+    };
+    const k3_chat_options augmented_structured_options = {
+        .add_generation_prompt = true,
+        .thinking = false,
+        .response_format = K3_RESPONSE_FORMAT_JSON_OBJECT,
+        .historical_response_formats = schema_marker,
+        .historical_response_format_count =
+            sizeof(schema_marker) / sizeof(schema_marker[0]),
+    };
+    CHECK(k3_tokenizer_encode_chat(
+              tokenizer, structured_history,
+              sizeof(structured_history) / sizeof(structured_history[0]),
+              &augmented_structured_options,
+              &augmented_structured_history,
+              error, sizeof(error)) &&
+          augmented_structured_history.count >
+              retained_structured_turn.count &&
+          memcmp(
+              augmented_structured_history.data,
+              retained_structured_turn.data,
+              retained_structured_turn.count *
+                  sizeof(*retained_structured_turn.data)) == 0,
+          "historical response format did not reconstruct causal prefix");
+    k3_chat_options canonical_structured_options =
+        augmented_structured_options;
+    canonical_structured_options.historical_response_formats = NULL;
+    canonical_structured_options.historical_response_format_count = 0u;
+    CHECK(k3_tokenizer_encode_chat(
+              tokenizer, structured_history,
+              sizeof(structured_history) / sizeof(structured_history[0]),
+              &canonical_structured_options,
+              &canonical_structured_history,
+              error, sizeof(error)) &&
+          (canonical_structured_history.count <
+               retained_structured_turn.count ||
+           memcmp(
+               canonical_structured_history.data,
+               retained_structured_turn.data,
+               retained_structured_turn.count *
+                   sizeof(*retained_structured_turn.data)) != 0),
+          "canonical structured history unexpectedly retained a directive");
+    static const k3_response_format_marker invalid_format_marker[] = {
+        {
+            .after_message_count = 1u,
+            .format = K3_RESPONSE_FORMAT_TEXT,
+        },
+    };
+    k3_chat_options invalid_response_marker_options =
+        augmented_structured_options;
+    invalid_response_marker_options.historical_response_formats =
+        invalid_format_marker;
+    CHECK(!k3_tokenizer_encode_chat(
+              tokenizer, structured_history,
+              sizeof(structured_history) / sizeof(structured_history[0]),
+              &invalid_response_marker_options, &tokens,
+              error, sizeof(error)),
+          "a text historical response-format marker was accepted");
+    static const k3_response_format_marker missing_schema_marker[] = {
+        {
+            .after_message_count = 1u,
+            .format = K3_RESPONSE_FORMAT_JSON_SCHEMA,
+            .response_schema_json = NULL,
+        },
+    };
+    invalid_response_marker_options.historical_response_formats =
+        missing_schema_marker;
+    CHECK(!k3_tokenizer_encode_chat(
+              tokenizer, structured_history,
+              sizeof(structured_history) / sizeof(structured_history[0]),
+              &invalid_response_marker_options, &tokens,
+              error, sizeof(error)),
+          "an empty historical response schema was accepted");
 
     const k3_chat_options thinking_max = {
         .add_generation_prompt = true,
@@ -782,7 +904,7 @@ int main(int argc, char **argv) {
            "multilingual, special-token safety\n");
     printf("  XTML: non-thinking hello exact; thinking/max and "
            "multi-turn hashes exact; tools/results, append-prefix, and "
-           "hidden-choice prefix exact\n");
+           "hidden request-directive prefixes exact\n");
     result = 0;
 
 cleanup:
@@ -799,6 +921,10 @@ cleanup:
     k3_token_buffer_free(&single_tool_prompt);
     k3_token_buffer_free(&retained_single_tool_turn);
     k3_token_buffer_free(&augmented_single_tool_history);
+    k3_token_buffer_free(&generated_structured_tail);
+    k3_token_buffer_free(&retained_structured_turn);
+    k3_token_buffer_free(&augmented_structured_history);
+    k3_token_buffer_free(&canonical_structured_history);
     k3_token_buffer_free(&thinking_prompt);
     k3_token_buffer_free(&thinking_tail);
     k3_token_buffer_free(&retained_thinking_turn);
