@@ -26,6 +26,8 @@ typedef struct {
     char            *tools_json;
     size_t           tool_count;
     k3_tool_choice   tool_choice;
+    k3_response_format response_format;
+    char            *response_schema_json;
     bool             parallel_tool_calls;
 } k3_openai_chat_request;
 
@@ -37,6 +39,12 @@ bool k3_openai_parse_chat_request(
     size_t                   error_size);
 
 void k3_openai_chat_request_free(k3_openai_chat_request *request);
+
+bool k3_openai_validate_response_format(
+    const k3_openai_chat_request *request,
+    const k3_chat_turn_result    *result,
+    char                         *error,
+    size_t                        error_size);
 
 bool k3_openai_build_chat_response(
     const char                 *completion_id,

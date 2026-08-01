@@ -914,6 +914,10 @@ bool k3_chat_session_complete_messages_with_options(
         .tools_json = options == NULL ? NULL : options->tools_json,
         .tool_choice = options == NULL ? K3_TOOL_CHOICE_AUTO :
             options->tool_choice,
+        .response_format = options == NULL ?
+            K3_RESPONSE_FORMAT_TEXT : options->response_format,
+        .response_schema_json = options == NULL ? NULL :
+            options->response_schema_json,
         .historical_tool_choices = NULL,
         .historical_tool_choice_count = 0u,
     };

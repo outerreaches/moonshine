@@ -33,8 +33,9 @@ and the [Kimi K3 quickstart](https://platform.kimi.ai/docs/guide/kimi-k3-quickst
 
 `parallel_tool_calls` defaults to true. Explicit false is rejected until the
 engine can enforce a one-call generation constraint rather than silently
-accepting a request it may violate. Structured `response_format`, image input,
-sampling, and concurrent request slots remain outside this checkpoint.
+accepting a request it may violate. `response_format: {"type":"json_object"}`
+is supported; `json_schema`, image input, sampling, and concurrent request
+slots remain outside this checkpoint.
 
 ## Minimal two-request loop
 
@@ -212,5 +213,29 @@ The second turn streamed reasoning first, then “Goodbye! Have a great day!
 history reconnects to the exact retained causal state, rather than merely
 round-tripping as unused JSON metadata.
 
-The next gates are structured `response_format`, an enforceable
-`parallel_tool_calls: false` constraint, and an SDK-level SSE fixture.
+## JSON-object response format
+
+Moonshine implements K3's native hidden `response_format=json_object`
+directive for `response_format: {"type":"json_object"}`. After generation it
+parses the complete response and requires a top-level JSON object. A tool-call
+intermediate turn is exempt because it has no final response body.
+
+Structured SSE keeps reasoning token-live but buffers response content until
+validation succeeds. Invalid or non-object output produces an inference error
+without first streaming unvalidated content. A valid object is released as a
+single content chunk before the terminal event.
+
+The 8K low-effort live check requested a `greeting` key with value `hello`:
+
+| prompt | prompt time/rate | generation | decode time/rate | finish |
+|---:|---:|---:|---:|---|
+| 149 | 212.342 s / 0.702 t/s | 52 | 123.780 s / 0.420 t/s | `stop` |
+
+K3 produced `{"greeting":"hello"}`. Moonshine exposed reasoning during
+decode, withheld the response, validated its JSON/object root, then emitted
+the exact object in one SSE `delta.content` chunk.
+
+`response_format=json_schema` remains rejected until Moonshine has a bounded,
+declared JSON Schema validation surface. The next gates are that schema subset,
+an enforceable `parallel_tool_calls: false` constraint, and an SDK-level SSE
+fixture.

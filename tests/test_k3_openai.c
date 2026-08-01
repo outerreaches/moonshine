@@ -30,6 +30,7 @@ int main(void) {
         "{\"type\":\"input_text\",\"text\":\"hello 👋\"}]}],"
         "\"max_completion_tokens\":64,"
         "\"reasoning_effort\":\"low\","
+        "\"response_format\":{\"type\":\"json_object\"},"
         "\"stream\":true,"
         "\"n\":1,"
         "\"tools\":[]"
@@ -59,6 +60,7 @@ int main(void) {
           "content-part concatenation");
     CHECK(request.max_tokens == 64u && request.stream &&
           request.thinking &&
+          request.response_format == K3_RESPONSE_FORMAT_JSON_OBJECT &&
           strcmp(request.reasoning_effort, "low") == 0 &&
           strcmp(request.messages[2].reasoning_content, "Checked.") == 0,
           "generation parameters");
@@ -188,6 +190,18 @@ int main(void) {
               &total) &&
           total == 42u,
           "usage token count");
+    CHECK(!k3_openai_validate_response_format(
+              &request, &result, error, sizeof(error)),
+          "non-JSON structured response was accepted");
+    free(result.response.data);
+    result.response.data = strdup("{\"ready\":true}");
+    CHECK(result.response.data != NULL,
+          "structured response allocation");
+    result.response.size = strlen(result.response.data);
+    result.response.capacity = result.response.size + 1u;
+    CHECK(k3_openai_validate_response_format(
+              &request, &result, error, sizeof(error)),
+          error);
 
     k3_json_document_free(&response_document);
     memset(&response_document, 0, sizeof(response_document));
@@ -265,6 +279,10 @@ int main(void) {
         "{\"model\":\"moonshine\",\"messages\":["
         "{\"role\":\"user\",\"content\":\"x\"}],"
         "\"reasoning_effort\":\"medium\"}",
+        "{\"model\":\"moonshine\",\"messages\":["
+        "{\"role\":\"user\",\"content\":\"x\"}],"
+        "\"response_format\":{\"type\":\"json_schema\","
+        "\"json_schema\":{\"name\":\"x\",\"schema\":{}}}}",
         "{\"model\":\"moonshine\",\"messages\":["
         "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":["
         "{\"id\":\"a\",\"type\":\"function\",\"function\":{"

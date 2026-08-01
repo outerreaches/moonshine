@@ -76,6 +76,7 @@ int main(int argc, char **argv) {
     k3_token_buffer thinking_tail = { 0 };
     k3_token_buffer retained_thinking_turn = { 0 };
     k3_token_buffer continued_thinking_history = { 0 };
+    k3_token_buffer structured_prompt = { 0 };
     k3_text_buffer text = { 0 };
     k3_assistant_output assistant_output;
     memset(&assistant_output, 0, sizeof(assistant_output));
@@ -180,6 +181,33 @@ int main(int argc, char **argv) {
               &text, error, sizeof(error)) &&
           strcmp(text.data, hello_rendered) == 0,
           "non-thinking XTML rendering changed");
+
+    const k3_chat_options json_object_options = {
+        .add_generation_prompt = true,
+        .thinking = false,
+        .response_format = K3_RESPONSE_FORMAT_JSON_OBJECT,
+    };
+    CHECK(k3_tokenizer_encode_chat(
+              tokenizer, hello_messages,
+              sizeof(hello_messages) / sizeof(hello_messages[0]),
+              &json_object_options, &structured_prompt,
+              error, sizeof(error)) &&
+          k3_tokenizer_decode(
+              tokenizer, structured_prompt.data,
+              structured_prompt.count, true,
+              &text, error, sizeof(error)),
+          error);
+    CHECK(strstr(
+              text.data,
+              "<|open|>message role=\"system\" "
+              "type=\"response-format\"<|sep|>"
+              "The system is invoked with "
+              "`response_format=json_object`.\n"
+              "Your response must be raw JSON data without markdown code "
+              "blocks (```json) or any additional formatting."
+              "<|close|>message<|sep|><|end_of_msg|>"
+              "<|open|>message role=\"assistant\"") != NULL,
+          "official K3 json_object directive rendering changed");
 
     const k3_chat_options thinking_max = {
         .add_generation_prompt = true,
@@ -655,6 +683,7 @@ cleanup:
     k3_token_buffer_free(&thinking_tail);
     k3_token_buffer_free(&retained_thinking_turn);
     k3_token_buffer_free(&continued_thinking_history);
+    k3_token_buffer_free(&structured_prompt);
     k3_tokenizer_destroy(tokenizer);
     return result;
 }

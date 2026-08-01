@@ -25,6 +25,10 @@ Semantic Versioning once its first research-preview tag is published.
   parsing, JSON `reasoning_content`, and live SSE reasoning deltas.
 - A two-turn live reasoning qualification whose continuation reused all 127
   prior prompt/generated tokens and evaluated only a 25-token suffix.
+- Native `response_format=json_object` XTML, post-generation object
+  validation, and deferred-until-valid structured SSE content.
+- A live structured-output qualification that returned
+  `{"greeting":"hello"}` without exposing unvalidated response bytes.
 
 ### Changed
 

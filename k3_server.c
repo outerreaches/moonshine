@@ -63,6 +63,7 @@ typedef struct {
     size_t      pending_capacity;
     bool        pending_reasoning;
     bool        thinking;
+    bool        defer_content;
     struct timespec last_progress;
     bool        failed;
 } stream_state;
@@ -1010,6 +1011,12 @@ static void stream_end(stream_state *stream,
     if (stream->pending_size != 0u && !stream->failed) {
         (void)stream_send_pending(stream);
     }
+    if (stream->defer_content && !stream->failed &&
+        result->response.size != 0u) {
+        (void)stream_send_text_field(
+            stream, "content",
+            result->response.data, result->response.size);
+    }
     for (size_t i = 0u;
          i < result->tool_call_count && !stream->failed;
          i++) {
@@ -1203,6 +1210,8 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
             .completion_id = completion_id,
             .created = created,
             .thinking = request.thinking,
+            .defer_content = request.response_format !=
+                K3_RESPONSE_FORMAT_TEXT,
         };
         if (!stream_begin(&stream)) {
             k3_openai_chat_request_free(&request);
@@ -1220,16 +1229,23 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
             .reasoning_data = &stream,
             .tools_json = request.tools_json,
             .tool_choice = request.tool_choice,
+            .response_format = request.response_format,
+            .response_schema_json = request.response_schema_json,
             .preserve_tool_choice_history =
                 http->session_id != NULL,
         };
         ok = k3_chat_session_complete_messages_with_options(
             session, request.messages, request.message_count,
             request.max_tokens, &completion_options,
-            stream_callback, &stream,
+            stream.defer_content ? NULL : stream_callback,
+            &stream,
             &result, error, sizeof(error));
         if (ok) {
             ok = validate_tool_choice_result(
+                &request, &result, error, sizeof(error));
+        }
+        if (ok) {
+            ok = k3_openai_validate_response_format(
                 &request, &result, error, sizeof(error));
         }
         if (ok) {
@@ -1254,6 +1270,8 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
             .thinking_effort = request.reasoning_effort,
             .tools_json = request.tools_json,
             .tool_choice = request.tool_choice,
+            .response_format = request.response_format,
+            .response_schema_json = request.response_schema_json,
             .preserve_tool_choice_history =
                 http->session_id != NULL,
         };
@@ -1264,6 +1282,10 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
             &result, error, sizeof(error));
         if (ok) {
             ok = validate_tool_choice_result(
+                &request, &result, error, sizeof(error));
+        }
+        if (ok) {
+            ok = k3_openai_validate_response_format(
                 &request, &result, error, sizeof(error));
         }
         if (!ok) {

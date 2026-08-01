@@ -259,6 +259,9 @@ use](agentic-api.md). Keep the complete returned assistant message, including
 `reasoning_content` and all `tool_calls`, and return one matching `role:
 "tool"` message per call. K3 thinking is always enabled on the API;
 `reasoning_effort` accepts `low`, `high`, or `max` and defaults to `max`.
+Use `response_format: {"type":"json_object"}` for a validated top-level JSON
+object. Structured SSE response content arrives only after validation;
+reasoning still streams live.
 
 ## 12. Run prefill fixtures
 

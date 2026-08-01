@@ -1458,6 +1458,63 @@ static bool append_tool_choice_directive(
     }
 }
 
+static bool append_response_format_directive(
+        k3_tokenizer *tokenizer,
+        k3_response_format format,
+        const char *schema_json,
+        k3_token_buffer *output,
+        char *error,
+        size_t error_size) {
+    if (format == K3_RESPONSE_FORMAT_TEXT) {
+        return true;
+    }
+    if (format == K3_RESPONSE_FORMAT_JSON_OBJECT) {
+        return append_internal_system_message(
+            tokenizer, "response-format",
+            "The system is invoked with `response_format=json_object`.\n"
+            "Your response must be raw JSON data without markdown code "
+            "blocks (```json) or any additional formatting.",
+            output, error, error_size);
+    }
+    if (format != K3_RESPONSE_FORMAT_JSON_SCHEMA) {
+        set_error(error, error_size,
+                  "unsupported K3 response format %d", (int)format);
+        return false;
+    }
+    if (schema_json == NULL || schema_json[0] == '\0') {
+        set_error(error, error_size,
+                  "K3 JSON-schema response format needs a schema");
+        return false;
+    }
+    static const char prefix[] =
+        "The system is invoked with `response_format=json_schema`.\n"
+        "Your response must be raw JSON data without markdown code "
+        "blocks (```json) or any additional formatting.\n"
+        "The JSON data must match the following schema:\n"
+        "```json\n";
+    const size_t prefix_size = sizeof(prefix) - 1u;
+    const size_t schema_size = strlen(schema_json);
+    if (schema_size > SIZE_MAX - prefix_size - 5u) {
+        set_error(error, error_size,
+                  "K3 response schema is too large");
+        return false;
+    }
+    char *body = (char *)malloc(prefix_size + schema_size + 5u);
+    if (body == NULL) {
+        set_error(error, error_size,
+                  "allocating K3 response-schema directive failed");
+        return false;
+    }
+    memcpy(body, prefix, prefix_size);
+    memcpy(body + prefix_size, schema_json, schema_size);
+    memcpy(body + prefix_size + schema_size, "\n```", 5u);
+    const bool ok = append_internal_system_message(
+        tokenizer, "response-format", body,
+        output, error, error_size);
+    free(body);
+    return ok;
+}
+
 static bool validate_tool_choice_markers(
         const k3_chat_options *options,
         size_t message_count,
@@ -1518,6 +1575,8 @@ bool k3_tokenizer_encode_chat(
         .thinking_effort = NULL,
         .tools_json = NULL,
         .tool_choice = K3_TOOL_CHOICE_AUTO,
+        .response_format = K3_RESPONSE_FORMAT_TEXT,
+        .response_schema_json = NULL,
         .historical_tool_choices = NULL,
         .historical_tool_choice_count = 0u,
     };
@@ -1599,6 +1658,12 @@ bool k3_tokenizer_encode_chat(
     }
     if (!append_tool_choice_directive(
             tokenizer, selected->tool_choice,
+            output, error, error_size)) {
+        return false;
+    }
+    if (!append_response_format_directive(
+            tokenizer, selected->response_format,
+            selected->response_schema_json,
             output, error, error_size)) {
         return false;
     }

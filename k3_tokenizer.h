@@ -68,6 +68,12 @@ typedef enum {
     K3_TOOL_CHOICE_NONE = 2,
 } k3_tool_choice;
 
+typedef enum {
+    K3_RESPONSE_FORMAT_TEXT = 0,
+    K3_RESPONSE_FORMAT_JSON_OBJECT = 1,
+    K3_RESPONSE_FORMAT_JSON_SCHEMA = 2,
+} k3_response_format;
+
 typedef struct {
     /* Insert the historical directive before messages[after_message_count]. */
     size_t         after_message_count;
@@ -85,6 +91,9 @@ typedef struct {
     /* Compact, recursively key-sorted JSON array matching OpenAI tools. */
     const char *tools_json;
     k3_tool_choice tool_choice;
+    k3_response_format response_format;
+    /* Compact recursively key-sorted schema for JSON_SCHEMA. */
+    const char *response_schema_json;
     const k3_tool_choice_marker *historical_tool_choices;
     size_t historical_tool_choice_count;
 } k3_chat_options;

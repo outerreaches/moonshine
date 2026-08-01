@@ -603,6 +603,7 @@ void k3_openai_chat_request_free(
     free(request->messages);
     free(request->reasoning_effort);
     free(request->tools_json);
+    free(request->response_schema_json);
     free(request->model);
     memset(request, 0, sizeof(*request));
 }
@@ -988,9 +989,31 @@ bool k3_openai_parse_chat_request(
     if (response_format >= 0 &&
         !token_type(
             &document, response_format, K3_JSON_NULL)) {
-        set_error(error, error_size,
-                  "response_format is not implemented yet");
-        goto cleanup;
+        if (!token_type(
+                &document, response_format, K3_JSON_OBJECT)) {
+            set_error(error, error_size,
+                      "response_format must be an object");
+            goto cleanup;
+        }
+        const int32_t format_type = k3_json_object_get(
+            &document, response_format, "type");
+        if (k3_json_string_equal(
+                &document, format_type, "text")) {
+            request->response_format = K3_RESPONSE_FORMAT_TEXT;
+        } else if (k3_json_string_equal(
+                       &document, format_type, "json_object")) {
+            request->response_format =
+                K3_RESPONSE_FORMAT_JSON_OBJECT;
+        } else if (k3_json_string_equal(
+                       &document, format_type, "json_schema")) {
+            set_error(error, error_size,
+                      "response_format=json_schema is not implemented yet");
+            goto cleanup;
+        } else {
+            set_error(error, error_size,
+                      "response_format.type must be text, json_object, or json_schema");
+            goto cleanup;
+        }
     }
     ok = true;
 
@@ -1000,6 +1023,53 @@ cleanup:
         k3_openai_chat_request_free(request);
     }
     return ok;
+}
+
+bool k3_openai_validate_response_format(
+        const k3_openai_chat_request *request,
+        const k3_chat_turn_result *result,
+        char *error,
+        size_t error_size) {
+    if (request == NULL || result == NULL) {
+        set_error(error, error_size,
+                  "response-format validation arguments are invalid");
+        return false;
+    }
+    if (request->response_format == K3_RESPONSE_FORMAT_TEXT ||
+        result->tool_call_count != 0u) {
+        return true;
+    }
+    if (request->response_format !=
+        K3_RESPONSE_FORMAT_JSON_OBJECT) {
+        set_error(error, error_size,
+                  "unsupported response-format validator %d",
+                  (int)request->response_format);
+        return false;
+    }
+    k3_json_document document;
+    char parse_error[256] = { 0 };
+    const bool parsed = k3_json_parse(
+        &document,
+        result->response.data == NULL ? "" : result->response.data,
+        result->response.size,
+        parse_error, sizeof(parse_error));
+    if (!parsed) {
+        set_error(error, error_size,
+                  "model response is not valid JSON for "
+                  "response_format=json_object: %s",
+                  parse_error);
+        return false;
+    }
+    const bool object = document.root >= 0 &&
+        document.tokens[document.root].type == K3_JSON_OBJECT;
+    k3_json_document_free(&document);
+    if (!object) {
+        set_error(error, error_size,
+                  "model response must be a JSON object for "
+                  "response_format=json_object");
+        return false;
+    }
+    return true;
 }
 
 static bool build_tool_calls_fragment(

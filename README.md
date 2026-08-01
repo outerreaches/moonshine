@@ -98,6 +98,8 @@ They are engineering fixtures, not cross-project benchmark claims.
 | Low-effort thinking hello, 92-token prompt | 230.491 s / 0.399 tok/s |
 | Low-effort thinking hello, 35-token completion | 75.353 s / 0.464 tok/s |
 | Preserved-thinking continuation, 25 of 152 evaluated | 59.473 s / 0.420 tok/s |
+| Structured JSON object, 149-token prompt | 212.342 s / 0.702 tok/s |
+| Structured JSON object, 52-token completion | 123.780 s / 0.420 tok/s |
 
 The default range path matches the locked sequential state oracle exactly.
 The faster KDA dequantize-plus-hipBLAS path preserves the tested greedy token
@@ -281,6 +283,11 @@ Kimi K3 thinking is enabled on every API request. `reasoning_effort` accepts
 `reasoning_content`, `content`, and any `tool_calls`—back in the next request.
 Preserved reasoning then participates in the same exact causal-prefix gate.
 
+`response_format: {"type":"json_object"}` uses K3's native response-format
+directive and is validated after generation. For SSE, reasoning remains live
+but response content is buffered until Moonshine confirms valid JSON with a
+top-level object. `json_schema` is not implemented yet.
+
 ```sh
 curl --max-time 0 http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
@@ -348,7 +355,7 @@ Set `MOONSHINE_API_KEY` or pass `--api-key` to require bearer authentication.
 The server refuses a non-loopback bind without a key. It accepts text-only
 system/developer, user, assistant, and tool history, plus Kimi dynamic tool
 declarations on system messages. The engine is deterministic and greedy.
-`parallel_tool_calls: false`, structured response formats, sampling, parallel
+`parallel_tool_calls: false`, JSON Schema response formats, sampling, parallel
 request slots, and HTTP request chunking are not implemented yet.
 
 ## Obtain the model
@@ -458,7 +465,7 @@ HTTP/SSE service with a qualified two-turn function-tool loop are now locked.
 Agentic hidden-directive prefix recovery and the real SSE tool wire are also
 qualified locally, along with preserved thinking history and live reasoning
 deltas. Filled-128K workload behavior is still an open qualification item.
-Structured responses and enforceable non-parallel tool calls remain required
+JSON Schema responses and enforceable non-parallel tool calls remain required
 for the broader agentic surface.
 
 See [Architecture](docs/architecture.md) for the correctness model and
