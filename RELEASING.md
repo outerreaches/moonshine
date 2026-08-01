@@ -57,8 +57,8 @@ Update the version in `moonshine_version.h`, `CHANGELOG.md`, and
 `CITATION.cff`, commit the release, then create a signed annotated tag:
 
 ```sh
-git tag -s 0.1.0-research-preview \
-  -m "Moonshine 0.1.0 research preview"
+VERSION=x.y.z-research-preview
+git tag -s "$VERSION" -m "Moonshine $VERSION"
 ```
 
 Do not tag or publish model weights.

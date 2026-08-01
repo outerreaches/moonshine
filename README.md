@@ -68,14 +68,19 @@ correctness model.
 
 These are single-run results on an AMD Ryzen AI Max+ 395 / Radeon 8060S
 (`gfx1151`), Ubuntu 24.04, Linux 7.0, ROCm 7.2, and a Samsung 990 PRO. The
-startup, short-prompt, decode, and prefill rows were rerun from a detached clean
-checkout of `c041205`; the remaining rows are accepted checkpoint fixtures.
-They are engineering fixtures, not cross-project benchmark claims.
+startup, short-prompt, and decode rows were rerun from a detached clean
+checkout of `c041205`. Prefill and agentic rows are accepted fixtures from the
+later commits linked in the qualification documents. They are engineering
+fixtures, not cross-project benchmark claims.
+
+**Prefill rows are not all measured against the same routed-I/O regime**, so
+read the row labels before comparing them. See
+[Reading the prefill rows](#reading-the-prefill-rows) below.
 
 | workload | result |
 |---|---:|
 | Startup, Q8 static + 32 experts/layer | 38.1 s |
-| Short 24-token sequential prompt | 0.438 tok/s |
+| Short 24-token non-thinking sequential prompt | 0.438 tok/s |
 | Post-TTFT greedy decode | 0.509 tok/s |
 | Selected layer-major prefill, 512 positions | 4.145 tok/s |
 | Selected layer-major prefill, 8,192 positions | 8.126 tok/s |
@@ -112,6 +117,36 @@ They are engineering fixtures, not cross-project benchmark claims.
 | Official Python SDK tool call, 72 tokens | 185.008 s / 0.389 tok/s |
 | SDK result suffix, 42 of 330 tokens evaluated | 54.107 s / 0.776 tok/s |
 | SDK result answer, 37 tokens | 85.632 s / 0.432 tok/s |
+
+### Reading the prefill rows
+
+Layer-major prefill visits the routed store once per layer. Two different
+amounts of that store can be read, and the table contains rows from both:
+
+- **Selected** rows read only each layer's actual route union. This is the
+  production path.
+- **Full-store** and **Historical full-store** rows read an aggregate
+  1,446,793,422,960 bytes across one complete physical sweep of each of the 92
+  routed layers. This was the production path before selected reads landed,
+  and it is retained for rows that have not been re-measured.
+
+A `Full-store` row and a `Selected` row for the same workload therefore
+describe different amounts of I/O and **must not be compared as a backend
+result**. The gap between them is workload-dependent rather than fixed: at
+filled 8K the union is 69.8% of the store, but natural-text prompts route far
+more densely — 96.9% at 16K and 98.0% at 32K — so long natural prompts see
+little benefit while short agentic suffixes see a large one.
+
+One consequence is easy to misread. `Historical full-store diagnostic KDA
+hipBLAS, 8,192 positions` at 10.448 tok/s appears faster than
+`Selected layer-major prefill, 8,192 positions` at 8.126 tok/s, but the two
+measure different things: the first read 1.447 TB with a different projection
+backend, the second read 1.010 TB with the default one. The hipBLAS backend's
+effect on the **filled-8K selected path** has not been measured. The bounded
+selected path has been exercised on the 472-token natural-text and live SDK
+gates described below, but that does not supply a filled-8K performance row.
+The optimizations are independent — one reduces routed I/O, the other reduces
+KDA projection cost — so their full-length combination remains unqualified.
 
 The default range path matches the locked sequential state oracle exactly.
 Selected-only routed reads reduce the exact two-token range from 203.638 to

@@ -4,8 +4,8 @@ title: "Moonshine: a Kimi K3 inference engine for AMD Strix Halo"
 type: software
 authors:
   - name: "Moonshine contributors"
-version: "0.1.0-research-preview"
-date-released: 2026-07-30
+version: "0.2.0-research-preview"
+date-released: 2026-08-01
 license: MIT
 repository-code: "https://github.com/outerreaches/moonshine"
 abstract: >-

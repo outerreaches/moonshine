@@ -5,6 +5,15 @@ Semantic Versioning once its first research-preview tag is published.
 
 ## [Unreleased]
 
+## [0.2.0-research-preview] - 2026-08-01
+
+Adds an agentic serving surface — function tools, preserved thinking, and
+validated structured responses — on top of selected-expert prefill, and
+qualifies filled context and natural-text retrieval through 32K. Scope is
+unchanged from 0.1.0: a research preview for the pinned Kimi K3 checkpoint on
+a qualified 128 GB `gfx1151` host, not a general runtime, not portable across
+AMD architectures, and not source-precision equivalent.
+
 ### Added
 
 - Configurable-context full-residency and locked hello fixtures through the
@@ -69,6 +78,15 @@ Semantic Versioning once its first research-preview tag is published.
   211.473 to 104.469 seconds while retaining all 237 prior causal tokens.
 - A filled-8K exact-output gate at 1,008.104 seconds / 8.126 tok/s, with 30.2%
   fewer reads than the full-store ceiling and no dense-routing regression.
+- An exact filled-32K selected-prefill gate at 4,391.059 seconds / 7.462
+  token/s, plus a 31,999-token natural-text gate that retrieved fixed early,
+  middle, and late values at 7.488 token/s.
+- An opt-in range-only KDA dequantize-plus-hipBLAS backend exposed through the
+  retrieval and OpenAI qualification paths. It passed repeated bounded
+  natural-text and official-SDK tool-loop gates but remains diagnostic.
+- A portable model-free `test_k3_prefix_reuse` gate covering session
+  prefix-reuse admission, including edited-same-length history and count-
+  arithmetic boundaries. It runs in CPU-only CI without ROCm or model weights.
 
 ### Changed
 

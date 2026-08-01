@@ -1,5 +1,7 @@
 #include "k3_chat.h"
 
+#include "k3_prefix_reuse.h"
+
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -1147,24 +1149,21 @@ bool k3_chat_session_complete_messages_with_options(
                 session->tokenizer, messages, message_count,
                 &augmented_options, &augmented_prompt,
                 ignored_error, sizeof(ignored_error)) &&
-            augmented_prompt.count >=
-                session->retained_tokens.count + 2u &&
-            memcmp(
-                augmented_prompt.data,
+            k3_prefix_reuse_admits(
                 session->retained_tokens.data,
-                session->retained_tokens.count *
-                    sizeof(*augmented_prompt.data)) == 0) {
+                session->retained_tokens.count,
+                augmented_prompt.data,
+                augmented_prompt.count)) {
             prompt = &augmented_prompt;
             reused = session->retained_tokens.count;
         }
     }
     if (reuse_eligible && reused == 0u &&
-        canonical_prompt.count >=
-            session->retained_tokens.count + 2u &&
-        memcmp(
-            canonical_prompt.data, session->retained_tokens.data,
-            session->retained_tokens.count *
-                sizeof(*canonical_prompt.data)) == 0) {
+        k3_prefix_reuse_admits(
+            session->retained_tokens.data,
+            session->retained_tokens.count,
+            canonical_prompt.data,
+            canonical_prompt.count)) {
         reused = session->retained_tokens.count;
     }
     if (ok && reused == 0u) {

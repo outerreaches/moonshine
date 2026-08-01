@@ -32,12 +32,14 @@ K3_OBJS := \
 	k3_io_uring.o \
 	k3_json.o \
 	k3_openai.o \
+	k3_prefix_reuse.o \
 	k3_rocm_ops.o \
 	k3_safetensors.o \
 	k3_tokenizer.o
 
 PORTABLE_CPU_TESTS := \
 	tests/test_k3_expert_cache \
+	tests/test_k3_prefix_reuse \
 	tests/test_k3_json \
 	tests/test_k3_openai
 
@@ -151,7 +153,8 @@ tests: $(ALL_TESTS)
 k3_engine.o: k3_engine.cu k3_engine_state.inc k3_engine_prefill.inc k3_engine.h \
 	k3_prefill.h k3_static_store.h k3_expert_cache.h k3_io_uring.h \
 	k3_rocm_ops.h k3_safetensors.h
-k3_chat.o: k3_chat.c k3_chat.h k3_engine.h k3_tokenizer.h
+k3_chat.o: k3_chat.c k3_chat.h k3_engine.h k3_tokenizer.h k3_prefix_reuse.h
+k3_prefix_reuse.o: k3_prefix_reuse.c k3_prefix_reuse.h
 k3_chat_cli.o: k3_chat_cli.c k3_chat.h moonshine_version.h
 k3_server.o: k3_server.c k3_chat.h k3_json.h k3_openai.h \
 	moonshine_version.h
@@ -168,12 +171,16 @@ k3_tokenizer.o: k3_tokenizer.c k3_tokenizer.h
 tests/test_k3_chat_session.o: tests/test_k3_chat_session.c k3_chat.h
 tests/test_k3_long_context.o: tests/test_k3_long_context.c k3_chat.h
 tests/test_k3_openai.o: tests/test_k3_openai.c k3_openai.h k3_chat.h
+tests/test_k3_prefix_reuse.o: tests/test_k3_prefix_reuse.c k3_prefix_reuse.h
 tests/test_k3_tokenizer.o: tests/test_k3_tokenizer.c k3_tokenizer.h
 
 tests/test_k3_expert_cache: tests/test_k3_expert_cache.o k3_expert_cache.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 tests/test_k3_json: tests/test_k3_json.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+tests/test_k3_prefix_reuse: tests/test_k3_prefix_reuse.o k3_prefix_reuse.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 tests/test_k3_openai: tests/test_k3_openai.o k3_openai.o k3_json.o
@@ -202,11 +209,13 @@ $(ROCM_TESTS): %: %.o libmoonshine.a
 
 test-cpu: $(PORTABLE_CPU_TESTS)
 	./tests/test_k3_expert_cache
+	./tests/test_k3_prefix_reuse
 	./tests/test_k3_json
 	./tests/test_k3_openai
 
 test: \
 	tests/test_k3_expert_cache \
+	tests/test_k3_prefix_reuse \
 	tests/test_k3_json \
 	tests/test_k3_openai \
 	tests/test_k3_rocm_components \
@@ -215,6 +224,7 @@ test: \
 	tests/test_k3_mla_decode \
 	tests/test_k3_prefill_ops
 	./tests/test_k3_expert_cache
+	./tests/test_k3_prefix_reuse
 	./tests/test_k3_json
 	./tests/test_k3_openai
 	./tests/test_k3_rocm_components
