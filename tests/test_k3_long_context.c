@@ -18,8 +18,10 @@
     } while (0)
 
 enum {
-    K3_RETRIEVAL_CONTEXT = 16384,
+    K3_RETRIEVAL_DEFAULT_CONTEXT = 16384,
+    K3_RETRIEVAL_MAX_CONTEXT = 32768,
     K3_RETRIEVAL_DEFAULT_TARGET = 16000,
+    K3_RETRIEVAL_MAX_TARGET = 32000,
     K3_RETRIEVAL_MIN_TARGET = 512,
     K3_RETRIEVAL_MAX_GENERATED = 64,
 };
@@ -213,7 +215,7 @@ int main(int argc, char **argv) {
         const unsigned long parsed = strtoul(target_text, &end, 10);
         if (end == NULL || *end != '\0' ||
             parsed < K3_RETRIEVAL_MIN_TARGET ||
-            parsed > K3_RETRIEVAL_DEFAULT_TARGET) {
+            parsed > K3_RETRIEVAL_MAX_TARGET) {
             fprintf(stderr,
                     "invalid MOONSHINE_RETRIEVAL_TARGET: %s\n",
                     target_text);
@@ -280,6 +282,11 @@ int main(int argc, char **argv) {
                   alpha_record == 49u && bravo_record == 195u &&
                   charlie_record == 341u && prompt_size == 69938u,
               "default retrieval prompt construction changed");
+    } else if (target_prompt == K3_RETRIEVAL_MAX_TARGET) {
+        CHECK(tokens.count == 31999u && low == 781u &&
+                  alpha_record == 98u && bravo_record == 391u &&
+                  charlie_record == 684u && prompt_size == 139990u,
+              "32K retrieval prompt construction changed");
     }
     printf("K3 long-context retrieval plan: %zu/%u tokens, %u records, "
            "needles=%u/%u/%u, text=%zu bytes\n",
@@ -299,7 +306,8 @@ int main(int argc, char **argv) {
     k3_engine_stats engine_stats;
     const k3_chat_session_config config = {
         .model_root = argv[1],
-        .context = K3_RETRIEVAL_CONTEXT,
+        .context = target_prompt > K3_RETRIEVAL_DEFAULT_TARGET ?
+            K3_RETRIEVAL_MAX_CONTEXT : K3_RETRIEVAL_DEFAULT_CONTEXT,
         .sequential_prefill_limit = K3_CHAT_MEASURED_SEQUENTIAL_LIMIT,
         .experts_per_layer = 32u,
         .staging_slots = 16u,
