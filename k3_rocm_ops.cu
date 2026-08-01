@@ -1101,6 +1101,66 @@ __global__ static void k3_mla_softmax_kernel(
     }
 }
 
+__global__ static void k3_mla_causal_batch_softmax_kernel(
+        hip_bfloat16 *probabilities,
+        const float  *scores,
+        uint32_t      head_count,
+        uint32_t      first_token_count,
+        uint32_t      maximum_token_count) {
+    const uint32_t query = blockIdx.x / head_count;
+    const uint32_t head = blockIdx.x % head_count;
+    const uint32_t tid = threadIdx.x;
+    const uint32_t token_count = first_token_count + query;
+    const uint64_t base =
+        ((uint64_t)query * head_count + head) * maximum_token_count;
+    __shared__ float reduction[K3_ROCM_THREADS];
+    __shared__ float maximum;
+    __shared__ float denominator;
+    float local_maximum = -INFINITY;
+    for (uint32_t token = tid;
+         token < token_count;
+         token += blockDim.x) {
+        local_maximum = fmaxf(local_maximum, scores[base + token]);
+    }
+    reduction[tid] = local_maximum;
+    __syncthreads();
+    for (uint32_t width = K3_ROCM_THREADS / 2u;
+         width > 0;
+         width /= 2u) {
+        if (tid < width) {
+            reduction[tid] =
+                fmaxf(reduction[tid], reduction[tid + width]);
+        }
+        __syncthreads();
+    }
+    if (tid == 0) maximum = reduction[0];
+    __syncthreads();
+    float local_sum = 0.0f;
+    for (uint32_t token = tid;
+         token < token_count;
+         token += blockDim.x) {
+        local_sum += expf(scores[base + token] - maximum);
+    }
+    reduction[tid] = local_sum;
+    __syncthreads();
+    for (uint32_t width = K3_ROCM_THREADS / 2u;
+         width > 0;
+         width /= 2u) {
+        if (tid < width) reduction[tid] += reduction[tid + width];
+        __syncthreads();
+    }
+    if (tid == 0) denominator = reduction[0];
+    __syncthreads();
+    for (uint32_t token = tid;
+         token < maximum_token_count;
+         token += blockDim.x) {
+        probabilities[base + token] = token < token_count ?
+            k3_float_to_bf16(
+                expf(scores[base + token] - maximum) / denominator) :
+            k3_float_to_bf16(0.0f);
+    }
+}
+
 __device__ static inline float k3_kda_block_sum(float value,
                                                 float *wave_sums,
                                                 float *block_sum) {
@@ -2258,6 +2318,81 @@ extern "C" bool k3_rocm_blas_mla_attention_bf16(
         output, HIP_R_16BF, K3_MLA_LATENT_DIM,
         HIPBLAS_COMPUTE_32F,
         HIPBLAS_GEMM_DEFAULT);
+    return status == HIPBLAS_STATUS_SUCCESS;
+}
+
+extern "C" bool k3_rocm_blas_mla_attention_batch_bf16(
+        k3_rocm_blas_context *context,
+        void                 *output,
+        void                 *score_workspace,
+        void                 *probability_workspace,
+        const void           *absorbed_q,
+        const void           *cache,
+        uint32_t              head_count,
+        uint32_t              first_token_count,
+        uint32_t              query_count,
+        void                 *stream_pointer) {
+    if (!context || !context->handle || !output || !score_workspace ||
+        !probability_workspace || !absorbed_q || !cache ||
+        head_count == 0 || first_token_count == 0 || query_count == 0 ||
+        query_count > UINT16_MAX ||
+        first_token_count > UINT32_MAX - query_count + 1u) {
+        return false;
+    }
+    const uint32_t maximum_token_count =
+        first_token_count + query_count - 1u;
+    if (head_count > INT32_MAX || maximum_token_count > INT32_MAX) {
+        return false;
+    }
+    hipStream_t stream = (hipStream_t)stream_pointer;
+    if (hipblasSetStream(context->handle, stream) !=
+        HIPBLAS_STATUS_SUCCESS) {
+        return false;
+    }
+    const float score_alpha = 0.07216878364870322f;
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    const hipblasStride query_stride =
+        (hipblasStride)head_count * K3_MLA_CACHE_DIM;
+    const hipblasStride workspace_stride =
+        (hipblasStride)head_count * maximum_token_count;
+    const hipblasStride output_stride =
+        (hipblasStride)head_count * K3_MLA_LATENT_DIM;
+    hipblasStatus_t status = hipblasGemmStridedBatchedEx(
+        context->handle,
+        HIPBLAS_OP_T, HIPBLAS_OP_N,
+        (int)maximum_token_count, (int)head_count,
+        K3_MLA_CACHE_DIM,
+        &score_alpha,
+        cache, HIP_R_16BF, K3_MLA_CACHE_DIM, 0,
+        absorbed_q, HIP_R_16BF, K3_MLA_CACHE_DIM, query_stride,
+        &beta,
+        score_workspace, HIP_R_32F,
+        (int)maximum_token_count, workspace_stride,
+        (int)query_count,
+        HIPBLAS_COMPUTE_32F, HIPBLAS_GEMM_DEFAULT);
+    if (status != HIPBLAS_STATUS_SUCCESS) return false;
+    hipLaunchKernelGGL(k3_mla_causal_batch_softmax_kernel,
+                       dim3(query_count * head_count),
+                       dim3(K3_ROCM_THREADS), 0, stream,
+                       (hip_bfloat16 *)probability_workspace,
+                       (const float *)score_workspace,
+                       head_count, first_token_count,
+                       maximum_token_count);
+    if (hipGetLastError() != hipSuccess) return false;
+    status = hipblasGemmStridedBatchedEx(
+        context->handle,
+        HIPBLAS_OP_N, HIPBLAS_OP_N,
+        K3_MLA_LATENT_DIM, (int)head_count,
+        (int)maximum_token_count,
+        &alpha,
+        cache, HIP_R_16BF, K3_MLA_CACHE_DIM, 0,
+        probability_workspace, HIP_R_16BF,
+        (int)maximum_token_count, workspace_stride,
+        &beta,
+        output, HIP_R_16BF, K3_MLA_LATENT_DIM, output_stride,
+        (int)query_count,
+        HIPBLAS_COMPUTE_32F, HIPBLAS_GEMM_DEFAULT);
     return status == HIPBLAS_STATUS_SUCCESS;
 }
 

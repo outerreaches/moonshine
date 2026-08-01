@@ -281,6 +281,23 @@ bool k3_rocm_blas_mla_attention_bf16(
         uint32_t              token_count,
         void                 *stream);
 
+/*
+ * Diagnostic query-major causal batch. Each query sees one additional cache
+ * row beginning at first_token_count. Future probabilities are zero-padded
+ * to the final query's key length for a repeatable strided value GEMM.
+ */
+bool k3_rocm_blas_mla_attention_batch_bf16(
+        k3_rocm_blas_context *context,
+        void                 *output,
+        void                 *score_workspace,
+        void                 *probability_workspace,
+        const void           *absorbed_q,
+        const void           *cache,
+        uint32_t              head_count,
+        uint32_t              first_token_count,
+        uint32_t              query_count,
+        void                 *stream);
+
 bool k3_rocm_rms_norm_bf16(void       *output,
                             const void *input,
                             const void *weight,

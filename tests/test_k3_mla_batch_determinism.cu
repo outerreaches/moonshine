@@ -1,3 +1,5 @@
+#include "k3_rocm_ops.h"
+
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_runtime.h>
 #include <hipblas/hipblas.h>
@@ -471,6 +473,26 @@ int main(void) {
            (unsigned long long)output_mismatches, output_count,
            output_maximum);
 
+    k3_rocm_blas_context *api_blas = NULL;
+    if (!k3_rocm_blas_context_create(&api_blas) ||
+        !k3_rocm_blas_mla_attention_batch_bf16(
+            api_blas, d_batch_output, d_batch_scores,
+            d_batch_probabilities, d_queries, d_cache,
+            HEADS, BASE_TOKENS + 1u, QUERIES, NULL)) {
+        fprintf(stderr, "FAIL: public strided MLA batch API\n");
+        return 1;
+    }
+    HIP_CHECK(hipDeviceSynchronize());
+    HIP_CHECK(hipMemcpy(repeat_output, d_batch_output,
+                        output_count * sizeof(hip_bfloat16),
+                        hipMemcpyDeviceToHost));
+    const bool api_exact =
+        memcmp(batch_output, repeat_output,
+               output_count * sizeof(hip_bfloat16)) == 0;
+    printf("  public batch API: %s direct strided fixture\n",
+           api_exact ? "matches" : "DIFFERS FROM");
+    k3_rocm_blas_context_destroy(api_blas);
+
     float hybrid_ms = time_path(handle, run_hybrid,
                                 d_batch_output, d_batch_scores,
                                 d_batch_probabilities, d_queries, d_cache);
@@ -542,7 +564,7 @@ int main(void) {
     HIP_CHECK(hipFree(d_queries));
     HIP_CHECK(hipFree(d_cache));
     BLAS_CHECK(hipblasDestroy(handle));
-    if (score_mismatches != 0u || hybrid_mismatches != 0u ||
+    if (score_mismatches != 0u || hybrid_mismatches != 0u || !api_exact ||
         !repeatable || !atomics_same ||
         locked_atomics != HIPBLAS_ATOMICS_NOT_ALLOWED) {
         fprintf(stderr, "K3 MLA batch determinism: FAIL\n");
