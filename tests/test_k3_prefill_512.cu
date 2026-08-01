@@ -181,6 +181,9 @@ int main(int argc, char **argv) {
     } else if (token_count == 16384u && !kda_blas) {
         CHECK(next == 6244u && value == 26.875f,
               "16384-token default output changed");
+    } else if (token_count == 32768u && !kda_blas) {
+        CHECK(next == 40493u && value == 28.25f,
+              "32768-token default output changed");
     }
     CHECK(measured.routed_layer_sweeps == 92u &&
           measured.expert_read_requests ==

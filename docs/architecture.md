@@ -321,7 +321,14 @@ reading 1,059,505,184,536 bytes across 60,366 requests. Wall time was
 2,066.332 seconds / 7.929 token/s with locked token `6244` and value `26.875`.
 Compared with selected 8K, routed expert-pipeline time scales 1.996x, but the
 attention phase scales 2.206x; this is the first measured filled-context
-pressure. The complete evidence and 32K decision boundary are in
+pressure.
+
+At filled 32K, the selected union averages 678.2 experts per layer (286–893),
+reading 1,095,169,542,448 bytes across 62,398 requests. Wall time is 4,391.059
+seconds / 7.462 token/s with locked token `40493` and value `28.25`. Compared
+with 16K, the expert pipeline scales 1.917x and KDA 1.959x, while MLA scales
+2.804x and raises total attention to 57.3% of wall time. The complete evidence
+and host ledger are in
 [filled-context qualification](qualification-filled-context.md).
 
 The separate 15,993-token natural-text retrieval gate routes much more

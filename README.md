@@ -488,12 +488,13 @@ make test-prefill-scale \
 | --- | ---: |
 | Filled 8,192 positions | 8.126 tok/s |
 | Filled 16,384 positions | 7.929 tok/s |
+| Filled 32,768 positions | 7.462 tok/s |
 
-The 16K result retains 97.6% of the 8K throughput while doubling the filled
-prefix. Its routed-weight traffic rises only 4.9%, although attention time
-rises 2.206x and is now the first measured superlinear pressure. See the
+The 32K result retains 94.1% of the 16K throughput while doubling the filled
+prefix. Its routed-weight traffic rises only 3.4%, but attention time rises
+2.291x; KDA stays near-linear while MLA rises 2.804x. See the
 [filled-context qualification](docs/qualification-filled-context.md) for the
-complete phase ledger, host evidence, and the 32K decision boundary.
+complete phase ledger and host evidence.
 
 Run the separate deterministic natural-text retrieval gate:
 
@@ -507,8 +508,7 @@ retrieval keys near 12.5%, 50%, and 87.5%, and requires the exact decoded
 answer `saffron|7319|Nivens`. Set `MOONSHINE_RETRIEVAL_TARGET=512` for a
 short staged harness check; only the default 16K arm is the qualification.
 
-For the graduated filled-context program, set both values explicitly and run
-16K before 32K:
+For the graduated filled-context program, set both values explicitly:
 
 ```sh
 make test-prefill-scale \
@@ -518,7 +518,8 @@ make test-prefill-scale \
 ```
 
 The accepted selected-expert 16K run took about 34.4 minutes. The historical
-8K full-store backend below is diagnostic:
+32K run took about 73.2 minutes and can be reproduced by changing both values
+to `32768`. The historical 8K full-store backend below is diagnostic:
 
 ```sh
 make test-prefill-kda-blas \

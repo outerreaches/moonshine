@@ -35,7 +35,7 @@ context:
 | Selected read bytes | 1,059,505,184,536 |
 | Unique experts, min / mean / max | 276 / 656.2 / 889 |
 | Borrowed range workspace | 17.034 GiB |
-| Startup allocation | 39.101 GiB |
+| Startup time | 39.101 s |
 
 The phase ledger reconciled 2,066.330 of 2,066.332 seconds:
 
@@ -125,14 +125,73 @@ temperature peaked at 57 C composite / 67 C sensor 2. SMART retained zero
 warning/critical-temperature time, media errors, and error-log entries. The
 device data-unit delta was approximately 1.751 TB read.
 
-## 32K decision boundary
+## Accepted 32K result
 
-The payload-free 32K plan passes: it borrows 34.069 GiB of range workspace,
-allocates 864 MiB for MLA append state, stays within the 48.111 GiB expert
-cache, and requests no new device allocation. Based on the 16K attention
-curve, an execution is expected to take roughly 75–85 minutes.
+The unmodified production path completed 32,768 filled positions in a
+32,768-position context:
 
-The deterministic natural-text retrieval prerequisite now passes. The next
-decision is whether to investigate the attention scaling first or deliberately
-collect the 32K execution as a baseline. The 32K point is planned, not yet
-qualified.
+| Measurement | Result |
+| --- | ---: |
+| Wall time | 4,391.059 s |
+| Throughput | 7.462 tok/s |
+| Greedy token / value | `40493` / `28.25` |
+| Routed layer sweeps | 92 |
+| Selected read requests | 62,398 |
+| Selected read bytes | 1,095,169,542,448 |
+| Unique experts, min / mean / max | 286 / 678.2 / 893 |
+| Borrowed range workspace | 34.069 GiB |
+| Startup time | 39.213 s |
+
+The phase ledger reconciled 4,391.057 of 4,391.059 seconds:
+
+| Phase | Seconds |
+| --- | ---: |
+| Layer 0 | 44.803 |
+| Attention | 2,517.497 |
+| KDA within attention | 1,306.586 |
+| MLA within attention | 1,210.912 |
+| Router | 29.365 |
+| Expert streaming | 1,628.368 |
+| MoE tail | 171.013 |
+| Output | 0.010 |
+
+Within KDA, projection was 901.256 seconds, convolution 3.128, recurrence
+164.600, gate/norm 1.864, and output 234.839. Within expert streaming, read
+wait was 36.421 seconds, submission 5.950, index construction 5.118, and the
+expert pipeline 1,580.662.
+
+## Scaling from selected 16K
+
+| Measurement | Filled 16K | Filled 32K | Ratio |
+| --- | ---: | ---: | ---: |
+| Wall time | 2,066.332 s | 4,391.059 s | 2.125x |
+| Throughput | 7.929 tok/s | 7.462 tok/s | 0.941x |
+| Selected bytes | 1,059,505,184,536 | 1,095,169,542,448 | 1.034x |
+| Read requests | 60,366 | 62,398 | 1.034x |
+| Expert pipeline | 824.728 s | 1,580.662 s | 1.917x |
+| Attention | 1,098.760 s | 2,517.497 s | 2.291x |
+| KDA | 666.893 s | 1,306.586 s | 1.959x |
+| MLA | 431.868 s | 1,210.912 s | 2.804x |
+| Layer 0 | 22.049 s | 44.803 s | 2.032x |
+| Router | 15.094 s | 29.365 s | 1.945x |
+| MoE tail | 57.987 s | 171.013 s | 2.949x |
+
+Throughput retains 94.1% of the 16K rate. Selected weight traffic grows only
+3.4%, and the expert pipeline remains slightly sublinear. Attention now takes
+57.3% of total prefill. KDA remains approximately linear, while MLA grows
+2.804x and is the primary 32K optimization target. The MoE tail also needs
+profiling before attempting a larger filled-context performance arm.
+
+The unloaded host reported approximately 122 GiB available; 12 GiB remained
+available while the range workspace was borrowed. Swap allocation fell by
+2,506,752 bytes over the run, while cumulative counters moved by 13.58 MiB in
+and 0.70 MiB out. Sampled SSD temperatures peaked at 56 C composite and 60 C
+on sensor 2. SMART retained zero warning/critical-temperature time, media
+errors, and error-log entries. The SSD data-unit delta was approximately
+1.207 TB read and zero units written.
+
+The expensive execution completed immediately before its exact 32K assertion
+was added to the scale fixture; the production path and fixture inputs are
+otherwise source-equivalent. The next graduated step is a separate semantic
+32K quality gate. Filled 64K and 128K remain unqualified and should wait for
+MLA/tail investigation.

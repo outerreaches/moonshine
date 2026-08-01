@@ -340,7 +340,7 @@ make test-prefill-scale \
 ```
 
 Graduated filled-context tests require matching token and configured-context
-values. Qualify 16K before attempting 32K:
+values:
 
 ```sh
 make test-prefill-scale \
@@ -355,8 +355,10 @@ token/value, complete phase ledger, selected read union, memory/swap counters,
 SSD thermals, and a separate long-context quality probe.
 
 The accepted 16K default gate ends with token `6244`, value `26.875`, and
-7.929 tok/s. See [filled-context qualification](qualification-filled-context.md)
-before attempting the substantially longer 32K arm.
+7.929 tok/s. The accepted 32K gate ends with token `40493`, value `28.25`, and
+7.462 tok/s; reproduce it by changing both values above to `32768`. See
+[filled-context qualification](qualification-filled-context.md) before
+attempting the substantially longer arm.
 
 Run semantic retrieval separately from the repeated-token performance gate:
 
