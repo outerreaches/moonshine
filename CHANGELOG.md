@@ -90,6 +90,10 @@ AMD architectures, and not source-precision equivalent.
 - A configurable server output ceiling through `--max-output-tokens`, with an
   8K default, a bounded 32K maximum, context-aware clamping, and advertised
   context/output limits in health and model discovery.
+- A persistent-server 128K qualification with 30 expert slots per layer,
+  covering two independent requests while retaining the CMA-aware memory
+  guard; the 32-slot 128K configured-capacity result remains a single-request
+  fixture.
 
 ### Changed
 

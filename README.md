@@ -287,7 +287,8 @@ Use a larger qualified context without changing the weight residency:
 
 ## Run the OpenAI-compatible API
 
-The server keeps one Q8/32 engine resident and processes one request at a time.
+The server keeps one Q8 engine resident, defaults to 32 expert-cache slots per
+layer, and processes one request at a time.
 Requests are semantically stateless by default: the engine zero-resets causal
 state and renders the complete supplied text history. It preserves the routed
 expert cache across requests because the cache contains immutable model
@@ -310,6 +311,7 @@ Start a loopback-only 128K-capacity service:
   --host 127.0.0.1 \
   --port 8080 \
   --context 131072 \
+  --experts 30 \
   --max-output-tokens 32768
 ```
 
@@ -329,6 +331,15 @@ context remaining after the prompt and required XTML trailers. The 32K setting
 qualifies request admission and capacity accounting, not a 32K uninterrupted
 decode workload; at the measured decode rate such a workload would take many
 hours.
+
+On the qualified 128 GB host, use `--experts 30` for a long-lived 128K server.
+The original configured-capacity qualification used 32 slots and proved one
+cold request, but a later request must retain the warmed cache while allocating
+a separate prefill workspace. At 128K, 32 slots can leave less than the
+CMA-plus-4-GiB safety reserve and the second prefill is rejected. Two
+independent 128K requests passed with 30 slots, whose 45.104 GiB cache leaves
+about 3.0 GiB more headroom. Smaller contexts retain the qualified 32-slot
+default.
 
 Example requests:
 

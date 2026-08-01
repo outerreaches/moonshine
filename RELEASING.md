@@ -42,6 +42,12 @@ The admission gate may stop naturally; it does not need to generate the entire
 configured maximum. Record the commit, model revision, hardware, kernel, ROCm
 version, context, output ceiling, memory ledger, and timings.
 
+For a persistent 128K service on the qualified 128 GB host, use
+`--experts 30` and complete at least two independent prefills in the same
+process. The Q8/32 128K configured-capacity fixture covers one cold request;
+after its cache is warm, a separate prefill workspace may violate the retained
+CMA-plus-4-GiB guard. Do not weaken the guard to make that configuration pass.
+
 Run a final audit:
 
 ```sh

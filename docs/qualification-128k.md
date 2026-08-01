@@ -72,6 +72,37 @@ Server telemetry reported 24 prompt tokens in 54.844 seconds (0.438 tok/s)
 and 18 generated tokens in 36.114 seconds (0.498 tok/s). Client wall time was
 90.952 seconds, and the request ended normally with `finish_reason: stop`.
 
+That gate covered one cold request. It did not establish a persistent 32-slot
+128K service: the first prefill can lease the initially empty expert cache as
+workspace, whereas later independent prefills retain the warmed cache and
+allocate a separate workspace.
+
+## Persistent-server addendum
+
+On 2026-08-01, a 128K/32-slot server completed its first 92-token request but
+rejected the next prefill before inference:
+
+```text
+MemAvailable 9.879 GiB, workspace 0.225 GiB,
+CMA reserve 6.641 GiB, guard 4.000 GiB
+```
+
+This is the intended memory guard operating on a configuration with
+insufficient repeat-request headroom, not an allocation failure and not a
+reason to weaken the guard. Reducing the cache to 30 slots per layer changed
+cache residency from 48.111 GiB to 45.104 GiB. Two independent requests then
+completed at the same 131,072-position capacity:
+
+| request | prompt | prefill | generated | result |
+|---:|---:|---:|---:|---|
+| 1 | 92 tokens | 91.683 s | 1 token | HTTP 200 / `length` |
+| 2 | 93 tokens | 93.278 s | 1 token | HTTP 200 / `length` |
+
+Post-test `MemAvailable` was 13.1 GiB with no new swap observation. Use
+`--experts 30` for a persistent 128K API service on this host; retain the
+32-slot default for smaller contexts and for the locked Q8/32 performance
+fixtures.
+
 ## Regression coverage
 
 - `MOONSHINE_CONTEXT` now selects context for the full-residency and locked

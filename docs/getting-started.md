@@ -226,6 +226,7 @@ Start a loopback-only 128K-capacity service:
   --host 127.0.0.1 \
   --port 8080 \
   --context 131072 \
+  --experts 30 \
   --max-output-tokens 32768
 ```
 
@@ -249,6 +250,14 @@ defaults to 256 tokens or the smaller server ceiling. This is a maximum, not a
 forced response length: natural stop and remaining context can end generation
 earlier. Configuring a 32K ceiling does not claim qualification of a continuous
 32K decode.
+
+The 30-slot setting is deliberate for a persistent 128K service on the
+qualified 128 GB host. A cold first request can borrow the empty expert cache
+as its prefill workspace, but later requests retain warmed cache entries and
+need a separate workspace. The original 32-slot configured-capacity test does
+not leave reliable CMA-plus-guard headroom for that second allocation. Two
+independent live requests passed at 128K with 30 slots and a 45.104 GiB cache.
+Use the faster qualified 32-slot default at smaller contexts.
 
 Long prefill can take minutes. Configure client request/read timeouts
 accordingly; use `curl --max-time 0` for manual checks. Streaming requests emit
