@@ -29,7 +29,7 @@ static void usage(FILE *stream, const char *program) {
         "  --system TEXT              Initial system message\n"
         "  -n, --max-tokens N         Maximum generated tokens (default 256)\n"
         "  --context N                Context capacity (default 8192)\n"
-        "  --sequential-limit N       Token-major prompt limit (default 92)\n"
+        "  --sequential-limit N       Token-major prompt limit (default 7)\n"
         "  --load PATH                Import causal state after startup\n"
         "  --save PATH                Export causal state before exit\n"
         "  -h, --help                 Show this help\n"

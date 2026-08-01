@@ -43,9 +43,12 @@ turn API. The first call renders the optional system message plus user turn;
 later calls submit only the new user-message and assistant-opener XTML delta
 against retained causal state.
 
-Prompt scheduling is length-aware. The measured crossover is 92.4 tokens:
-the default uses token-major execution through 92 tokens and layer-major
-prefill from 93 tokens onward.
+Prompt scheduling is length-aware. After selected-only expert reads, the
+warm-cache crossover is effectively tied at 3 tokens and has only a 0.6%
+range-path lead at 6. The default conservatively uses token-major execution
+through 7 tokens and selected layer-major prefill from 8 onward, where two
+matched runs showed 1.121x and 1.119x speedups with exact output and causal
+state.
 Every model-produced token, including the final end-of-message marker, is fed
 back into the engine so the position is a complete-turn boundary. A length
 stop forces only the missing suffix of the official response/message trailer.
@@ -312,6 +315,15 @@ At filled 8K the union became denser but still averaged only 625.3 experts per
 layer (262–876), reducing traffic to 1,009,747,090,312 bytes across 57,531
 reads. Its locked token/value stayed exact and wall time improved from
 1,054.547 to 1,008.104 seconds.
+
+The matched crossover fixture warms the decode cache, then executes the same
+fixed token prefix sequentially and as one selected range on a single
+resident engine. Every point must match the greedy token, float bits, token
+position, and KDA, convolution, MLA, and AttnRes state hashes. Range prefill
+was a tie at 3 tokens, 1.025x faster at 4, 1.006x at 6, 1.119x at 8, 1.222x
+at 12, 1.285x at 16, 1.577x at 24, 1.794x at 32, and 2.108x at 42. The
+production switch begins at 8 to keep the marginal 3--6-token region on the
+simpler schedule.
 
 Cold prefill may borrow a precisely planned slice of the empty 48.111 GiB
 decode cache for workspace. Warm continuation must retain the useful cache and

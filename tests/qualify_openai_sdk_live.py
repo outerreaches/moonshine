@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one real Moonshine tool-call stream through the official Python SDK."""
+"""Run a real Moonshine tool loop through the official Python SDK."""
 
 from __future__ import annotations
 
@@ -10,46 +10,9 @@ import openai
 from openai import OpenAI
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--base-url", default="http://127.0.0.1:18084/v1"
-    )
-    args = parser.parse_args()
-    client = OpenAI(
-        base_url=args.base_url,
-        api_key="moonshine-local-qualification",
-        timeout=1200.0,
-    )
-    stream = client.chat.completions.create(
-        model="moonshine",
-        messages=[{
-            "role": "user",
-            "content": "Use the weather tool to check Toronto.",
-        }],
-        tools=[{
-            "type": "function",
-            "function": {
-                "name": "get_weather",
-                "description": "Get current weather for a city",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"city": {"type": "string"}},
-                    "required": ["city"],
-                    "additionalProperties": False,
-                },
-            },
-        }],
-        tool_choice="required",
-        reasoning_effort="low",
-        max_completion_tokens=192,
-        stream=True,
-        extra_headers={
-            "X-Moonshine-Session": "openai-sdk-live-qualification"
-        },
-    )
-
+def consume_stream(stream):
     reasoning: list[str] = []
+    content: list[str] = []
     calls: dict[int, dict[str, str]] = {}
     finish_reason: str | None = None
     usage: tuple[int, int, int] | None = None
@@ -58,6 +21,8 @@ def main() -> None:
         piece = getattr(choice.delta, "reasoning_content", None)
         if piece:
             reasoning.append(piece)
+        if choice.delta.content:
+            content.append(choice.delta.content)
         for call in choice.delta.tool_calls or []:
             accumulated = calls.setdefault(
                 call.index, {"id": "", "name": "", "arguments": ""}
@@ -77,9 +42,57 @@ def main() -> None:
                 chunk.usage.completion_tokens,
                 chunk.usage.total_tokens,
             )
+    if usage is None or usage[2] != usage[0] + usage[1]:
+        raise AssertionError(f"invalid terminal usage {usage!r}")
+    return "".join(reasoning), "".join(content), calls, finish_reason, usage
 
-    if finish_reason != "tool_calls":
-        raise AssertionError(f"unexpected finish reason {finish_reason!r}")
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--base-url", default="http://127.0.0.1:18084/v1"
+    )
+    args = parser.parse_args()
+    client = OpenAI(
+        base_url=args.base_url,
+        api_key="moonshine-local-qualification",
+        timeout=1200.0,
+    )
+    messages = [{
+        "role": "user",
+        "content": "Use the weather tool to check Toronto.",
+    }]
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get current weather for a city",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+                "additionalProperties": False,
+            },
+        },
+    }]
+    headers = {"X-Moonshine-Session": "openai-sdk-live-qualification"}
+    first_stream = client.chat.completions.create(
+        model="moonshine",
+        messages=messages,
+        tools=tools,
+        tool_choice="required",
+        reasoning_effort="low",
+        max_completion_tokens=192,
+        stream=True,
+        extra_headers=headers,
+    )
+    reasoning, content, calls, finish_reason, first_usage = consume_stream(
+        first_stream
+    )
+    if finish_reason != "tool_calls" or content:
+        raise AssertionError(
+            f"unexpected first finish/content {finish_reason!r}/{content!r}"
+        )
     if list(calls) != [0]:
         raise AssertionError(f"unexpected tool-call indexes {list(calls)!r}")
     call = calls[0]
@@ -89,13 +102,56 @@ def main() -> None:
         raise AssertionError(f"unexpected arguments {call['arguments']!r}")
     if not call["id"].startswith("call_chatcmpl-moonshine-"):
         raise AssertionError(f"unexpected tool-call ID {call['id']!r}")
-    if not "".join(reasoning):
+    if not reasoning:
         raise AssertionError("the SDK did not expose reasoning_content")
-    if usage is None or usage[2] != usage[0] + usage[1]:
-        raise AssertionError(f"invalid terminal usage {usage!r}")
+
+    messages.extend([
+        {
+            "role": "assistant",
+            "reasoning_content": reasoning,
+            "content": None,
+            "tool_calls": [{
+                "id": call["id"],
+                "type": "function",
+                "function": {
+                    "name": call["name"],
+                    "arguments": call["arguments"],
+                },
+            }],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": call["id"],
+            "content": '{"weather":"sunny","temperature_c":22}',
+        },
+    ])
+    second_stream = client.chat.completions.create(
+        model="moonshine",
+        messages=messages,
+        tools=tools,
+        tool_choice="auto",
+        reasoning_effort="low",
+        max_completion_tokens=192,
+        stream=True,
+        extra_headers=headers,
+    )
+    second_reasoning, answer, second_calls, second_finish, second_usage = (
+        consume_stream(second_stream)
+    )
+    if second_finish != "stop" or second_calls:
+        raise AssertionError(
+            f"unexpected result turn {second_finish!r}/{second_calls!r}"
+        )
+    if not second_reasoning:
+        raise AssertionError("result turn omitted reasoning_content")
+    answer_lower = answer.lower()
+    if not all(piece in answer_lower for piece in ("toronto", "sunny", "22")):
+        raise AssertionError(f"unexpected result answer {answer!r}")
     print(
-        "OpenAI Python SDK live Moonshine tool stream: PASS "
-        f"(openai {openai.__version__}, usage={usage[0]}/{usage[1]}/{usage[2]})"
+        "OpenAI Python SDK live Moonshine tool loop: PASS "
+        f"(openai {openai.__version__}, "
+        f"usage={first_usage[0]}/{first_usage[1]}/{first_usage[2]} -> "
+        f"{second_usage[0]}/{second_usage[1]}/{second_usage[2]})"
     )
 
 

@@ -186,9 +186,11 @@ Toronto was sunny at 22 °C, and stopped naturally.
 
 Compared with the earlier qualified full-replay result turn, prefill time fell
 from 224.927 to 104.913 seconds (53.4%), while complete result-turn latency
-fell from 281.686 to 160.776 seconds (42.9%, about 1.75x faster). The 42-token
-suffix remains below the measured 93-token layer-major crossover and therefore
-uses exact token-major execution.
+fell from 281.686 to 160.776 seconds (42.9%, about 1.75x faster). This run
+predated selected-prefill crossover promotion and used token-major execution.
+The exact matched fixture now measures a 42-token selected range at 43.742
+seconds versus 92.208 seconds sequentially, so the default schedules this
+suffix layer-major. A fresh live API requalification is recorded separately.
 
 ## Preserved-thinking qualification
 
@@ -380,14 +382,38 @@ exact SSE shape and proves that the client:
 - preserves `finish_reason=tool_calls` and terminal usage;
 - transmits `parallel_tool_calls=false` and the session header.
 
-The real-model gate then connected the same SDK directly to an 8K Moonshine
-server. It exposed non-empty reasoning, parsed
+The original real-model gate connected the same SDK directly to an 8K
+Moonshine server. It exposed non-empty reasoning, parsed
 `get_weather({"city":"Toronto"})`, preserved its generated call ID and
 terminal usage, and completed with `tool_calls`:
 
 | prompt | prompt time/rate | generation | decode time/rate | usage |
 |---:|---:|---:|---:|---:|
 | 216 | 216.773 s / 0.996 t/s | 72 | 185.008 s / 0.389 t/s | 216/72/288 |
+
+After selected-expert crossover promotion, the live fixture was extended to
+return the complete assistant reasoning/tool-call object, submit a synthetic
+sunny/22 °C tool result under the same session, and validate the final answer:
+
+| phase | prompt total | evaluated | reused | prefill | generated | decode | finish |
+|---|---:|---:|---:|---:|---:|---:|---|
+| required weather call | 216 | 216 | 0 | 139.855 s | 72 | 185.240 s | `tool_calls` |
+| weather result answer | 330 | 42 | 288 | 54.107 s | 37 | 85.632 s | `stop` |
+
+The first prefill is 35.5% faster than its exact earlier full-store SDK run.
+The second request reused the complete first prompt and completion, scheduled
+its 42-token suffix through selected layer-major prefill, exposed reasoning,
+made no extra call, and answered with Toronto, sunny, and 22 °C. Its route
+union averaged 220.9 experts per layer (118--355), reading 332.167 GiB. The
+matched synthetic crossover remains the schedule-comparison authority because
+the earlier live 42-token qualification used a different conversation.
+
+The Samsung 990 PRO peaked at 60 °C composite / 69 °C sensor 2 during the
+loop, then cooled to 52/57 °C. SMART retained zero warning/critical thermal
+time, media/data-integrity errors, and error-log entries. No active swap I/O
+was observed, although allocated swap increased by 112,496,640 bytes from the
+preceding selected-prefill checkpoint; this run therefore does not claim zero
+swap growth.
 
 The SDK is a qualification-only dependency; Moonshine's engine, server, and
 native client still require no Python runtime.

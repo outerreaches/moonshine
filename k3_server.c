@@ -125,7 +125,7 @@ static void usage(FILE *stream, const char *program) {
         "  --port PORT           TCP port (default 8080)\n"
         "  --api-key KEY         Require Authorization: Bearer KEY\n"
         "  --context TOKENS      Context capacity (default 8192)\n"
-        "  --sequential-limit N  Token-major prompt limit (default 92)\n"
+        "  --sequential-limit N  Token-major prompt limit (default 7)\n"
         "  --experts N           Resident expert slots per layer (default 32)\n"
         "  --staging N           Expert staging slots (default 16)\n"
         "  --max-body BYTES      Maximum JSON request body (default 8388608)\n"

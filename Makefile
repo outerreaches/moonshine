@@ -18,6 +18,7 @@ ICU_LDLIBS ?= $(shell pkg-config --libs icu-i18n 2>/dev/null || \
 MOONSHINE_MODEL ?=
 MOONSHINE_CONTEXT ?= 8192
 MOONSHINE_PREFILL_TOKENS ?= 512
+MOONSHINE_CROSSOVER_TOKENS ?= 2 3 4 6 8 12 16 24 32 42
 MOONSHINE_STATE_DIR ?= /tmp
 
 K3_OBJS := \
@@ -62,6 +63,7 @@ ROCM_TESTS := \
 	tests/test_k3_moe_smoke \
 	tests/test_k3_prefill_512 \
 	tests/test_k3_prefill_chunk \
+	tests/test_k3_prefill_crossover \
 	tests/test_k3_prefill_gemm_shapes \
 	tests/test_k3_prefill_ops \
 	tests/test_k3_q8_projection \
@@ -79,6 +81,7 @@ ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS)
 	test-model-layout test-model-components test-engine-init \
 	test-engine-hello test-chat-hello test-state-checkpoint test-tokenizer \
 	test-prefill-2 test-prefill-scale test-prefill-kda-blas \
+	test-prefill-crossover \
 	test-openai-sdk clean
 
 all: libmoonshine.a moonshine-chat moonshine-server
@@ -112,6 +115,8 @@ help:
 	@echo "                               Run the default layer-major scale fixture"
 	@echo "  make test-prefill-kda-blas MOONSHINE_MODEL=/path/to/Kimi-K3 MOONSHINE_PREFILL_TOKENS=8192"
 	@echo "                               Run the diagnostic KDA hipBLAS candidate"
+	@echo "  make test-prefill-crossover MOONSHINE_MODEL=/path/to/Kimi-K3 MOONSHINE_CROSSOVER_TOKENS='2 4 8 16'"
+	@echo "                               Compare exact warm sequential/range suffixes"
 	@echo "  make clean                  Remove local build products"
 
 libmoonshine.a: $(K3_OBJS)
@@ -256,6 +261,10 @@ test-prefill-scale: check-model tests/test_k3_prefill_512
 test-prefill-kda-blas: check-model tests/test_k3_prefill_512
 	./tests/test_k3_prefill_512 \
 		"$(MOONSHINE_MODEL)" "$(MOONSHINE_PREFILL_TOKENS)" kda-blas
+
+test-prefill-crossover: check-model tests/test_k3_prefill_crossover
+	./tests/test_k3_prefill_crossover \
+		"$(MOONSHINE_MODEL)" $(MOONSHINE_CROSSOVER_TOKENS)
 
 clean:
 	rm -f libmoonshine.a moonshine-chat moonshine-server \

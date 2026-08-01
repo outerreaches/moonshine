@@ -40,7 +40,8 @@ Semantic Versioning once its first research-preview tag is published.
   a time, reused 496 then 690 causal tokens, and produced a final combined
   answer.
 - A pinned official OpenAI Python SDK 2.52.0 SSE replay fixture plus a live
-  8K tool-call qualification against Moonshine.
+  8K two-request tool loop against Moonshine, including causal reuse, the
+  tool-result answer, terminal usage, and indexed streaming calls.
 - Exact structured-session prefix recovery by restoring historical JSON-object
   or owned canonical JSON Schema directives at their causal boundaries.
 - A two-turn live schema qualification that reused all 237 retained tokens,
@@ -50,6 +51,8 @@ Semantic Versioning once its first research-preview tag is published.
   ledgers and per-layer route-union telemetry.
 - Exact selected-prefill gates reducing the two-token range from 203.638 to
   7.961 seconds and the locked 512-token range from 239.325 to 123.519 seconds.
+- A warm-cache crossover fixture comparing sequential and selected range
+  execution on one resident engine with exact output and causal-state gates.
 - A paired live structured continuation whose 117-token prefill fell from
   211.473 to 104.469 seconds while retaining all 237 prior causal tokens.
 - A filled-8K exact-output gate at 1,008.104 seconds / 8.126 tok/s, with 30.2%
@@ -69,6 +72,9 @@ Semantic Versioning once its first research-preview tag is published.
   directive causal history.
 - Treat payload-free routed I/O totals as validated full-store ceilings;
   runtime now reads and exactly accounts only each layer's routed union.
+- Lower the default sequential-prefill limit from 92 to 7 after repeated
+  matched runs showed a stable 1.12x range-path lead at 8 tokens and 2.11x at
+  42 tokens; retain the marginal 3--6-token region on the sequential path.
 - Reject required-tool generations that exhaust their token budget without
   producing a call instead of returning an unsatisfied length-stopped turn.
 

@@ -106,8 +106,11 @@ They are engineering fixtures, not cross-project benchmark claims.
 | Full-store structured continuation, 117 of 354 evaluated | 210.464 s / 0.556 tok/s |
 | Selected structured first turn, 184 tokens | 129.058 s / 1.426 tok/s |
 | Selected structured continuation, 117 of 354 evaluated | 104.469 s / 1.120 tok/s |
-| Official Python SDK tool prompt, 216 tokens | 216.773 s / 0.996 tok/s |
+| Full-store Python SDK tool prompt, 216 tokens | 216.773 s / 0.996 tok/s |
+| Selected Python SDK tool prompt, 216 tokens | 139.855 s / 1.544 tok/s |
 | Official Python SDK tool call, 72 tokens | 185.008 s / 0.389 tok/s |
+| SDK result suffix, 42 of 330 tokens evaluated | 54.107 s / 0.776 tok/s |
+| SDK result answer, 37 tokens | 85.632 s / 0.432 tok/s |
 
 The default range path matches the locked sequential state oracle exactly.
 Selected-only routed reads reduce the exact two-token range from 203.638 to
@@ -213,10 +216,9 @@ Stop every other large model process first, then run:
 
 Enter one user message per line. The engine stays resident and retains causal
 and expert-cache state across turns. Short prompts use token-major execution
-through 92 tokens; prompts of 93 tokens or more use layer-major prefill. The
-92-token boundary is the prior conservative full-sweep crossover. Selected-
-expert prefill materially lowers range cost, so a new matched crossover sweep
-is pending before lowering the production threshold.
+through 7 tokens; prompts of 8 tokens or more use selected layer-major
+prefill. A warm-cache, same-engine crossover fixture requires bit-identical
+output and complete causal state before reporting either timing.
 
 One-shot mode writes response text to stdout and telemetry to stderr:
 
@@ -379,15 +381,16 @@ agentic latency optimization.
 
 In the qualified SSE function loop, Moonshine reconstructed the prior hidden
 `tool_choice: "required"` directive, reused all 196 retained prompt/generated
-tokens, and evaluated only the 42-token result-turn suffix. Prefill fell from
-the earlier full-replay 224.927 seconds to 104.913 seconds. Any reconstructed
-prefix mismatch still takes the isolated full-prefill fallback.
+tokens, and evaluated only the 42-token result-turn suffix. Before selected-
+prefill crossover promotion, that token-major suffix took 104.913 seconds;
+the matched range fixture now takes 43.742 seconds for 42 tokens. Any
+reconstructed prefix mismatch still takes the isolated full-prefill fallback.
 
 In a two-turn JSON Schema continuation, Moonshine reconstructed the prior
 schema directive and reused all 237 retained prompt/generated tokens. It
 evaluated only the 117-token suffix of the 354-token second prompt and returned
-validated `{"greeting":"goodbye"}`. That suffix still exceeds the measured
-93-token layer-major threshold. Selected-only routed I/O reduced its prefill
+validated `{"greeting":"goodbye"}`. That suffix exceeds the measured
+8-token layer-major threshold. Selected-only routed I/O reduced its prefill
 from the paired 211.473-second full-store baseline to 104.469 seconds while
 preserving exact causal reuse and output. Exact reuse removes history-length
 growth; route-union service removes the unused-expert tax from the remaining
@@ -511,8 +514,10 @@ HTTP/SSE service with a qualified two-turn function-tool loop are now locked.
 Agentic hidden-directive prefix recovery and the real SSE tool wire are also
 qualified locally, along with preserved thinking history and live reasoning
 deltas. Bounded JSON Schema responses and serial non-parallel tool loops are
-also locally qualified. Filled-128K workload behavior remains open; the next
-agentic gate is SDK-level consumption of reasoning and indexed tool-call SSE.
+also locally qualified. The official Python SDK now consumes reasoning and
+indexed tool-call SSE across a complete two-request loop. Filled-128K workload
+behavior and broader numerical/quality qualification of the faster diagnostic
+KDA backend remain open.
 
 See [Architecture](docs/architecture.md) for the correctness model and
 [Provenance](docs/provenance.md) for code lineage, references, and

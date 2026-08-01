@@ -15,8 +15,8 @@ extern "C" {
 typedef struct k3_chat_session k3_chat_session;
 
 enum {
-    /* Sequential remains faster through 92 whole tokens; switch at 93. */
-    K3_CHAT_MEASURED_SEQUENTIAL_LIMIT = 92,
+    /* Keep the noisy 3..6-token crossover on sequential; switch at 8. */
+    K3_CHAT_MEASURED_SEQUENTIAL_LIMIT = 7,
 };
 
 typedef struct {

@@ -296,6 +296,17 @@ Exact sequential/range comparison:
 make test-prefill-2 MOONSHINE_MODEL="$MOONSHINE_MODEL"
 ```
 
+Warm-cache, bit-exact sequential/selected crossover sweep:
+
+```sh
+make test-prefill-crossover \
+  MOONSHINE_MODEL="$MOONSHINE_MODEL"
+```
+
+Override `MOONSHINE_CROSSOVER_TOKENS` with a quoted space-separated list for
+a shorter sweep. The qualified default keeps sequential prefill through 7
+tokens and selects range prefill from 8 onward.
+
 Default 512-token scale test:
 
 ```sh
