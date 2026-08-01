@@ -941,6 +941,187 @@ bool k3_json_bool(const k3_json_document *document,
     return false;
 }
 
+typedef struct {
+    int32_t key;
+    int32_t value;
+    char   *decoded_key;
+} k3_json_object_pair;
+
+static int compare_object_pairs(const void *left, const void *right) {
+    const k3_json_object_pair *a =
+        (const k3_json_object_pair *)left;
+    const k3_json_object_pair *b =
+        (const k3_json_object_pair *)right;
+    return strcmp(a->decoded_key, b->decoded_key);
+}
+
+static bool compact_sorted_append(
+        const k3_json_document *document,
+        int32_t token,
+        k3_json_builder *builder,
+        char *error,
+        size_t error_size) {
+    if (!token_valid(document, token)) {
+        set_error(error, error_size, "invalid JSON token");
+        return false;
+    }
+    const k3_json_token selected = document->tokens[token];
+    if (selected.type == K3_JSON_STRING) {
+        char *decoded = NULL;
+        char *escaped = NULL;
+        size_t escaped_size = 0u;
+        const bool ok =
+            k3_json_string_dup(
+                document, token, &decoded,
+                error, error_size) &&
+            k3_json_escape(
+                decoded, strlen(decoded),
+                &escaped, &escaped_size,
+                error, error_size) &&
+            builder_append(
+                builder, escaped, escaped_size,
+                error, error_size);
+        free(escaped);
+        free(decoded);
+        return ok;
+    }
+    if (selected.type != K3_JSON_ARRAY &&
+        selected.type != K3_JSON_OBJECT) {
+        return builder_append(
+            builder, document->source + selected.start,
+            selected.end - selected.start,
+            error, error_size);
+    }
+    if (selected.type == K3_JSON_ARRAY) {
+        if (!builder_append(builder, "[", 1u, error, error_size)) {
+            return false;
+        }
+        int32_t child = selected.first_child;
+        for (size_t i = 0u; i < selected.size; i++) {
+            if (child < 0 ||
+                (i != 0u && !builder_append(
+                    builder, ",", 1u, error, error_size)) ||
+                !compact_sorted_append(
+                    document, child, builder,
+                    error, error_size)) {
+                return false;
+            }
+            child = document->tokens[child].next_sibling;
+        }
+        return builder_append(builder, "]", 1u, error, error_size);
+    }
+
+    k3_json_object_pair *pairs = NULL;
+    if (selected.size != 0u) {
+        if (selected.size > SIZE_MAX / sizeof(*pairs)) {
+            set_error(error, error_size, "JSON object is too large");
+            return false;
+        }
+        pairs = (k3_json_object_pair *)calloc(
+            selected.size, sizeof(*pairs));
+        if (pairs == NULL) {
+            set_error(error, error_size,
+                      "allocating sorted JSON object failed");
+            return false;
+        }
+    }
+    bool ok = true;
+    int32_t child = selected.first_child;
+    for (size_t i = 0u; i < selected.size; i++) {
+        if (child < 0) {
+            ok = false;
+            set_error(error, error_size,
+                      "malformed parsed JSON object");
+            break;
+        }
+        const int32_t value = document->tokens[child].next_sibling;
+        if (value < 0 || !k3_json_string_dup(
+                document, child, &pairs[i].decoded_key,
+                error, error_size)) {
+            ok = false;
+            break;
+        }
+        pairs[i].key = child;
+        pairs[i].value = value;
+        child = document->tokens[value].next_sibling;
+    }
+    if (ok && selected.size > 1u) {
+        qsort(pairs, selected.size, sizeof(*pairs),
+              compare_object_pairs);
+    }
+    if (ok) {
+        ok = builder_append(builder, "{", 1u, error, error_size);
+    }
+    for (size_t i = 0u; ok && i < selected.size; i++) {
+        if (i != 0u) {
+            ok = builder_append(
+                builder, ",", 1u, error, error_size);
+        }
+        char *escaped = NULL;
+        size_t escaped_size = 0u;
+        if (ok) {
+            ok = k3_json_escape(
+                pairs[i].decoded_key,
+                strlen(pairs[i].decoded_key),
+                &escaped, &escaped_size,
+                error, error_size) &&
+                builder_append(
+                    builder, escaped, escaped_size,
+                    error, error_size) &&
+                builder_append(
+                    builder, ":", 1u,
+                    error, error_size) &&
+                compact_sorted_append(
+                    document, pairs[i].value, builder,
+                    error, error_size);
+        }
+        free(escaped);
+    }
+    if (ok) {
+        ok = builder_append(builder, "}", 1u, error, error_size);
+    }
+    for (size_t i = 0u; i < selected.size; i++) {
+        free(pairs[i].decoded_key);
+    }
+    free(pairs);
+    return ok;
+}
+
+bool k3_json_compact_sorted_dup(
+        const k3_json_document *document,
+        int32_t token,
+        char **json,
+        size_t *json_size,
+        char *error,
+        size_t error_size) {
+    if (json == NULL || !token_valid(document, token)) {
+        set_error(error, error_size,
+                  "JSON compact arguments are invalid");
+        return false;
+    }
+    *json = NULL;
+    if (json_size != NULL) {
+        *json_size = 0u;
+    }
+    k3_json_builder builder = { 0 };
+    if (!compact_sorted_append(
+            document, token, &builder,
+            error, error_size)) {
+        free(builder.data);
+        return false;
+    }
+    if (!builder_reserve(&builder, 0u, error, error_size)) {
+        free(builder.data);
+        return false;
+    }
+    builder.data[builder.size] = '\0';
+    *json = builder.data;
+    if (json_size != NULL) {
+        *json_size = builder.size;
+    }
+    return true;
+}
+
 bool k3_json_escape(const char *text,
                     size_t text_size,
                     char **escaped,

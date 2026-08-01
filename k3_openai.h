@@ -21,6 +21,10 @@ typedef struct {
     size_t           message_count;
     uint32_t         max_tokens;
     bool             stream;
+    char            *tools_json;
+    size_t           tool_count;
+    k3_tool_choice   tool_choice;
+    bool             parallel_tool_calls;
 } k3_openai_chat_request;
 
 bool k3_openai_parse_chat_request(

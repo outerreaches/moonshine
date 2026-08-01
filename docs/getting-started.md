@@ -253,6 +253,11 @@ different identifier performs a semantic reset and full prefill.
 Use `--clear-expert-cache-per-request` only to reproduce cold-cache
 benchmarks.
 
+Function tools are supported through Chat Completions. Run the complete
+declaration, call, result, and final-answer example in [Agentic API and tool
+use](agentic-api.md). Keep the complete returned assistant message, including
+all `tool_calls`, and return one matching `role: "tool"` message per call.
+
 ## 12. Run prefill fixtures
 
 Exact sequential/range comparison:

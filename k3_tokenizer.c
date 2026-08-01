@@ -1,5 +1,7 @@
 #include "k3_tokenizer.h"
 
+#include "k3_json.h"
+
 #include <unicode/uregex.h>
 #include <unicode/utext.h>
 #include <unicode/utypes.h>
@@ -1110,6 +1112,240 @@ static bool append_thinking_effort(
     return ok;
 }
 
+static bool append_tool_declare(
+        k3_tokenizer *tokenizer,
+        const char *tools_json,
+        bool dynamic,
+        k3_token_buffer *output,
+        char *error,
+        size_t error_size) {
+    if (tools_json == NULL || tools_json[0] == '\0') {
+        return true;
+    }
+    static const char normal_prefix[] =
+        "# Tools\n"
+        "Here are the available tools, described in JSONSchema.\n\n"
+        "```json\n";
+    static const char dynamic_prefix[] =
+        "## New Tools Available\n"
+        "The system dynamically extends the toolset via lazy-loading.\n"
+        "You have access to all existing and extended tools.\n"
+        "Here are the specs for the extended tools.\n\n"
+        "```json\n";
+    static const char suffix[] = "\n```";
+    const char *prefix = dynamic ? dynamic_prefix : normal_prefix;
+    const size_t prefix_size = strlen(prefix);
+    const size_t tools_size = strlen(tools_json);
+    const size_t suffix_size = sizeof(suffix) - 1u;
+    if (prefix_size > SIZE_MAX - tools_size ||
+        prefix_size + tools_size > SIZE_MAX - suffix_size - 1u) {
+        set_error(error, error_size,
+                  "tool declaration size overflow");
+        return false;
+    }
+    const size_t body_size = prefix_size + tools_size + suffix_size;
+    char *body = (char *)malloc(body_size + 1u);
+    if (body == NULL) {
+        set_error(error, error_size,
+                  "allocating tool declaration failed");
+        return false;
+    }
+    memcpy(body, prefix, prefix_size);
+    memcpy(body + prefix_size, tools_json, tools_size);
+    memcpy(body + prefix_size + tools_size, suffix, suffix_size + 1u);
+    const bool ok = append_internal_system_message(
+        tokenizer, "tool-declare", body,
+        output, error, error_size);
+    free(body);
+    return ok;
+}
+
+static const char *json_type_name(k3_json_type type) {
+    switch (type) {
+        case K3_JSON_STRING: return "string";
+        case K3_JSON_NUMBER: return "number";
+        case K3_JSON_TRUE:
+        case K3_JSON_FALSE: return "boolean";
+        case K3_JSON_NULL: return "null";
+        case K3_JSON_OBJECT: return "object";
+        case K3_JSON_ARRAY: return "array";
+        default: return NULL;
+    }
+}
+
+static bool append_tool_call(
+        k3_tokenizer *tokenizer,
+        const k3_tool_call *call,
+        size_t index,
+        k3_token_buffer *output,
+        char *error,
+        size_t error_size) {
+    if (call->name == NULL || call->name[0] == '\0' ||
+        call->arguments == NULL) {
+        set_error(error, error_size,
+                  "tool calls need a name and JSON arguments");
+        return false;
+    }
+    char index_text[32];
+    snprintf(index_text, sizeof(index_text), "%zu", index);
+    const char *call_keys[] = { "tool", "index" };
+    const char *call_values[] = { call->name, index_text };
+    if (!open_tag(
+            tokenizer, "call", call_keys, call_values, 2u,
+            output, error, error_size)) {
+        return false;
+    }
+
+    k3_json_document document;
+    char parse_error[256];
+    if (!k3_json_parse(
+            &document, call->arguments, strlen(call->arguments),
+            parse_error, sizeof(parse_error))) {
+        const char *json_keys[] = { "type" };
+        const char *json_values[] = { "object" };
+        return
+            open_tag(
+                tokenizer, "json", json_keys, json_values, 1u,
+                output, error, error_size) &&
+            append_ordinary(
+                tokenizer, call->arguments,
+                output, error, error_size) &&
+            close_tag(
+                tokenizer, "json", output,
+                error, error_size) &&
+            close_tag(
+                tokenizer, "call", output,
+                error, error_size);
+    }
+    bool ok = false;
+    if (document.tokens[document.root].type != K3_JSON_OBJECT) {
+        set_error(error, error_size,
+                  "tool call arguments must be a JSON object");
+        goto cleanup;
+    }
+    int32_t key = document.tokens[document.root].first_child;
+    ok = true;
+    for (size_t i = 0u;
+         ok && i < document.tokens[document.root].size;
+         i++) {
+        if (key < 0) {
+            set_error(error, error_size,
+                      "malformed tool arguments object");
+            ok = false;
+            break;
+        }
+        const int32_t value = document.tokens[key].next_sibling;
+        char *decoded_key = NULL;
+        char *rendered_value = NULL;
+        const char *type = value < 0 ? NULL :
+            json_type_name(document.tokens[value].type);
+        if (value < 0 || type == NULL ||
+            !k3_json_string_dup(
+                &document, key, &decoded_key,
+                error, error_size)) {
+            free(decoded_key);
+            ok = false;
+            break;
+        }
+        if (document.tokens[value].type == K3_JSON_STRING) {
+            ok = k3_json_string_dup(
+                &document, value, &rendered_value,
+                error, error_size);
+        } else {
+            ok = k3_json_compact_sorted_dup(
+                &document, value, &rendered_value, NULL,
+                error, error_size);
+        }
+        const char *argument_keys[] = { "key", "type" };
+        const char *argument_values[] = { decoded_key, type };
+        if (ok) {
+            ok = open_tag(
+                    tokenizer, "argument",
+                    argument_keys, argument_values, 2u,
+                    output, error, error_size) &&
+                append_ordinary(
+                    tokenizer, rendered_value,
+                    output, error, error_size) &&
+                close_tag(
+                    tokenizer, "argument", output,
+                    error, error_size);
+        }
+        free(rendered_value);
+        free(decoded_key);
+        key = document.tokens[value].next_sibling;
+    }
+    if (ok) {
+        ok = close_tag(
+            tokenizer, "call", output,
+            error, error_size);
+    }
+
+cleanup:
+    k3_json_document_free(&document);
+    return ok;
+}
+
+static bool append_assistant_tool_calls(
+        k3_tokenizer *tokenizer,
+        const k3_chat_message *message,
+        k3_token_buffer *output,
+        char *error,
+        size_t error_size) {
+    if (message->tool_call_count == 0u) {
+        return true;
+    }
+    if (message->tool_calls == NULL ||
+        !open_tag(
+            tokenizer, "tools", NULL, NULL, 0u,
+            output, error, error_size)) {
+        if (message->tool_calls == NULL) {
+            set_error(error, error_size,
+                      "tool call count has no call array");
+        }
+        return false;
+    }
+    for (size_t i = 0u; i < message->tool_call_count; i++) {
+        if (!append_tool_call(
+                tokenizer, &message->tool_calls[i], i + 1u,
+                output, error, error_size)) {
+            return false;
+        }
+    }
+    return close_tag(
+        tokenizer, "tools", output,
+        error, error_size);
+}
+
+static bool append_tool_result_message(
+        k3_tokenizer *tokenizer,
+        const k3_chat_message *message,
+        size_t index,
+        k3_token_buffer *output,
+        char *error,
+        size_t error_size) {
+    if (message->name == NULL || message->name[0] == '\0') {
+        set_error(error, error_size,
+                  "tool result needs a resolved tool name");
+        return false;
+    }
+    char index_text[32];
+    snprintf(index_text, sizeof(index_text), "%zu", index);
+    const char *keys[] = { "role", "tool", "index" };
+    const char *values[] = { "tool", message->name, index_text };
+    return
+        open_tag(
+            tokenizer, "message", keys, values, 3u,
+            output, error, error_size) &&
+        append_ordinary(
+            tokenizer,
+            message->content == NULL ? "" : message->content,
+            output, error, error_size) &&
+        close_tag(
+            tokenizer, "message", output,
+            error, error_size) &&
+        end_message(output, error, error_size);
+}
+
 static bool append_chat_message(
         k3_tokenizer *tokenizer,
         const k3_chat_message *message,
@@ -1128,6 +1364,10 @@ static bool append_chat_message(
         case K3_CHAT_ROLE_ASSISTANT:
             role = "assistant";
             break;
+        case K3_CHAT_ROLE_TOOL:
+            set_error(error, error_size,
+                      "tool messages use the tool-result renderer");
+            return false;
         default:
             set_error(error, error_size,
                       "unsupported K3 chat role %d", (int)message->role);
@@ -1172,6 +1412,11 @@ static bool append_chat_message(
                 error, error_size)) {
             return false;
         }
+        if (!append_assistant_tool_calls(
+                tokenizer, message, output,
+                error, error_size)) {
+            return false;
+        }
     } else if (!append_ordinary(
                    tokenizer, content, output,
                    error, error_size)) {
@@ -1203,23 +1448,66 @@ bool k3_tokenizer_encode_chat(
         .add_generation_prompt = true,
         .thinking = false,
         .thinking_effort = NULL,
+        .tools_json = NULL,
+        .tool_choice = K3_TOOL_CHOICE_AUTO,
     };
     const k3_chat_options *selected =
         options == NULL ? &defaults : options;
     output->count = 0u;
 
+    if (!append_tool_declare(
+            tokenizer, selected->tools_json, false,
+            output, error, error_size)) {
+        return false;
+    }
     if (selected->thinking &&
         !append_thinking_effort(
             tokenizer, selected->thinking_effort,
             output, error, error_size)) {
         return false;
     }
+    size_t tool_result_index = 0u;
     for (size_t i = 0u; i < message_count; i++) {
-        if (!append_chat_message(
-                tokenizer, &messages[i], selected->thinking,
-                output, error, error_size)) {
+        if (messages[i].role == K3_CHAT_ROLE_SYSTEM &&
+            messages[i].tools_json != NULL) {
+            if (!append_tool_declare(
+                    tokenizer, messages[i].tools_json, true,
+                    output, error, error_size)) {
+                return false;
+            }
+            continue;
+        }
+        if (messages[i].role == K3_CHAT_ROLE_ASSISTANT) {
+            tool_result_index = 0u;
+        }
+        if (messages[i].role == K3_CHAT_ROLE_TOOL) {
+            tool_result_index++;
+            if (!append_tool_result_message(
+                    tokenizer, &messages[i], tool_result_index,
+                    output, error, error_size)) {
+                return false;
+            }
+        } else if (!append_chat_message(
+                       tokenizer, &messages[i], selected->thinking,
+                       output, error, error_size)) {
             return false;
         }
+    }
+    if (selected->tool_choice == K3_TOOL_CHOICE_REQUIRED &&
+        !append_internal_system_message(
+            tokenizer, "tool-choice",
+            "The system is invoked with `tool_choice=required`.\n"
+            "You MUST call tools in the next message.",
+            output, error, error_size)) {
+        return false;
+    }
+    if (selected->tool_choice == K3_TOOL_CHOICE_NONE &&
+        !append_internal_system_message(
+            tokenizer, "tool-choice",
+            "The system is invoked with `tool_choice=none`.\n"
+            "You MUST NOT call any tools in the next message.",
+            output, error, error_size)) {
+        return false;
     }
     if (!selected->add_generation_prompt) {
         return true;
@@ -1232,4 +1520,539 @@ bool k3_tokenizer_encode_chat(
     return open_tag(
         tokenizer, selected->thinking ? "think" : "response",
         NULL, NULL, 0u, output, error, error_size);
+}
+
+typedef struct {
+    const k3_tokenizer *tokenizer;
+    const uint32_t     *tokens;
+    size_t              count;
+    size_t              position;
+} k3_xtml_cursor;
+
+static bool decode_range(
+        const k3_xtml_cursor *cursor,
+        size_t begin,
+        size_t end,
+        k3_text_buffer *text,
+        char *error,
+        size_t error_size) {
+    if (begin > end || end > cursor->count) {
+        set_error(error, error_size,
+                  "invalid XTML token range");
+        return false;
+    }
+    for (size_t i = begin; i < end; i++) {
+        if (cursor->tokens[i] >= K3_TOKEN_BOS) {
+            set_error(error, error_size,
+                      "unexpected control token inside XTML text");
+            return false;
+        }
+    }
+    return k3_tokenizer_decode(
+        cursor->tokenizer, cursor->tokens + begin, end - begin,
+        false, text, error, error_size);
+}
+
+static bool consume_tag(
+        k3_xtml_cursor *cursor,
+        uint32_t marker,
+        const char *expected_tag,
+        char **header,
+        char *error,
+        size_t error_size) {
+    if (header != NULL) {
+        *header = NULL;
+    }
+    if (cursor->position >= cursor->count ||
+        cursor->tokens[cursor->position] != marker) {
+        set_error(error, error_size,
+                  "expected XTML %s tag %s",
+                  marker == K3_TOKEN_OPEN ? "open" : "close",
+                  expected_tag);
+        return false;
+    }
+    const size_t begin = ++cursor->position;
+    while (cursor->position < cursor->count &&
+           cursor->tokens[cursor->position] != K3_TOKEN_SEP) {
+        if (cursor->tokens[cursor->position] >= K3_TOKEN_BOS) {
+            set_error(error, error_size,
+                      "malformed XTML tag header");
+            return false;
+        }
+        cursor->position++;
+    }
+    if (cursor->position >= cursor->count) {
+        set_error(error, error_size,
+                  "unterminated XTML tag header");
+        return false;
+    }
+    k3_text_buffer decoded = { 0 };
+    if (!decode_range(
+            cursor, begin, cursor->position,
+            &decoded, error, error_size)) {
+        k3_text_buffer_free(&decoded);
+        return false;
+    }
+    cursor->position++;
+    const size_t tag_size = strlen(expected_tag);
+    const bool matches = decoded.size >= tag_size &&
+        memcmp(decoded.data, expected_tag, tag_size) == 0 &&
+        (decoded.size == tag_size || decoded.data[tag_size] == ' ');
+    if (!matches) {
+        set_error(error, error_size,
+                  "expected XTML tag %s, got %s",
+                  expected_tag,
+                  decoded.data == NULL ? "" : decoded.data);
+        k3_text_buffer_free(&decoded);
+        return false;
+    }
+    if (header != NULL) {
+        *header = decoded.data;
+        decoded.data = NULL;
+    }
+    k3_text_buffer_free(&decoded);
+    return true;
+}
+
+static bool next_open_tag_is(
+        const k3_xtml_cursor *cursor,
+        const char *tag) {
+    if (cursor->position >= cursor->count ||
+        cursor->tokens[cursor->position] != K3_TOKEN_OPEN) {
+        return false;
+    }
+    size_t end = cursor->position + 1u;
+    while (end < cursor->count &&
+           cursor->tokens[end] < K3_TOKEN_BOS) {
+        end++;
+    }
+    if (end >= cursor->count ||
+        cursor->tokens[end] != K3_TOKEN_SEP) {
+        return false;
+    }
+    k3_text_buffer header = { 0 };
+    if (!decode_range(
+            cursor, cursor->position + 1u, end,
+            &header, NULL, 0u)) {
+        k3_text_buffer_free(&header);
+        return false;
+    }
+    const size_t tag_size = strlen(tag);
+    const bool matches = header.size >= tag_size &&
+        memcmp(header.data, tag, tag_size) == 0 &&
+        (header.size == tag_size || header.data[tag_size] == ' ');
+    k3_text_buffer_free(&header);
+    return matches;
+}
+
+static char *xtml_attr_dup(
+        const char *header,
+        const char *key,
+        char *error,
+        size_t error_size) {
+    const size_t key_size = strlen(key);
+    const char *cursor = header;
+    while ((cursor = strchr(cursor, ' ')) != NULL) {
+        cursor++;
+        if (strlen(cursor) < key_size + 2u ||
+            strncmp(cursor, key, key_size) != 0 ||
+            cursor[key_size] != '=' ||
+            cursor[key_size + 1u] != '"') {
+            continue;
+        }
+        const char *value = cursor + key_size + 2u;
+        const char *end = strchr(value, '"');
+        if (end == NULL) {
+            break;
+        }
+        k3_text_buffer decoded = { 0 };
+        const char *part = value;
+        while (part < end) {
+            if (*part != '&') {
+                if (!append_text_bytes(
+                        &decoded, part, 1u,
+                        error, error_size)) {
+                    k3_text_buffer_free(&decoded);
+                    return NULL;
+                }
+                part++;
+                continue;
+            }
+            const char *replacement = NULL;
+            size_t consumed = 0u;
+            if ((size_t)(end - part) >= 5u &&
+                memcmp(part, "&amp;", 5u) == 0) {
+                replacement = "&";
+                consumed = 5u;
+            } else if ((size_t)(end - part) >= 6u &&
+                       memcmp(part, "&quot;", 6u) == 0) {
+                replacement = "\"";
+                consumed = 6u;
+            } else {
+                set_error(error, error_size,
+                          "unsupported XTML attribute escape");
+                k3_text_buffer_free(&decoded);
+                return NULL;
+            }
+            if (!append_text_bytes(
+                    &decoded, replacement, 1u,
+                    error, error_size)) {
+                k3_text_buffer_free(&decoded);
+                return NULL;
+            }
+            part += consumed;
+        }
+        if (decoded.data == NULL) {
+            decoded.data = strdup("");
+            if (decoded.data == NULL) {
+                set_error(error, error_size,
+                          "allocating XTML attribute failed");
+                return NULL;
+            }
+        }
+        return decoded.data;
+    }
+    set_error(error, error_size,
+              "XTML tag lacks attribute %s", key);
+    return NULL;
+}
+
+static bool append_json_argument(
+        k3_text_buffer *arguments,
+        const char *key,
+        const char *type,
+        const char *value,
+        bool first,
+        char *error,
+        size_t error_size) {
+    char *escaped_key = NULL;
+    char *rendered_value = NULL;
+    size_t escaped_key_size = 0u;
+    size_t rendered_value_size = 0u;
+    bool ok = k3_json_escape(
+        key, strlen(key), &escaped_key, &escaped_key_size,
+        error, error_size);
+    if (ok && strcmp(type, "string") == 0) {
+        ok = k3_json_escape(
+            value, strlen(value),
+            &rendered_value, &rendered_value_size,
+            error, error_size);
+    } else if (ok) {
+        k3_json_document document;
+        memset(&document, 0, sizeof(document));
+        ok = k3_json_parse(
+            &document, value, strlen(value),
+            error, error_size);
+        k3_json_type expected = K3_JSON_NULL;
+        if (strcmp(type, "number") == 0) {
+            expected = K3_JSON_NUMBER;
+        } else if (strcmp(type, "boolean") == 0) {
+            if (ok && document.tokens[document.root].type != K3_JSON_TRUE &&
+                document.tokens[document.root].type != K3_JSON_FALSE) {
+                ok = false;
+            }
+            expected = K3_JSON_TRUE;
+        } else if (strcmp(type, "null") == 0) {
+            expected = K3_JSON_NULL;
+        } else if (strcmp(type, "object") == 0) {
+            expected = K3_JSON_OBJECT;
+        } else if (strcmp(type, "array") == 0) {
+            expected = K3_JSON_ARRAY;
+        } else {
+            ok = false;
+        }
+        if (ok && expected != K3_JSON_TRUE &&
+            document.tokens[document.root].type != expected) {
+            ok = false;
+        }
+        if (!ok && error != NULL && error_size != 0u) {
+            set_error(error, error_size,
+                      "invalid XTML %s argument value", type);
+        }
+        if (ok) {
+            ok = k3_json_compact_sorted_dup(
+                &document, document.root,
+                &rendered_value, &rendered_value_size,
+                error, error_size);
+        }
+        k3_json_document_free(&document);
+    }
+    if (ok) {
+        ok = (first || append_text_bytes(
+                arguments, ",", 1u,
+                error, error_size)) &&
+            append_text_bytes(
+                arguments, escaped_key, escaped_key_size,
+                error, error_size) &&
+            append_text_bytes(
+                arguments, ":", 1u,
+                error, error_size) &&
+            append_text_bytes(
+                arguments, rendered_value, rendered_value_size,
+                error, error_size);
+    }
+    free(rendered_value);
+    free(escaped_key);
+    return ok;
+}
+
+static bool append_output_call(
+        k3_assistant_output *output,
+        char *name,
+        char *arguments,
+        char *error,
+        size_t error_size) {
+    if (output->tool_call_count == SIZE_MAX /
+            sizeof(*output->tool_calls)) {
+        set_error(error, error_size,
+                  "too many generated tool calls");
+        return false;
+    }
+    const size_t count = output->tool_call_count + 1u;
+    k3_tool_call *calls = (k3_tool_call *)realloc(
+        output->tool_calls, count * sizeof(*calls));
+    if (calls == NULL) {
+        set_error(error, error_size,
+                  "allocating generated tool calls failed");
+        return false;
+    }
+    output->tool_calls = calls;
+    output->tool_calls[output->tool_call_count] = (k3_tool_call) {
+        .name = name,
+        .arguments = arguments,
+    };
+    output->tool_call_count = count;
+    return true;
+}
+
+void k3_assistant_output_free(k3_assistant_output *output) {
+    if (output == NULL) {
+        return;
+    }
+    k3_text_buffer_free(&output->response);
+    for (size_t i = 0u; i < output->tool_call_count; i++) {
+        free((char *)output->tool_calls[i].id);
+        free((char *)output->tool_calls[i].name);
+        free((char *)output->tool_calls[i].arguments);
+    }
+    free(output->tool_calls);
+    memset(output, 0, sizeof(*output));
+}
+
+bool k3_tokenizer_parse_assistant_output(
+        const k3_tokenizer *tokenizer,
+        const uint32_t *tokens,
+        size_t token_count,
+        k3_assistant_output *output,
+        char *error,
+        size_t error_size) {
+    if (tokenizer == NULL || output == NULL ||
+        (tokens == NULL && token_count != 0u)) {
+        set_error(error, error_size,
+                  "assistant output parse arguments are invalid");
+        return false;
+    }
+    memset(output, 0, sizeof(*output));
+    k3_xtml_cursor cursor = {
+        .tokenizer = tokenizer,
+        .tokens = tokens,
+        .count = token_count,
+    };
+    while (cursor.position < cursor.count &&
+           cursor.tokens[cursor.position] < K3_TOKEN_BOS) {
+        cursor.position++;
+    }
+    if (!decode_range(
+            &cursor, 0u, cursor.position,
+            &output->response, error, error_size) ||
+        !consume_tag(
+            &cursor, K3_TOKEN_CLOSE, "response", NULL,
+            error, error_size)) {
+        goto fail;
+    }
+
+    if (cursor.position < cursor.count &&
+        cursor.tokens[cursor.position] == K3_TOKEN_OPEN) {
+        if (!consume_tag(
+                &cursor, K3_TOKEN_OPEN, "tools", NULL,
+                error, error_size)) {
+            goto fail;
+        }
+        for (;;) {
+            if (cursor.position >= cursor.count) {
+                set_error(error, error_size,
+                          "unterminated XTML tools block");
+                goto fail;
+            }
+            if (cursor.tokens[cursor.position] == K3_TOKEN_CLOSE) {
+                if (!consume_tag(
+                        &cursor, K3_TOKEN_CLOSE, "tools", NULL,
+                        error, error_size)) {
+                    goto fail;
+                }
+                break;
+            }
+            char *call_header = NULL;
+            char *name = NULL;
+            char *index_text = NULL;
+            if (!consume_tag(
+                    &cursor, K3_TOKEN_OPEN, "call", &call_header,
+                    error, error_size)) {
+                free(call_header);
+                goto fail;
+            }
+            name = xtml_attr_dup(
+                call_header, "tool", error, error_size);
+            index_text = xtml_attr_dup(
+                call_header, "index", error, error_size);
+            free(call_header);
+            char expected_index[32];
+            snprintf(expected_index, sizeof(expected_index), "%zu",
+                     output->tool_call_count + 1u);
+            if (name == NULL || index_text == NULL ||
+                strcmp(index_text, expected_index) != 0) {
+                if (name != NULL && index_text != NULL) {
+                    set_error(error, error_size,
+                              "XTML tool call index is out of order");
+                }
+                free(index_text);
+                free(name);
+                goto fail;
+            }
+            free(index_text);
+
+            k3_text_buffer arguments = { 0 };
+            if (!append_text_bytes(
+                    &arguments, "{", 1u,
+                    error, error_size)) {
+                free(name);
+                goto fail;
+            }
+            size_t argument_count = 0u;
+            bool raw_json = false;
+            if (next_open_tag_is(&cursor, "json")) {
+                char *json_header = NULL;
+                if (!consume_tag(
+                        &cursor, K3_TOKEN_OPEN, "json", &json_header,
+                        error, error_size)) {
+                    free(json_header);
+                    free(name);
+                    k3_text_buffer_free(&arguments);
+                    goto fail;
+                }
+                char *json_type = xtml_attr_dup(
+                    json_header, "type", error, error_size);
+                free(json_header);
+                const size_t json_begin = cursor.position;
+                while (cursor.position < cursor.count &&
+                       cursor.tokens[cursor.position] < K3_TOKEN_BOS) {
+                    cursor.position++;
+                }
+                k3_text_buffer raw = { 0 };
+                const bool decoded = json_type != NULL &&
+                    strcmp(json_type, "object") == 0 &&
+                    decode_range(
+                        &cursor, json_begin, cursor.position,
+                        &raw, error, error_size) &&
+                    consume_tag(
+                        &cursor, K3_TOKEN_CLOSE, "json", NULL,
+                        error, error_size);
+                free(json_type);
+                if (!decoded) {
+                    free(name);
+                    k3_text_buffer_free(&raw);
+                    k3_text_buffer_free(&arguments);
+                    goto fail;
+                }
+                k3_text_buffer_free(&arguments);
+                arguments = raw;
+                raw_json = true;
+            }
+            while (!raw_json &&
+                   cursor.position < cursor.count &&
+                   cursor.tokens[cursor.position] == K3_TOKEN_OPEN) {
+                char *header = NULL;
+                if (!consume_tag(
+                        &cursor, K3_TOKEN_OPEN, "argument", &header,
+                        error, error_size)) {
+                    free(header);
+                    free(name);
+                    k3_text_buffer_free(&arguments);
+                    goto fail;
+                }
+                char *key = xtml_attr_dup(
+                    header, "key", error, error_size);
+                char *type = xtml_attr_dup(
+                    header, "type", error, error_size);
+                free(header);
+                const size_t value_begin = cursor.position;
+                while (cursor.position < cursor.count &&
+                       cursor.tokens[cursor.position] < K3_TOKEN_BOS) {
+                    cursor.position++;
+                }
+                k3_text_buffer value = { 0 };
+                const bool decoded = key != NULL && type != NULL &&
+                    decode_range(
+                        &cursor, value_begin, cursor.position,
+                        &value, error, error_size) &&
+                    consume_tag(
+                        &cursor, K3_TOKEN_CLOSE, "argument", NULL,
+                        error, error_size) &&
+                    append_json_argument(
+                        &arguments, key, type,
+                        value.data == NULL ? "" : value.data,
+                        argument_count == 0u,
+                        error, error_size);
+                k3_text_buffer_free(&value);
+                free(type);
+                free(key);
+                if (!decoded) {
+                    free(name);
+                    k3_text_buffer_free(&arguments);
+                    goto fail;
+                }
+                argument_count++;
+            }
+            if (!raw_json &&
+                !append_text_bytes(
+                    &arguments, "}", 1u,
+                    error, error_size)) {
+                free(name);
+                k3_text_buffer_free(&arguments);
+                goto fail;
+            }
+            if (!consume_tag(
+                    &cursor, K3_TOKEN_CLOSE, "call", NULL,
+                    error, error_size) ||
+                !append_output_call(
+                    output, name, arguments.data,
+                    error, error_size)) {
+                free(name);
+                k3_text_buffer_free(&arguments);
+                goto fail;
+            }
+            arguments.data = NULL;
+            k3_text_buffer_free(&arguments);
+        }
+    }
+    if (!consume_tag(
+            &cursor, K3_TOKEN_CLOSE, "message", NULL,
+            error, error_size) ||
+        cursor.position >= cursor.count ||
+        cursor.tokens[cursor.position] != K3_TOKEN_END_OF_MSG) {
+        set_error(error, error_size,
+                  "assistant XTML lacks end_of_msg");
+        goto fail;
+    }
+    cursor.position++;
+    if (cursor.position != cursor.count) {
+        set_error(error, error_size,
+                  "trailing tokens after assistant XTML message");
+        goto fail;
+    }
+    return true;
+
+fail:
+    k3_assistant_output_free(output);
+    return false;
 }

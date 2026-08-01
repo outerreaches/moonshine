@@ -12,7 +12,8 @@ community project and is not affiliated with or endorsed by Moonshot AI.
 This is a research preview, not a general model runner. The current checkpoint
 has a C API, exact causal-state persistence, executable
 correctness/performance fixtures, a native chat client, and a one-slot
-OpenAI-compatible HTTP service. It is deliberately narrow:
+OpenAI-compatible HTTP service with native function-tool calls. It is
+deliberately narrow:
 
 - Linux and ROCm only;
 - tested on `gfx1151` with ROCm 7.2;
@@ -88,6 +89,10 @@ They are engineering fixtures, not cross-project benchmark claims.
 | Locked chat at 128K capacity, completion | 0.508 tok/s |
 | OpenAI JSON chat at 128K capacity, prompt | 0.438 tok/s |
 | OpenAI JSON chat at 128K capacity, completion | 0.498 tok/s |
+| Agentic first turn, 161-token tool prompt | 213.120 s / 0.755 tok/s |
+| Agentic first turn, 45-token tool call | 120.258 s / 0.374 tok/s |
+| Agentic result turn, 217-token prompt | 224.927 s / 0.965 tok/s |
+| Agentic result turn, 25-token answer | 56.759 s / 0.440 tok/s |
 
 The default range path matches the locked sequential state oracle exactly.
 The faster KDA dequantize-plus-hipBLAS path preserves the tested greedy token
@@ -159,9 +164,10 @@ make test-tokenizer MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3
 
 The fixture compares exact official token IDs for English
 case/contractions/numbers, Han text, combining marks, Hindi, Arabic, emoji,
-and special-token handling. It also locks non-thinking, thinking, and
-multi-turn XTML prompt hashes. The existing `Say hello.` prompt is reproduced
-exactly at all 24 token IDs.
+and special-token handling. It also locks non-thinking, thinking, multi-turn,
+and function-tool XTML. The existing `Say hello.` prompt is reproduced exactly
+at all 24 token IDs. Tool fixtures cover recursively sorted declarations,
+typed arguments, calls, call-ID-resolved results, and raw JSON arguments.
 
 ## Run the interactive client
 
@@ -253,6 +259,42 @@ curl --max-time 0 -N http://127.0.0.1:8080/v1/chat/completions \
   }'
 ```
 
+Function tools use the standard Chat Completions envelope. Moonshine accepts
+`tools`, `tool_choice` values `auto`, `required`, and `none`, or a specifically
+named function choice. It emits assistant `tool_calls` with
+`finish_reason: "tool_calls"`; the client executes each function, appends the
+complete assistant message, then appends one `role: "tool"` message with the
+matching `tool_call_id` for each result. Multiple calls are supported and
+tool-result messages are normalized into call order.
+
+```sh
+curl --max-time 0 http://127.0.0.1:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  --data-binary '{
+    "model": "moonshine",
+    "messages": [{"role": "user", "content": "Weather in Toronto?"}],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get current weather for a city",
+        "parameters": {
+          "type": "object",
+          "properties": {"city": {"type": "string"}},
+          "required": ["city"]
+        }
+      }
+    }],
+    "tool_choice": "required"
+  }'
+```
+
+SSE streams response text as it is decoded and emits each completed function
+call as an indexed `delta.tool_calls` chunk before the terminal
+`finish_reason: "tool_calls"` chunk. See [Agentic API and tool
+use](docs/agentic-api.md) for a complete two-request loop and exact support
+boundaries.
+
 Layer-major TTFT can be many minutes. Configure OpenAI SDK read/request
 timeouts accordingly; the examples use curl's unlimited timeout. Streaming
 responses send spec-legal SSE comment keepalives during prefill, with token or
@@ -282,11 +324,19 @@ short-prompt rate. Preserving only the expert cache improved repeated short
 stateless prompts by about 0.8%; exact causal-prefix reuse is the material
 agentic latency optimization.
 
+Request-local tool-choice directives are hidden XTML messages. A turn rendered
+with `tool_choice: "required"` therefore does not currently form an exact
+prefix of the canonical tool-result history sent by the client; Moonshine
+safely falls back to full prefill. Agentic prefix recovery is the next latency
+priority.
+
 Set `MOONSHINE_API_KEY` or pass `--api-key` to require bearer authentication.
 The server refuses a non-loopback bind without a key. It accepts text-only
-system/developer, user, and assistant history. The engine is deterministic
-and greedy; tools, tool calls/results, structured response formats, sampling,
-parallel slots, and HTTP request chunking are not implemented yet.
+system/developer, user, assistant, and tool history, plus Kimi dynamic tool
+declarations on system messages. The engine is deterministic and greedy.
+`parallel_tool_calls: false`, structured response formats, reasoning output,
+sampling, parallel request slots, and HTTP request chunking are not
+implemented yet.
 
 ## Obtain the model
 
@@ -389,11 +439,12 @@ engine.
 ## Project status
 
 Versioned causal-state export/import, the official native tokenizer, the
-text-only XTML chat renderer, deterministic stateful CLI, dynamic context
+native XTML chat/tool renderer, deterministic stateful CLI, dynamic context
 allocation capacity-qualified through 128K, and one-slot OpenAI-compatible
-HTTP/SSE service are now locked. Filled-128K workload behavior is still an
-open qualification item. Tool declarations/calls/results and structured
-responses remain required for the broader agentic surface.
+HTTP/SSE service with a qualified two-turn function-tool loop are now locked.
+Filled-128K workload behavior is still an open qualification item. Reasoning
+output, structured responses, and agentic prefix recovery remain required for
+the broader agentic surface.
 
 See [Architecture](docs/architecture.md) for the correctness model and
 [Provenance](docs/provenance.md) for code lineage, references, and

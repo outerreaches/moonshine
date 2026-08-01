@@ -37,6 +37,7 @@ typedef enum {
 typedef enum {
     K3_CHAT_FINISH_END_OF_MESSAGE = 0,
     K3_CHAT_FINISH_LENGTH = 1,
+    K3_CHAT_FINISH_TOOL_CALLS = 2,
 } k3_chat_finish_reason;
 
 typedef enum {
@@ -46,6 +47,8 @@ typedef enum {
 
 typedef struct {
     k3_text_buffer           response;
+    k3_tool_call            *tool_calls;
+    size_t                   tool_call_count;
     k3_chat_prefill_strategy prefill_strategy;
     k3_chat_finish_reason    finish_reason;
     uint32_t                 prompt_tokens;
@@ -91,6 +94,8 @@ typedef struct {
     bool                              clear_expert_cache;
     k3_chat_prefill_progress_callback progress_callback;
     void                             *progress_data;
+    const char                       *tools_json;
+    k3_tool_choice                    tool_choice;
 } k3_chat_completion_options;
 
 /*

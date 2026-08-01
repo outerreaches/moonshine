@@ -29,11 +29,12 @@ assistant content/reasoning, names, and escaped attribute values are encoded
 as ordinary text, preventing a marker-looking user string from changing chat
 structure.
 
-The current renderer covers named or unnamed system, user, and assistant
+The renderer covers named or unnamed system, user, assistant, and tool
 messages; thinking/non-thinking response channels; optional low/high/max
-thinking effort; and the open assistant generation prompt. Tool declarations,
-tool calls/results, images, and structured response formats remain the next
-XTML extension for the OpenAI-compatible service.
+thinking effort; global and dynamically loaded tool declarations; typed or
+raw-JSON tool calls; call-ID-resolved tool results; request-local tool choice;
+and the open assistant generation prompt. Images and structured response
+formats remain open.
 
 ## Stateful chat session
 
@@ -78,8 +79,23 @@ The initial server is a deliberately bounded HTTP/1.1 implementation:
   `X-Moonshine-Session`;
 - UTF-8 boundary buffering so tokenizer byte fragments never corrupt a stream;
 - standard OpenAI error envelopes and usage accounting;
-- fixed greedy execution, with unsupported tools and structured response
-  formats rejected before inference.
+- OpenAI function tools, parallel call output, matching tool-result history,
+  `auto`/`required`/`none`, and forced named-function selection;
+- fixed greedy execution, with unsupported structured response formats and
+  `parallel_tool_calls: false` rejected before inference.
+
+Tool-call SSE is structurally streamed at message completion: ordinary
+response bytes remain token-live, while each parsed call is emitted as one
+complete indexed `delta.tool_calls` item before the terminal chunk. This keeps
+the OpenAI wire contract without exposing half-parsed XTML attributes.
+
+An exact-prefix limitation matters for agent latency. K3 renders `required`
+and `none` as hidden system messages immediately before the generation prompt.
+Those request-local messages are absent from the assistant history returned to
+the client, so a following canonical tool-result request is not an exact token
+extension of retained state. The current server detects the mismatch and
+performs a safe full replay. Agentic prefix recovery needs a checkpoint or
+rewind boundary before the transient directive, followed by suffix replay.
 
 There is no scheduler or hidden concurrency. A disconnected streaming client
 does not interrupt model execution mid-turn; the engine completes its semantic

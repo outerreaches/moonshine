@@ -11,6 +11,12 @@ Semantic Versioning once its first research-preview tag is published.
   `MOONSHINE_CONTEXT` make variable.
 - A payload-free 128K prefill-plan regression and real 128K configured-
   capacity qualification on the accepted Q8/32 host.
+- Native K3 XTML function-tool declarations, calls, call-ID-resolved results,
+  typed arguments, and raw JSON argument blocks.
+- OpenAI Chat Completions function tools in JSON and SSE, including parallel
+  call output, `auto`/`required`/`none`, forced named-function selection, and
+  complete tool-result history validation.
+- A real two-turn `get_weather` agent-loop qualification at 8K context.
 
 ### Changed
 
@@ -21,6 +27,8 @@ Semantic Versioning once its first research-preview tag is published.
   `f68aa08`. Its scalar-parent hashes survived because the optimization
   qualification covered component and real-chat gates but not the synthetic
   full-layer fixture.
+- Prioritize agentic prefix recovery: transient tool-choice XTML currently
+  causes a safe full-prefill fallback on the following tool-result turn.
 
 ## [0.1.0-research-preview] - 2026-07-30
 

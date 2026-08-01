@@ -741,6 +741,77 @@ static bool stream_send_content(stream_state *stream,
     return ok;
 }
 
+static bool stream_send_tool_call(
+        stream_state *stream,
+        const k3_tool_call *call,
+        size_t index) {
+    char id[384];
+    const int id_size = snprintf(
+        id, sizeof(id), "call_%s_%zu",
+        stream->completion_id, index + 1u);
+    char error[256];
+    char *escaped_id = NULL;
+    char *escaped_name = NULL;
+    char *escaped_arguments = NULL;
+    bool ok = id_size > 0 && (size_t)id_size < sizeof(id) &&
+        k3_json_escape(
+            id, (size_t)id_size,
+            &escaped_id, NULL, error, sizeof(error)) &&
+        k3_json_escape(
+            call->name, strlen(call->name),
+            &escaped_name, NULL, error, sizeof(error)) &&
+        k3_json_escape(
+            call->arguments, strlen(call->arguments),
+            &escaped_arguments, NULL, error, sizeof(error));
+    if (!ok) {
+        free(escaped_arguments);
+        free(escaped_name);
+        free(escaped_id);
+        stream->failed = true;
+        return false;
+    }
+    const int required = snprintf(
+        NULL, 0,
+        "{\"id\":\"%s\",\"object\":\"chat.completion.chunk\","
+        "\"created\":%lld,\"model\":\"%s\","
+        "\"system_fingerprint\":\"" MOONSHINE_SYSTEM_FINGERPRINT "\","
+        "\"choices\":[{\"index\":0,\"delta\":{"
+        "\"tool_calls\":[{\"index\":%zu,\"id\":%s,"
+        "\"type\":\"function\",\"function\":{"
+        "\"name\":%s,\"arguments\":%s}}]},"
+        "\"finish_reason\":null}]}",
+        stream->completion_id, (long long)stream->created,
+        MOONSHINE_MODEL_ID, index,
+        escaped_id, escaped_name, escaped_arguments);
+    char *event = required < 0 ? NULL :
+        (char *)malloc((size_t)required + 1u);
+    if (event != NULL) {
+        snprintf(
+            event, (size_t)required + 1u,
+            "{\"id\":\"%s\",\"object\":\"chat.completion.chunk\","
+            "\"created\":%lld,\"model\":\"%s\","
+            "\"system_fingerprint\":\"" MOONSHINE_SYSTEM_FINGERPRINT "\","
+            "\"choices\":[{\"index\":0,\"delta\":{"
+            "\"tool_calls\":[{\"index\":%zu,\"id\":%s,"
+            "\"type\":\"function\",\"function\":{"
+            "\"name\":%s,\"arguments\":%s}}]},"
+            "\"finish_reason\":null}]}",
+            stream->completion_id, (long long)stream->created,
+            MOONSHINE_MODEL_ID, index,
+            escaped_id, escaped_name, escaped_arguments);
+    }
+    free(escaped_arguments);
+    free(escaped_name);
+    free(escaped_id);
+    if (event == NULL) {
+        stream->failed = true;
+        return false;
+    }
+    ok = stream_send_event(stream, event, (size_t)required);
+    free(event);
+    return ok;
+}
+
 static size_t complete_utf8_prefix(const char *bytes, size_t size) {
     size_t offset = 0u;
     while (offset < size) {
@@ -900,6 +971,12 @@ static void stream_end(stream_state *stream,
             stream, stream->pending, stream->pending_size);
         stream->pending_size = 0u;
     }
+    for (size_t i = 0u;
+         i < result->tool_call_count && !stream->failed;
+         i++) {
+        (void)stream_send_tool_call(
+            stream, &result->tool_calls[i], i);
+    }
     if (!stream->failed) {
         char comment[192];
         const int size = snprintf(
@@ -915,10 +992,10 @@ static void stream_end(stream_state *stream,
         }
     }
     if (!stream->failed) {
-        const char *finish =
-            result->finish_reason ==
-                K3_CHAT_FINISH_END_OF_MESSAGE ?
-                "stop" : "length";
+        const char *finish = result->finish_reason ==
+            K3_CHAT_FINISH_TOOL_CALLS ? "tool_calls" :
+            (result->finish_reason ==
+                K3_CHAT_FINISH_END_OF_MESSAGE ? "stop" : "length");
         char event[1024];
         const int size = snprintf(
             event, sizeof(event),
@@ -1013,14 +1090,36 @@ static void log_result(const char *id,
                 result->prompt_seconds : 0.0,
         result->generated_tokens, result->decode_seconds,
         result->tokens_per_second,
-        result->finish_reason ==
-            K3_CHAT_FINISH_END_OF_MESSAGE ? "stop" : "length",
+        result->finish_reason == K3_CHAT_FINISH_TOOL_CALLS ?
+            "tool_calls" :
+            (result->finish_reason ==
+                K3_CHAT_FINISH_END_OF_MESSAGE ? "stop" : "length"),
         streamed ? "yes" : "no",
         client_ok ? "connected" : "disconnected",
         (unsigned long long)cache_hits,
         (unsigned long long)cache_accesses,
         (unsigned long long)result->cache_after.hits,
         (unsigned long long)result->cache_after.accesses);
+}
+
+static bool validate_tool_choice_result(
+        const k3_openai_chat_request *request,
+        const k3_chat_turn_result *result,
+        char *error,
+        size_t error_size) {
+    if (request->tool_choice == K3_TOOL_CHOICE_NONE &&
+        result->tool_call_count != 0u) {
+        set_error(error, error_size,
+                  "model violated tool_choice=none");
+        return false;
+    }
+    if (request->tool_choice == K3_TOOL_CHOICE_REQUIRED &&
+        result->finish_reason == K3_CHAT_FINISH_END_OF_MESSAGE) {
+        set_error(error, error_size,
+                  "model ended without satisfying tool_choice=required");
+        return false;
+    }
+    return true;
 }
 
 static void handle_chat_completion(int fd, k3_chat_session *session,
@@ -1075,12 +1174,18 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
                 config->clear_expert_cache_per_request,
             .progress_callback = stream_progress,
             .progress_data = &stream,
+            .tools_json = request.tools_json,
+            .tool_choice = request.tool_choice,
         };
         ok = k3_chat_session_complete_messages_with_options(
             session, request.messages, request.message_count,
             request.max_tokens, &completion_options,
             stream_callback, &stream,
             &result, error, sizeof(error));
+        if (ok) {
+            ok = validate_tool_choice_result(
+                &request, &result, error, sizeof(error));
+        }
         if (ok) {
             if (http->session_id != NULL) {
                 memcpy(
@@ -1099,12 +1204,18 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
             .reuse_prefix = reuse_requested,
             .clear_expert_cache =
                 config->clear_expert_cache_per_request,
+            .tools_json = request.tools_json,
+            .tool_choice = request.tool_choice,
         };
         ok = k3_chat_session_complete_messages_with_options(
             session, request.messages, request.message_count,
             request.max_tokens, &completion_options,
             NULL, NULL,
             &result, error, sizeof(error));
+        if (ok) {
+            ok = validate_tool_choice_result(
+                &request, &result, error, sizeof(error));
+        }
         if (!ok) {
             fprintf(stderr, "request %s failed: %s\n",
                     completion_id, error);

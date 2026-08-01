@@ -74,6 +74,18 @@ bool k3_json_bool(const k3_json_document *document,
                   bool                   *value);
 
 /*
+ * Serialize one parsed JSON value without insignificant whitespace. Object
+ * keys are sorted lexicographically by their decoded UTF-8 spelling, matching
+ * K3's official deep_sort_dict + compact json.dumps prompt normalization.
+ */
+bool k3_json_compact_sorted_dup(const k3_json_document *document,
+                                int32_t                 token,
+                                char                  **json,
+                                size_t                 *json_size,
+                                char                   *error,
+                                size_t                  error_size);
+
+/*
  * Allocate a JSON string literal, including surrounding double quotes.
  * Invalid UTF-8 bytes are replaced by U+FFFD.
  */

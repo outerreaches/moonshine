@@ -68,6 +68,8 @@ int main(int argc, char **argv) {
     k3_token_buffer completed_history = { 0 };
     k3_token_buffer extended_history = { 0 };
     k3_text_buffer text = { 0 };
+    k3_assistant_output assistant_output;
+    memset(&assistant_output, 0, sizeof(assistant_output));
 
     CHECK(k3_tokenizer_create(
               &tokenizer, argv[1], error, sizeof(error)),
@@ -285,17 +287,133 @@ int main(int argc, char **argv) {
                   sizeof(*completed_history.data)) == 0,
           "append-only history is not an exact XTML token-prefix extension");
 
+    static const char tools_json[] =
+        "[{\"function\":{\"description\":\"Get weather\","
+        "\"name\":\"get_weather\",\"parameters\":{"
+        "\"properties\":{\"city\":{\"type\":\"string\"}},"
+        "\"required\":[\"city\"],\"type\":\"object\"}},"
+        "\"type\":\"function\"}]";
+    static k3_tool_call weather_calls[] = {
+        {
+            .id = "call_abc",
+            .name = "get_weather",
+            .arguments = "{\"city\":\"Toronto\"}",
+        },
+    };
+    static const k3_chat_message tool_history[] = {
+        {
+            .role = K3_CHAT_ROLE_USER,
+            .content = "Weather in Toronto?",
+        },
+        {
+            .role = K3_CHAT_ROLE_ASSISTANT,
+            .content = "",
+            .tool_calls = weather_calls,
+            .tool_call_count = 1u,
+        },
+        {
+            .role = K3_CHAT_ROLE_TOOL,
+            .content = "{\"temperature_c\":22}",
+            .name = "get_weather",
+            .tool_call_id = "call_abc",
+        },
+    };
+    const k3_chat_options tool_options = {
+        .add_generation_prompt = true,
+        .thinking = false,
+        .thinking_effort = NULL,
+        .tools_json = tools_json,
+        .tool_choice = K3_TOOL_CHOICE_AUTO,
+    };
+    static const char expected_tool_history[] =
+        "<|open|>message role=\"system\" type=\"tool-declare\"<|sep|>"
+        "# Tools\nHere are the available tools, described in JSONSchema.\n\n"
+        "```json\n"
+        "[{\"function\":{\"description\":\"Get weather\","
+        "\"name\":\"get_weather\",\"parameters\":{"
+        "\"properties\":{\"city\":{\"type\":\"string\"}},"
+        "\"required\":[\"city\"],\"type\":\"object\"}},"
+        "\"type\":\"function\"}]\n```"
+        "<|close|>message<|sep|><|end_of_msg|>"
+        "<|open|>message role=\"user\"<|sep|>Weather in Toronto?"
+        "<|close|>message<|sep|><|end_of_msg|>"
+        "<|open|>message role=\"assistant\"<|sep|>"
+        "<|open|>response<|sep|><|close|>response<|sep|>"
+        "<|open|>tools<|sep|>"
+        "<|open|>call tool=\"get_weather\" index=\"1\"<|sep|>"
+        "<|open|>argument key=\"city\" type=\"string\"<|sep|>Toronto"
+        "<|close|>argument<|sep|><|close|>call<|sep|>"
+        "<|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>"
+        "<|open|>message role=\"tool\" tool=\"get_weather\" index=\"1\""
+        "<|sep|>{\"temperature_c\":22}"
+        "<|close|>message<|sep|><|end_of_msg|>"
+        "<|open|>message role=\"assistant\"<|sep|>"
+        "<|open|>response<|sep|>";
+    CHECK(k3_tokenizer_encode_chat(
+              tokenizer, tool_history,
+              sizeof(tool_history) / sizeof(tool_history[0]),
+              &tool_options, &tokens, error, sizeof(error)),
+          error);
+    CHECK(k3_tokenizer_decode(
+              tokenizer, tokens.data, tokens.count, true,
+              &text, error, sizeof(error)) &&
+          strcmp(text.data, expected_tool_history) == 0,
+          "official K3 tool history XTML rendering changed");
+
+    static const char generated_tool_output[] =
+        "<|close|>response<|sep|><|open|>tools<|sep|>"
+        "<|open|>call tool=\"get_weather\" index=\"1\"<|sep|>"
+        "<|open|>argument key=\"city\" type=\"string\"<|sep|>Toronto"
+        "<|close|>argument<|sep|>"
+        "<|open|>argument key=\"days\" type=\"number\"<|sep|>2"
+        "<|close|>argument<|sep|>"
+        "<|close|>call<|sep|><|close|>tools<|sep|>"
+        "<|close|>message<|sep|><|end_of_msg|>";
+    CHECK(k3_tokenizer_encode(
+              tokenizer, generated_tool_output, true,
+              &tokens, error, sizeof(error)) &&
+          k3_tokenizer_parse_assistant_output(
+              tokenizer, tokens.data, tokens.count,
+              &assistant_output, error, sizeof(error)),
+          error);
+    CHECK(assistant_output.response.size == 0u &&
+          assistant_output.tool_call_count == 1u &&
+          strcmp(assistant_output.tool_calls[0].name,
+                 "get_weather") == 0 &&
+          strcmp(assistant_output.tool_calls[0].arguments,
+                 "{\"city\":\"Toronto\",\"days\":2}") == 0,
+          "generated XTML tool call parse changed");
+    k3_assistant_output_free(&assistant_output);
+    static const char generated_raw_tool_output[] =
+        "<|close|>response<|sep|><|open|>tools<|sep|>"
+        "<|open|>call tool=\"raw_tool\" index=\"1\"<|sep|>"
+        "<|open|>json type=\"object\"<|sep|>{not valid json"
+        "<|close|>json<|sep|><|close|>call<|sep|>"
+        "<|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>";
+    CHECK(k3_tokenizer_encode(
+              tokenizer, generated_raw_tool_output, true,
+              &tokens, error, sizeof(error)) &&
+          k3_tokenizer_parse_assistant_output(
+              tokenizer, tokens.data, tokens.count,
+              &assistant_output, error, sizeof(error)),
+          error);
+    CHECK(assistant_output.tool_call_count == 1u &&
+          strcmp(assistant_output.tool_calls[0].arguments,
+                 "{not valid json") == 0,
+          "raw XTML json argument block was not preserved");
+
     printf("K3 native tokenizer/XTML: PASS\n");
     printf("  vocab=%u base=%u; ICU Unicode pre-tokenizer\n",
            K3_TOKEN_VOCAB_SIZE, 163584u);
     printf("  official oracles: ASCII, contractions/numbers, Han, "
            "multilingual, special-token safety\n");
     printf("  XTML: non-thinking hello exact; thinking/max and "
-           "multi-turn hashes exact; append-prefix exact\n");
+           "multi-turn hashes exact; tools/results and append-prefix exact\n");
     result = 0;
 
 cleanup:
     k3_text_buffer_free(&text);
+    k3_assistant_output_free(&assistant_output);
     k3_token_buffer_free(&tokens);
     k3_token_buffer_free(&completed_history);
     k3_token_buffer_free(&extended_history);

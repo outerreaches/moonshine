@@ -137,8 +137,11 @@ static const char *prefill_name(k3_chat_prefill_strategy strategy) {
 }
 
 static const char *finish_name(k3_chat_finish_reason reason) {
-    return reason == K3_CHAT_FINISH_END_OF_MESSAGE ?
-        "end_of_message" : "length";
+    if (reason == K3_CHAT_FINISH_END_OF_MESSAGE) {
+        return "end_of_message";
+    }
+    return reason == K3_CHAT_FINISH_TOOL_CALLS ?
+        "tool_calls" : "length";
 }
 
 static void print_turn_stats(const k3_chat_turn_result *result) {

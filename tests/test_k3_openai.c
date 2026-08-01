@@ -58,6 +58,64 @@ int main(void) {
     CHECK(request.max_tokens == 64u && request.stream,
           "generation parameters");
 
+    static const char agent_request_json[] =
+        "{\"model\":\"moonshine\",\"messages\":["
+        "{\"role\":\"user\",\"content\":\"Check two cities\"},"
+        "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":["
+        "{\"id\":\"call_a\",\"type\":\"function\",\"function\":{"
+        "\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Toronto\\\"}\"}},"
+        "{\"id\":\"call_b\",\"type\":\"function\",\"function\":{"
+        "\"name\":\"get_time\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"}}]},"
+        "{\"role\":\"tool\",\"tool_call_id\":\"call_b\",\"content\":\"14:00\"},"
+        "{\"role\":\"tool\",\"tool_call_id\":\"call_a\",\"content\":\"22 C\"}],"
+        "\"tools\":["
+        "{\"type\":\"function\",\"function\":{\"name\":\"get_time\","
+        "\"description\":\"Get time\",\"parameters\":{\"type\":\"object\"}}},"
+        "{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
+        "\"description\":\"Get weather\",\"parameters\":{\"type\":\"object\"}}}],"
+        "\"tool_choice\":\"required\"}";
+    k3_openai_chat_request agent_request;
+    memset(&agent_request, 0, sizeof(agent_request));
+    k3_openai_chat_request specific_request;
+    memset(&specific_request, 0, sizeof(specific_request));
+    CHECK(k3_openai_parse_chat_request(
+              agent_request_json, strlen(agent_request_json),
+              &agent_request, error, sizeof(error)),
+          error);
+    CHECK(agent_request.tool_count == 2u &&
+          agent_request.tool_choice == K3_TOOL_CHOICE_REQUIRED &&
+          agent_request.messages[2].role == K3_CHAT_ROLE_TOOL &&
+          strcmp(agent_request.messages[2].tool_call_id, "call_a") == 0 &&
+          strcmp(agent_request.messages[2].name, "get_weather") == 0 &&
+          strcmp(agent_request.messages[3].tool_call_id, "call_b") == 0 &&
+          strcmp(agent_request.messages[3].name, "get_time") == 0,
+          "agent request tool history normalization");
+    CHECK(strcmp(
+              agent_request.tools_json,
+              "[{\"function\":{\"description\":\"Get time\",\"name\":\"get_time\","
+              "\"parameters\":{\"type\":\"object\"}},\"type\":\"function\"},"
+              "{\"function\":{\"description\":\"Get weather\",\"name\":\"get_weather\","
+              "\"parameters\":{\"type\":\"object\"}},\"type\":\"function\"}]") == 0,
+          "tool schema canonicalization");
+    static const char specific_request_json[] =
+        "{\"model\":\"moonshine\",\"messages\":[{\"role\":\"user\","
+        "\"content\":\"Use weather\"}],\"tools\":["
+        "{\"type\":\"function\",\"function\":{\"name\":\"get_time\","
+        "\"parameters\":{\"type\":\"object\"}}},"
+        "{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
+        "\"parameters\":{\"type\":\"object\"}}}],"
+        "\"tool_choice\":{\"type\":\"function\",\"function\":{"
+        "\"name\":\"get_weather\"}}}";
+    CHECK(k3_openai_parse_chat_request(
+              specific_request_json, strlen(specific_request_json),
+              &specific_request, error, sizeof(error)),
+          error);
+    CHECK(specific_request.tool_count == 1u &&
+          specific_request.tool_choice == K3_TOOL_CHOICE_REQUIRED &&
+          strstr(specific_request.tools_json, "get_weather") != NULL &&
+          strstr(specific_request.tools_json, "get_time") == NULL,
+          "specific tool_choice filtering");
+
     static const char response_text[] =
         "Hello! 👋 \"ready\"";
     result.response.data = strdup(response_text);
@@ -109,6 +167,64 @@ int main(void) {
           total == 42u,
           "usage token count");
 
+    k3_json_document_free(&response_document);
+    memset(&response_document, 0, sizeof(response_document));
+    free(response_json);
+    response_json = NULL;
+    static k3_tool_call result_calls[] = {
+        {
+            .name = "get_weather",
+            .arguments = "{\"city\":\"Toronto\"}",
+        },
+    };
+    free(result.response.data);
+    result.response.data = strdup("");
+    result.response.size = 0u;
+    result.tool_calls = result_calls;
+    result.tool_call_count = 1u;
+    result.finish_reason = K3_CHAT_FINISH_TOOL_CALLS;
+    CHECK(k3_openai_build_chat_response(
+              "chatcmpl-moonshine-tools", 1785326401,
+              MOONSHINE_MODEL_ID, &result,
+              &response_json, &response_size,
+              error, sizeof(error)) &&
+          k3_json_parse(
+              &response_document,
+              response_json, response_size,
+              error, sizeof(error)),
+          error);
+    const int32_t tool_choices = k3_json_object_get(
+        &response_document, response_document.root, "choices");
+    const int32_t tool_choice = k3_json_array_get(
+        &response_document, tool_choices, 0u);
+    CHECK(k3_json_string_equal(
+              &response_document,
+              k3_json_object_get(
+                  &response_document, tool_choice, "finish_reason"),
+              "tool_calls"),
+          "tool response finish reason");
+    const int32_t tool_message = k3_json_object_get(
+        &response_document, tool_choice, "message");
+    const int32_t calls = k3_json_object_get(
+        &response_document, tool_message, "tool_calls");
+    const int32_t call = k3_json_array_get(
+        &response_document, calls, 0u);
+    const int32_t function = k3_json_object_get(
+        &response_document, call, "function");
+    CHECK(k3_json_string_equal(
+              &response_document,
+              k3_json_object_get(
+                  &response_document, function, "name"),
+              "get_weather") &&
+          k3_json_string_equal(
+              &response_document,
+              k3_json_object_get(
+                  &response_document, function, "arguments"),
+              "{\"city\":\"Toronto\"}"),
+          "tool response function payload");
+    result.tool_calls = NULL;
+    result.tool_call_count = 0u;
+
     static const char *invalid[] = {
         "{\"model\":\"moonshine\",\"messages\":[]}",
         "{\"model\":\"moonshine\",\"messages\":["
@@ -118,6 +234,17 @@ int main(void) {
         "{\"model\":\"moonshine\",\"messages\":["
         "{\"role\":\"user\",\"content\":\"x\"}],"
         "\"tools\":[{\"type\":\"function\"}]}",
+        "{\"model\":\"moonshine\",\"messages\":["
+        "{\"role\":\"user\",\"content\":\"x\"}],"
+        "\"tool_choice\":\"required\"}",
+        "{\"model\":\"moonshine\",\"messages\":["
+        "{\"role\":\"user\",\"content\":\"x\"}],"
+        "\"parallel_tool_calls\":false}",
+        "{\"model\":\"moonshine\",\"messages\":["
+        "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":["
+        "{\"id\":\"a\",\"type\":\"function\",\"function\":{"
+        "\"name\":\"f\",\"arguments\":\"{}\"}}]},"
+        "{\"role\":\"tool\",\"tool_call_id\":\"wrong\",\"content\":\"x\"}]}",
     };
     for (size_t i = 0u;
          i < sizeof(invalid) / sizeof(invalid[0]);
@@ -139,5 +266,7 @@ cleanup:
     free(response_json);
     free(result.response.data);
     k3_openai_chat_request_free(&request);
+    k3_openai_chat_request_free(&agent_request);
+    k3_openai_chat_request_free(&specific_request);
     return exit_code;
 }

@@ -110,6 +110,38 @@ static bool append_retained_tokens(k3_chat_session *session,
     return true;
 }
 
+static bool append_generated_token(k3_token_buffer *buffer,
+                                   uint32_t token,
+                                   char *error,
+                                   size_t error_size) {
+    if (buffer->count == buffer->capacity) {
+        size_t capacity = buffer->capacity == 0u ?
+            64u : buffer->capacity;
+        if (capacity > SIZE_MAX / 2u) {
+            set_error(error, error_size,
+                      "generated token capacity overflow");
+            return false;
+        }
+        capacity *= 2u;
+        if (capacity > SIZE_MAX / sizeof(*buffer->data)) {
+            set_error(error, error_size,
+                      "generated token storage overflow");
+            return false;
+        }
+        uint32_t *data = (uint32_t *)realloc(
+            buffer->data, capacity * sizeof(*data));
+        if (data == NULL) {
+            set_error(error, error_size,
+                      "allocating generated token history failed");
+            return false;
+        }
+        buffer->data = data;
+        buffer->capacity = capacity;
+    }
+    buffer->data[buffer->count++] = token;
+    return true;
+}
+
 static bool append_response_bytes(k3_text_buffer *buffer,
                                   const char *data,
                                   size_t size,
@@ -282,6 +314,12 @@ void k3_chat_turn_result_free(k3_chat_turn_result *result) {
         return;
     }
     k3_text_buffer_free(&result->response);
+    for (size_t i = 0u; i < result->tool_call_count; i++) {
+        free((char *)result->tool_calls[i].id);
+        free((char *)result->tool_calls[i].name);
+        free((char *)result->tool_calls[i].arguments);
+    }
+    free(result->tool_calls);
     memset(result, 0, sizeof(*result));
 }
 
@@ -397,6 +435,7 @@ static bool execute_encoded_turn(
         char *error,
         size_t error_size) {
     k3_text_buffer token_piece = { 0 };
+    k3_token_buffer generated_tokens = { 0 };
     bool ok = true;
     bool mutated = false;
     if (prompt->count < 2u || prompt->count > UINT32_MAX) {
@@ -476,6 +515,12 @@ static bool execute_encoded_turn(
         const uint32_t token = predicted;
         result->generated_tokens++;
         append_tail(tail, &tail_count, token);
+        if (!append_generated_token(
+                &generated_tokens, token,
+                error, error_size)) {
+            ok = false;
+            goto cleanup;
+        }
 
         if (token == K3_TOKEN_END_OF_MSG) {
             uint32_t discard = 0u;
@@ -550,8 +595,23 @@ static bool execute_encoded_turn(
         }
         result->finish_reason = K3_CHAT_FINISH_LENGTH;
     } else {
-        result->finish_reason =
-            K3_CHAT_FINISH_END_OF_MESSAGE;
+        k3_assistant_output parsed;
+        if (!k3_tokenizer_parse_assistant_output(
+                session->tokenizer,
+                generated_tokens.data,
+                generated_tokens.count,
+                &parsed, error, error_size)) {
+            ok = false;
+            goto cleanup;
+        }
+        k3_text_buffer_free(&result->response);
+        result->response = parsed.response;
+        result->tool_calls = parsed.tool_calls;
+        result->tool_call_count = parsed.tool_call_count;
+        memset(&parsed, 0, sizeof(parsed));
+        result->finish_reason = result->tool_call_count == 0u ?
+            K3_CHAT_FINISH_END_OF_MESSAGE :
+            K3_CHAT_FINISH_TOOL_CALLS;
     }
     clock_gettime(CLOCK_MONOTONIC, &decode_end);
     result->decode_seconds =
@@ -565,9 +625,17 @@ static bool execute_encoded_turn(
         session->engine, &result->cache_after);
 
 cleanup:
+    k3_token_buffer_free(&generated_tokens);
     k3_text_buffer_free(&token_piece);
     if (!ok) {
         k3_text_buffer_free(&result->response);
+        for (size_t i = 0u; i < result->tool_call_count; i++) {
+            free((char *)result->tool_calls[i].name);
+            free((char *)result->tool_calls[i].arguments);
+        }
+        free(result->tool_calls);
+        result->tool_calls = NULL;
+        result->tool_call_count = 0u;
         if (mutated || !session->healthy) {
             session->healthy = false;
             session->retained_tokens.count = 0u;
@@ -676,6 +744,9 @@ bool k3_chat_session_complete_messages_with_options(
         .add_generation_prompt = true,
         .thinking = false,
         .thinking_effort = NULL,
+        .tools_json = options == NULL ? NULL : options->tools_json,
+        .tool_choice = options == NULL ? K3_TOOL_CHOICE_AUTO :
+            options->tool_choice,
     };
     k3_token_buffer prompt = { 0 };
     bool ok = k3_tokenizer_encode_chat(
