@@ -772,6 +772,25 @@ int main(int argc, char **argv) {
               error, sizeof(error)),
           "an out-of-range single-tool marker was accepted");
 
+    static const char generated_text_output[] =
+        "saffron|7319|Nivens"
+        "<|close|>response<|sep|>"
+        "<|close|>message<|sep|><|end_of_msg|>";
+    CHECK(k3_tokenizer_encode(
+              tokenizer, generated_text_output, true,
+              &tokens, error, sizeof(error)) &&
+          k3_tokenizer_parse_assistant_output(
+              tokenizer, tokens.data, tokens.count,
+              false,
+              &assistant_output, error, sizeof(error)),
+          error);
+    CHECK(assistant_output.response.data != NULL &&
+          strcmp(assistant_output.response.data,
+                 "saffron|7319|Nivens") == 0 &&
+          assistant_output.tool_call_count == 0u,
+          "generated non-thinking response parse changed");
+    k3_assistant_output_free(&assistant_output);
+
     static const char generated_tool_output[] =
         "<|close|>response<|sep|><|open|>tools<|sep|>"
         "<|open|>call tool=\"get_weather\" index=\"1\"<|sep|>"

@@ -88,6 +88,11 @@ Semantic Versioning once its first research-preview tag is published.
 - Reject required-tool generations that exhaust their token budget without
   producing a call instead of returning an unsatisfied length-stopped turn.
 
+### Fixed
+
+- Non-thinking natural-stop completions now retain their ordinary response
+  text when the generated XTML suffix is parsed after streaming.
+
 ## [0.1.0-research-preview] - 2026-07-30
 
 First public research preview. Reproduces the native Kimi K3 SafeTensors/ROCm

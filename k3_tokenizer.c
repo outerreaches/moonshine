@@ -2199,11 +2199,11 @@ bool k3_tokenizer_parse_assistant_output(
         .tokens = tokens,
         .count = token_count,
     };
-    while (cursor.position < cursor.count &&
-           cursor.tokens[cursor.position] < K3_TOKEN_BOS) {
-        cursor.position++;
-    }
     if (thinking) {
+        while (cursor.position < cursor.count &&
+               cursor.tokens[cursor.position] < K3_TOKEN_BOS) {
+            cursor.position++;
+        }
         if (!decode_range(
                 &cursor, 0u, cursor.position,
                 &output->reasoning, error, error_size) ||
