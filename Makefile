@@ -61,6 +61,7 @@ ROCM_TESTS := \
 	tests/test_k3_kda_recurrent \
 	tests/test_k3_mla_decode \
 	tests/test_k3_mla_layer_smoke \
+	tests/test_k3_moe_tail_profile \
 	tests/test_k3_moe_smoke \
 	tests/test_k3_mxfp4_envelope \
 	tests/test_k3_prefill_512 \
@@ -85,6 +86,7 @@ ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS)
 	test-engine-hello test-chat-hello test-state-checkpoint test-tokenizer \
 	test-prefill-2 test-prefill-scale test-prefill-kda-blas \
 	test-prefill-crossover test-long-context-retrieval \
+	test-moe-tail-profile \
 	test-reduction-qualification \
 	test-openai-sdk clean
 
@@ -123,6 +125,7 @@ help:
 	@echo "                               Compare exact warm sequential/range suffixes"
 	@echo "  make test-long-context-retrieval MOONSHINE_MODEL=/path/to/Kimi-K3 MOONSHINE_RETRIEVAL_TARGET=512|16000|32000"
 	@echo "                               Run a deterministic natural-text gate"
+	@echo "  make test-moe-tail-profile  Profile model-shape MoE-tail kernels"
 	@echo "  make test-reduction-qualification MOONSHINE_MODEL=/path/to/Kimi-K3"
 	@echo "                               Run the MXFP4 reduction-change gate bundle"
 	@echo "  make clean                  Remove local build products"
@@ -283,6 +286,9 @@ test-prefill-crossover: check-model tests/test_k3_prefill_crossover
 test-long-context-retrieval: check-model tests/test_k3_long_context
 	MOONSHINE_RETRIEVAL_TARGET="$(MOONSHINE_RETRIEVAL_TARGET)" \
 		./tests/test_k3_long_context "$(MOONSHINE_MODEL)"
+
+test-moe-tail-profile: tests/test_k3_moe_tail_profile
+	./tests/test_k3_moe_tail_profile
 
 test-reduction-qualification: check-model \
 	tests/test_k3_rocm_components \

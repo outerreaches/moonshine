@@ -341,6 +341,14 @@ still retrieves all three exact values at 7.488 token/s. This density makes
 further selected-I/O savings a secondary long-context lever relative to MLA,
 expert execution, and the MoE tail.
 
+Model-free MoE-tail profiling shows that the Q8 routed-up projection accounts
+for 96–97% of its isolated weighted-sum/norm/projection/add sequence. At 32K,
+tile 16 takes 919.462 ms/layer; weighted reduction, norm, and two adds total
+36.730 ms. A dequantized hipBLAS prototype is much faster in isolation but
+changes BF16 outputs and the end-to-end route/value contract, while providing
+no selected-512 wall-time gain. It remains rejected; deterministic MLA range
+work has the larger measured long-context opportunity.
+
 The matched crossover fixture warms the decode cache, then executes the same
 fixed token prefix sequentially and as one selected range on a single
 resident engine. Every point must match the greedy token, float bits, token

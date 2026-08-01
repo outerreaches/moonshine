@@ -236,3 +236,35 @@ approximately 1.767 TB read and zero units written.
 
 This closes the semantic prerequisite through 32K. Filled 64K and 128K remain
 deferred while deterministic MLA range work and MoE-tail profiling proceed.
+
+## MoE-tail profile and routed-up decision
+
+The model-free `test-moe-tail-profile` target allocates the real routed MoE
+tail shapes and separates top-16 weighted reduction, RMSNorm, routed-up Q8,
+and two residual adds:
+
+| Tokens | Weighted | Norm | Adds (2) | Q8 routed-up tile 16 | Isolated tail |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 8,192 | 5.159 ms | 0.684 ms | 3.305 ms | 228.670 ms | 237.818 ms |
+| 16,384 | 10.192 ms | 1.346 ms | 6.736 ms | 457.200 ms | 475.474 ms |
+| 32,768 | 20.424 ms | 2.677 ms | 13.629 ms | 919.462 ms | 956.191 ms |
+
+Routed-up Q8 accounts for 96–97% of this isolated kernel sequence. Tiles 32
+and 64 are slower; tile 16 remains the correct production choice. Dequantizing
+the 3,584x7,168 Q8 weight and using hipBLAS measures 12.678, 23.883, and
+49.125 ms at the three sizes. Its full-shape output envelope is small but not
+exact: at 32K, 41,099 of 234,881,024 BF16 outputs differ, with maximum absolute
+drift `0.00012207031`.
+
+An opt-in engine prototype was therefore tested twice at selected 512. It was
+deterministic across repeats—token `40493`, value `25.25`, 623,757,651,952
+selected bytes, and 35,539 requests—but it changed the accepted value
+`24.875` and route ledger. It reduced measured MoE tail from approximately
+1.41 to 0.217 seconds, yet complete wall time was 124.131/123.661 seconds
+versus the accepted 123.519-second baseline. There is no agentic-size speed
+gain, and the candidate was removed without a code commit.
+
+At 32K the isolated projection suggests an upper-bound saving near 81 seconds
+over 92 layers, only about 1.9% of the accepted total. This is useful profiling
+evidence, but deterministic MLA work has substantially more leverage. The
+production engine remains unchanged.

@@ -519,9 +519,21 @@ make test-prefill-scale \
   MOONSHINE_PREFILL_TOKENS=16384
 ```
 
-The accepted selected-expert 16K run took about 34.4 minutes. The historical
+The accepted selected-expert 16K run took about 34.4 minutes. The accepted
 32K run took about 73.2 minutes and can be reproduced by changing both values
-to `32768`. The historical 8K full-store backend below is diagnostic:
+to `32768`.
+
+Profile the model-shape MoE tail without weights or SSD reads:
+
+```sh
+make test-moe-tail-profile
+```
+
+The profiler isolates weighted reduction, RMSNorm, routed-up Q8, residual
+adds, and a bounded dequantized-hipBLAS comparison at 8K/16K/32K. The latter
+is diagnostic and is not the production path.
+
+The historical 8K full-store backend below is diagnostic:
 
 ```sh
 make test-prefill-kda-blas \
