@@ -48,6 +48,13 @@ process. The Q8/32 128K configured-capacity fixture covers one cold request;
 after its cache is warm, a separate prefill workspace may violate the retained
 CMA-plus-4-GiB guard. Do not weaken the guard to make that configuration pass.
 
+For the Hermes ad hoc gate, record its effective `model.max_tokens`,
+`model.context_length`, `agent.reasoning_effort`, API timeout, and streaming
+read timeout. The Moonshine 0.2 profile requires at most 32,768 output tokens
+and one of `low`, `high`, or `max`; Hermes's generic custom-provider defaults
+of 65,536 and `medium` are not compatible. Test with the profile documented in
+`docs/deployment-profiles.md`.
+
 Run a final audit:
 
 ```sh

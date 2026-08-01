@@ -259,6 +259,20 @@ not leave reliable CMA-plus-guard headroom for that second allocation. Two
 independent live requests passed at 128K with 30 slots and a 45.104 GiB cache.
 Use the faster qualified 32-slot default at smaller contexts.
 
+Standard operating profiles are:
+
+| use | context | experts/layer | output ceiling |
+|---|---:|---:|---:|
+| agentic/API baseline | 8,192 | 32 | 8,192 |
+| filled/natural-text qualified | 16,384 | 32 | 16,384 |
+| filled/natural-text qualified | 32,768 | 32 | 32,768 |
+| persistent maximum capacity | 131,072 | 30 | 32,768 |
+
+The 128K row is qualified for configured capacity and repeat short requests,
+not a filled 128K prompt. See
+[Deployment profiles and Hermes Agent](deployment-profiles.md) for exact
+commands and qualification boundaries.
+
 Long prefill can take minutes. Configure client request/read timeouts
 accordingly; use `curl --max-time 0` for manual checks. Streaming requests emit
 SSE comment keepalives with token/layer progress during prefill.
@@ -289,6 +303,15 @@ object/array/scalar subset. The schema vocabulary and wrapper are documented
 in [Agentic API and tool use](agentic-api.md). Unsupported keywords fail
 before inference. Structured SSE response content arrives only after complete
 validation; reasoning still streams live.
+
+For Hermes Agent, explicitly set `model.max_tokens: 32768` and a matching
+`model.context_length` in `~/.hermes/config.yaml`. Also set
+`agent.reasoning_effort` to `low`, `high`, or `max`; Hermes's standard
+`medium` value is not accepted by Moonshine. Use `HERMES_API_TIMEOUT` and
+`HERMES_STREAM_READ_TIMEOUT` of at least 1,800 seconds for ordinary agentic
+use, and begin at 7,200 seconds for deliberately long 16K/32K prompts. The
+complete example and failure map are in [Deployment profiles and Hermes
+Agent](deployment-profiles.md).
 
 To qualify client compatibility without loading K3, install the pinned
 official Python SDK into an isolated environment and run the replay fixture:

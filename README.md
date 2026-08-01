@@ -377,6 +377,14 @@ Kimi K3 thinking is enabled on every API request. `reasoning_effort` accepts
 `reasoning_content`, `content`, and any `tool_calls`—back in the next request.
 Preserved reasoning then participates in the same exact causal-prefix gate.
 
+Hermes Agent needs explicit compatibility overrides. Its generic custom-
+provider defaults (`max_tokens: 65536` and `reasoning_effort: medium`) exceed
+or fall outside Moonshine's accepted contract. Set Hermes `model.max_tokens`
+to 32,768 or less, set reasoning to `low`, `high`, or `max`, and use extended
+API/read timeouts for this engine's prefill and decode rate. Copy-pasteable
+8K, 16K, 32K, and persistent-128K profiles are in [Deployment profiles and
+Hermes Agent](docs/deployment-profiles.md).
+
 `response_format` supports both `json_object` and a bounded `json_schema`
 mode using K3's native response-format directives. `json_object` requires a
 top-level object. `json_schema` validates `type`, object `properties`,
