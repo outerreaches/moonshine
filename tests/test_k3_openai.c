@@ -85,6 +85,8 @@ int main(void) {
     memset(&agent_request, 0, sizeof(agent_request));
     k3_openai_chat_request specific_request;
     memset(&specific_request, 0, sizeof(specific_request));
+    k3_openai_chat_request schema_request;
+    memset(&schema_request, 0, sizeof(schema_request));
     CHECK(k3_openai_parse_chat_request(
               agent_request_json, strlen(agent_request_json),
               &agent_request, error, sizeof(error)),
@@ -122,6 +124,71 @@ int main(void) {
           strstr(specific_request.tools_json, "get_weather") != NULL &&
           strstr(specific_request.tools_json, "get_time") == NULL,
           "specific tool_choice filtering");
+
+    static const char schema_request_json[] =
+        "{\"model\":\"moonshine\",\"messages\":[{\"role\":\"user\","
+        "\"content\":\"Return a greeting record\"}],"
+        "\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{"
+        "\"name\":\"greeting_record\",\"strict\":true,\"schema\":{"
+        "\"type\":\"object\",\"properties\":{"
+        "\"greeting\":{\"type\":\"string\"},"
+        "\"count\":{\"type\":\"integer\"},"
+        "\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},"
+        "\"required\":[\"greeting\",\"count\"],"
+        "\"additionalProperties\":false}}}}";
+    CHECK(k3_openai_parse_chat_request(
+              schema_request_json, strlen(schema_request_json),
+              &schema_request, error, sizeof(error)),
+          error);
+    CHECK(schema_request.response_format == K3_RESPONSE_FORMAT_JSON_SCHEMA &&
+          schema_request.response_schema_json != NULL &&
+          strcmp(
+              schema_request.response_schema_json,
+              "{\"additionalProperties\":false,\"properties\":{"
+              "\"count\":{\"type\":\"integer\"},"
+              "\"greeting\":{\"type\":\"string\"},"
+              "\"tags\":{\"items\":{\"type\":\"string\"},"
+              "\"type\":\"array\"}},\"required\":[\"greeting\","
+              "\"count\"],\"type\":\"object\"}") == 0,
+          "response schema canonicalization");
+    k3_chat_turn_result schema_result;
+    memset(&schema_result, 0, sizeof(schema_result));
+    static const char valid_schema_response[] =
+        "{\"greeting\":\"hello\",\"count\":2,\"tags\":[\"friendly\"]}";
+    schema_result.response.data = (char *)valid_schema_response;
+    schema_result.response.size = sizeof(valid_schema_response) - 1u;
+    CHECK(k3_openai_validate_response_format(
+              &schema_request, &schema_result,
+              error, sizeof(error)),
+          error);
+    static const char valid_integer_forms[] =
+        "{\"greeting\":\"hello\",\"count\":2.0}";
+    schema_result.response.data = (char *)valid_integer_forms;
+    schema_result.response.size = sizeof(valid_integer_forms) - 1u;
+    CHECK(k3_openai_validate_response_format(
+              &schema_request, &schema_result,
+              error, sizeof(error)),
+          "mathematically integral JSON number was rejected");
+    static const char *invalid_schema_responses[] = {
+        "{\"greeting\":\"hello\"}",
+        "{\"greeting\":\"hello\",\"count\":2.5}",
+        "{\"greeting\":\"hello\",\"count\":2e-1}",
+        "{\"greeting\":\"hello\",\"count\":2,\"extra\":true}",
+        "{\"greeting\":\"hello\",\"count\":2,\"tags\":[false]}",
+        "{\"greeting\":\"hello\",\"greeting\":\"again\",\"count\":2}",
+    };
+    for (size_t i = 0u;
+         i < sizeof(invalid_schema_responses) /
+             sizeof(invalid_schema_responses[0]); i++) {
+        schema_result.response.data =
+            (char *)invalid_schema_responses[i];
+        schema_result.response.size =
+            strlen(invalid_schema_responses[i]);
+        CHECK(!k3_openai_validate_response_format(
+                  &schema_request, &schema_result,
+                  error, sizeof(error)),
+              "schema-invalid response was accepted");
+    }
 
     static const char response_text[] =
         "Hello! 👋 \"ready\"";
@@ -284,6 +351,33 @@ int main(void) {
         "\"response_format\":{\"type\":\"json_schema\","
         "\"json_schema\":{\"name\":\"x\",\"schema\":{}}}}",
         "{\"model\":\"moonshine\",\"messages\":["
+        "{\"role\":\"user\",\"content\":\"x\"}],"
+        "\"response_format\":{\"type\":\"json_schema\","
+        "\"json_schema\":{\"name\":\"x\",\"schema\":{"
+        "\"type\":\"string\",\"minLength\":1}}}}",
+        "{\"model\":\"moonshine\",\"messages\":["
+        "{\"role\":\"user\",\"content\":\"x\"}],"
+        "\"response_format\":{\"type\":\"json_schema\","
+        "\"json_schema\":{\"name\":\"x\",\"schema\":{"
+        "\"type\":\"object\",\"required\":[\"missing\"]}}}}",
+        "{\"model\":\"moonshine\",\"messages\":["
+        "{\"role\":\"user\",\"content\":\"x\"}],"
+        "\"response_format\":{\"type\":\"json_schema\","
+        "\"json_schema\":{\"name\":\"x\",\"schema\":{"
+        "\"type\":\"array\"}}}}",
+        "{\"model\":\"moonshine\",\"messages\":["
+        "{\"role\":\"user\",\"content\":\"x\"}],"
+        "\"response_format\":{\"type\":\"json_schema\","
+        "\"json_schema\":{\"name\":\"bad name\",\"schema\":{"
+        "\"type\":\"string\"}}}}",
+        "{\"model\":\"moonshine\",\"messages\":["
+        "{\"role\":\"user\",\"content\":\"x\"}],"
+        "\"response_format\":{\"type\":\"json_schema\","
+        "\"json_schema\":{\"name\":\"x\",\"schema\":{"
+        "\"type\":\"object\",\"properties\":{"
+        "\"value\":{\"type\":\"string\"},"
+        "\"value\":{\"type\":\"number\"}}}}}}",
+        "{\"model\":\"moonshine\",\"messages\":["
         "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":["
         "{\"id\":\"a\",\"type\":\"function\",\"function\":{"
         "\"name\":\"f\",\"arguments\":\"{}\"}}]},"
@@ -312,5 +406,6 @@ cleanup:
     k3_openai_chat_request_free(&request);
     k3_openai_chat_request_free(&agent_request);
     k3_openai_chat_request_free(&specific_request);
+    k3_openai_chat_request_free(&schema_request);
     return exit_code;
 }

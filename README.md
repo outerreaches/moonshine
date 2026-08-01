@@ -283,10 +283,15 @@ Kimi K3 thinking is enabled on every API request. `reasoning_effort` accepts
 `reasoning_content`, `content`, and any `tool_calls`—back in the next request.
 Preserved reasoning then participates in the same exact causal-prefix gate.
 
-`response_format: {"type":"json_object"}` uses K3's native response-format
-directive and is validated after generation. For SSE, reasoning remains live
-but response content is buffered until Moonshine confirms valid JSON with a
-top-level object. `json_schema` is not implemented yet.
+`response_format` supports both `json_object` and a bounded `json_schema`
+mode using K3's native response-format directives. `json_object` requires a
+top-level object. `json_schema` validates `type`, object `properties`,
+`required`, boolean `additionalProperties`, array `items`, and string
+`title`/`description`; supported types are object, array, string, number,
+integer, boolean, and null. Every schema node needs one string `type`, and
+unsupported JSON Schema keywords are rejected before inference. For SSE,
+reasoning remains live but response content is buffered until the complete
+value passes validation.
 
 ```sh
 curl --max-time 0 http://127.0.0.1:8080/v1/chat/completions \
@@ -355,8 +360,9 @@ Set `MOONSHINE_API_KEY` or pass `--api-key` to require bearer authentication.
 The server refuses a non-loopback bind without a key. It accepts text-only
 system/developer, user, assistant, and tool history, plus Kimi dynamic tool
 declarations on system messages. The engine is deterministic and greedy.
-`parallel_tool_calls: false`, JSON Schema response formats, sampling, parallel
-request slots, and HTTP request chunking are not implemented yet.
+`parallel_tool_calls: false`, sampling, parallel request slots, and HTTP
+request chunking are not implemented yet. JSON Schema support is intentionally
+limited to the declared subset above, not the complete vocabulary.
 
 ## Obtain the model
 
@@ -464,9 +470,9 @@ allocation capacity-qualified through 128K, and one-slot OpenAI-compatible
 HTTP/SSE service with a qualified two-turn function-tool loop are now locked.
 Agentic hidden-directive prefix recovery and the real SSE tool wire are also
 qualified locally, along with preserved thinking history and live reasoning
-deltas. Filled-128K workload behavior is still an open qualification item.
-JSON Schema responses and enforceable non-parallel tool calls remain required
-for the broader agentic surface.
+deltas. Bounded JSON Schema responses are also locally qualified. Filled-128K
+workload behavior is still an open qualification item; enforceable
+non-parallel tool calls remain the next agentic gate.
 
 See [Architecture](docs/architecture.md) for the correctness model and
 [Provenance](docs/provenance.md) for code lineage, references, and

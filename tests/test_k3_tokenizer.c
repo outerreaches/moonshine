@@ -209,6 +209,46 @@ int main(int argc, char **argv) {
               "<|open|>message role=\"assistant\"") != NULL,
           "official K3 json_object directive rendering changed");
 
+    static const char response_schema[] =
+        "{\"additionalProperties\":false,\"properties\":{"
+        "\"count\":{\"type\":\"integer\"},"
+        "\"greeting\":{\"type\":\"string\"}},"
+        "\"required\":[\"greeting\",\"count\"],\"type\":\"object\"}";
+    const k3_chat_options json_schema_options = {
+        .add_generation_prompt = true,
+        .thinking = false,
+        .response_format = K3_RESPONSE_FORMAT_JSON_SCHEMA,
+        .response_schema_json = response_schema,
+    };
+    CHECK(k3_tokenizer_encode_chat(
+              tokenizer, hello_messages,
+              sizeof(hello_messages) / sizeof(hello_messages[0]),
+              &json_schema_options, &structured_prompt,
+              error, sizeof(error)) &&
+          k3_tokenizer_decode(
+              tokenizer, structured_prompt.data,
+              structured_prompt.count, true,
+              &text, error, sizeof(error)),
+          error);
+    CHECK(strstr(
+              text.data,
+              "<|open|>message role=\"system\" "
+              "type=\"response-format\"<|sep|>"
+              "The system is invoked with "
+              "`response_format=json_schema`.\n"
+              "Your response must be raw JSON data without markdown code "
+              "blocks (```json) or any additional formatting.\n"
+              "The JSON data must match the following schema:\n"
+              "```json\n"
+              "{\"additionalProperties\":false,\"properties\":{"
+              "\"count\":{\"type\":\"integer\"},"
+              "\"greeting\":{\"type\":\"string\"}},"
+              "\"required\":[\"greeting\",\"count\"],"
+              "\"type\":\"object\"}\n```"
+              "<|close|>message<|sep|><|end_of_msg|>"
+              "<|open|>message role=\"assistant\"") != NULL,
+          "official K3 json_schema directive rendering changed");
+
     const k3_chat_options thinking_max = {
         .add_generation_prompt = true,
         .thinking = true,

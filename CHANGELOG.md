@@ -29,6 +29,11 @@ Semantic Versioning once its first research-preview tag is published.
   validation, and deferred-until-valid structured SSE content.
 - A live structured-output qualification that returned
   `{"greeting":"hello"}` without exposing unvalidated response bytes.
+- Bounded native `response_format=json_schema` rendering and recursive
+  post-generation validation for typed objects, arrays, and scalar values.
+- An 8K live schema qualification that returned the validated object
+  `{"greeting":"hello","count":1}` while withholding response content until
+  the complete value passed.
 
 ### Changed
 

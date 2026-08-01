@@ -77,6 +77,426 @@ static bool token_type(const k3_json_document *document,
            document->tokens[token].type == type;
 }
 
+static bool schema_keyword_allowed(
+        const k3_json_document *document, int32_t key) {
+    static const char *allowed[] = {
+        "type", "properties", "required", "additionalProperties",
+        "items", "title", "description",
+    };
+    for (size_t i = 0u;
+         i < sizeof(allowed) / sizeof(allowed[0]); i++) {
+        if (k3_json_string_equal(document, key, allowed[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool json_object_keys_unique(
+        const k3_json_document *document,
+        int32_t object,
+        const char *context,
+        char *error,
+        size_t error_size) {
+    int32_t key = document->tokens[object].first_child;
+    while (key >= 0) {
+        const int32_t value = document->tokens[key].next_sibling;
+        char *name = NULL;
+        if (value < 0 || !k3_json_string_dup(
+                document, key, &name, error, error_size)) {
+            free(name);
+            return false;
+        }
+        int32_t later = document->tokens[value].next_sibling;
+        while (later >= 0) {
+            const int32_t later_value =
+                document->tokens[later].next_sibling;
+            if (later_value < 0) {
+                free(name);
+                return false;
+            }
+            if (k3_json_string_equal(document, later, name)) {
+                set_error(error, error_size,
+                          "%s has duplicate property \"%s\"",
+                          context, name);
+                free(name);
+                return false;
+            }
+            later = document->tokens[later_value].next_sibling;
+        }
+        free(name);
+        key = document->tokens[value].next_sibling;
+    }
+    return true;
+}
+
+static bool validate_schema_definition(
+        const k3_json_document *document,
+        int32_t schema,
+        unsigned depth,
+        char *error,
+        size_t error_size) {
+    if (depth >= 64u || !token_type(
+            document, schema, K3_JSON_OBJECT)) {
+        set_error(error, error_size,
+                  depth >= 64u ? "response schema exceeds 64 levels" :
+                  "each response schema must be an object");
+        return false;
+    }
+    if (!json_object_keys_unique(
+            document, schema, "response schema",
+            error, error_size)) {
+        return false;
+    }
+    int32_t child = document->tokens[schema].first_child;
+    while (child >= 0) {
+        const int32_t value = document->tokens[child].next_sibling;
+        if (value < 0 || !schema_keyword_allowed(document, child)) {
+            char *keyword = NULL;
+            (void)k3_json_string_dup(
+                document, child, &keyword, NULL, 0u);
+            set_error(error, error_size,
+                      "unsupported response-schema keyword \"%s\"",
+                      keyword == NULL ? "?" : keyword);
+            free(keyword);
+            return false;
+        }
+        child = document->tokens[value].next_sibling;
+    }
+
+    char *type = NULL;
+    if (!k3_json_string_dup(
+            document,
+            k3_json_object_get(document, schema, "type"),
+            &type, error, error_size)) {
+        set_error(error, error_size,
+                  "every response schema needs a string type");
+        return false;
+    }
+    const bool known_type =
+        strcmp(type, "object") == 0 ||
+        strcmp(type, "array") == 0 ||
+        strcmp(type, "string") == 0 ||
+        strcmp(type, "number") == 0 ||
+        strcmp(type, "integer") == 0 ||
+        strcmp(type, "boolean") == 0 ||
+        strcmp(type, "null") == 0;
+    if (!known_type) {
+        set_error(error, error_size,
+                  "unsupported response-schema type \"%s\"", type);
+        free(type);
+        return false;
+    }
+
+    const int32_t title =
+        k3_json_object_get(document, schema, "title");
+    const int32_t description =
+        k3_json_object_get(document, schema, "description");
+    if ((title >= 0 && !token_type(
+            document, title, K3_JSON_STRING)) ||
+        (description >= 0 && !token_type(
+            document, description, K3_JSON_STRING))) {
+        set_error(error, error_size,
+                  "response-schema title and description must be strings");
+        free(type);
+        return false;
+    }
+
+    const int32_t properties =
+        k3_json_object_get(document, schema, "properties");
+    const int32_t required =
+        k3_json_object_get(document, schema, "required");
+    const int32_t additional =
+        k3_json_object_get(document, schema, "additionalProperties");
+    const int32_t items =
+        k3_json_object_get(document, schema, "items");
+    bool ok = true;
+    if (strcmp(type, "object") == 0) {
+        if (properties >= 0 && !token_type(
+                document, properties, K3_JSON_OBJECT)) {
+            set_error(error, error_size,
+                      "object response-schema properties must be an object");
+            ok = false;
+        }
+        int32_t property = ok && properties >= 0 ?
+            document->tokens[properties].first_child : -1;
+        if (property >= 0 && !json_object_keys_unique(
+                document, properties, "response-schema properties",
+                error, error_size)) {
+            ok = false;
+        }
+        while (ok && property >= 0) {
+            const int32_t property_schema =
+                document->tokens[property].next_sibling;
+            ok = property_schema >= 0 && validate_schema_definition(
+                document, property_schema, depth + 1u,
+                error, error_size);
+            if (ok) {
+                property = document->tokens[property_schema].next_sibling;
+            }
+        }
+        if (ok && required >= 0) {
+            if (!token_type(document, required, K3_JSON_ARRAY)) {
+                set_error(error, error_size,
+                          "object response-schema required must be an array");
+                ok = false;
+            }
+            for (size_t i = 0u; ok &&
+                 i < document->tokens[required].size; i++) {
+                const int32_t name =
+                    k3_json_array_get(document, required, i);
+                char *decoded = NULL;
+                if (!k3_json_string_dup(
+                        document, name, &decoded,
+                        error, error_size) ||
+                    properties < 0 || k3_json_object_get(
+                        document, properties, decoded) < 0) {
+                    set_error(error, error_size,
+                              "required response-schema names must exist in properties");
+                    ok = false;
+                }
+                for (size_t j = 0u; ok && j < i; j++) {
+                    if (k3_json_string_equal(
+                            document,
+                            k3_json_array_get(document, required, j),
+                            decoded)) {
+                        set_error(error, error_size,
+                                  "required response-schema names must be unique");
+                        ok = false;
+                    }
+                }
+                free(decoded);
+            }
+        }
+        if (ok && additional >= 0) {
+            bool ignored = false;
+            if (!k3_json_bool(document, additional, &ignored)) {
+                set_error(error, error_size,
+                          "additionalProperties must be boolean");
+                ok = false;
+            }
+        }
+        if (ok && items >= 0) {
+            set_error(error, error_size,
+                      "items is only valid for array response schemas");
+            ok = false;
+        }
+    } else if (strcmp(type, "array") == 0) {
+        if (properties >= 0 || required >= 0 || additional >= 0) {
+            set_error(error, error_size,
+                      "object keywords require an object response schema");
+            ok = false;
+        } else if (items < 0) {
+            set_error(error, error_size,
+                      "array response schemas need items");
+            ok = false;
+        } else {
+            ok = validate_schema_definition(
+                document, items, depth + 1u, error, error_size);
+        }
+    } else if (properties >= 0 || required >= 0 ||
+               additional >= 0 || items >= 0) {
+        set_error(error, error_size,
+                  "container keywords require object or array schemas");
+        ok = false;
+    }
+    free(type);
+    return ok;
+}
+
+static bool json_number_is_integer(
+        const k3_json_document *document, int32_t token) {
+    if (!token_type(document, token, K3_JSON_NUMBER)) {
+        return false;
+    }
+    const k3_json_token selected = document->tokens[token];
+    size_t fractional_digits = 0u;
+    bool after_decimal = false;
+    size_t coefficient_end = selected.end;
+    size_t exponent_offset = selected.end;
+    for (size_t i = selected.start; i < selected.end; i++) {
+        const char c = document->source[i];
+        if (c == '.') {
+            after_decimal = true;
+        } else if (c == 'e' || c == 'E') {
+            coefficient_end = i;
+            exponent_offset = i + 1u;
+            break;
+        } else if (after_decimal && c >= '0' && c <= '9') {
+            fractional_digits++;
+        }
+    }
+    bool negative_exponent = false;
+    size_t exponent = 0u;
+    if (exponent_offset < selected.end) {
+        if (document->source[exponent_offset] == '+' ||
+            document->source[exponent_offset] == '-') {
+            negative_exponent =
+                document->source[exponent_offset] == '-';
+            exponent_offset++;
+        }
+        for (size_t i = exponent_offset; i < selected.end; i++) {
+            const unsigned digit =
+                (unsigned)(document->source[i] - '0');
+            if (exponent > selected.end + fractional_digits) {
+                break;
+            }
+            exponent = exponent * 10u + digit;
+        }
+    }
+    if (!negative_exponent && exponent >= fractional_digits) {
+        return true;
+    }
+    const size_t required_zeroes = negative_exponent ?
+        fractional_digits + exponent : fractional_digits - exponent;
+    size_t checked = 0u;
+    for (size_t i = coefficient_end;
+         i > selected.start && checked < required_zeroes;) {
+        i--;
+        const char c = document->source[i];
+        if (c >= '0' && c <= '9') {
+            if (c != '0') {
+                return false;
+            }
+            checked++;
+        }
+    }
+    if (checked >= required_zeroes) {
+        return true;
+    }
+    for (size_t i = selected.start; i < selected.end; i++) {
+        const char c = document->source[i];
+        if (c == 'e' || c == 'E') {
+            break;
+        }
+        if (c >= '1' && c <= '9') {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool validate_schema_instance(
+        const k3_json_document *schema_document,
+        int32_t schema,
+        const k3_json_document *instance_document,
+        int32_t instance,
+        unsigned depth,
+        char *error,
+        size_t error_size) {
+    if (depth >= 64u) {
+        set_error(error, error_size,
+                  "structured response exceeds 64 schema levels");
+        return false;
+    }
+    char *type = NULL;
+    if (!k3_json_string_dup(
+            schema_document,
+            k3_json_object_get(schema_document, schema, "type"),
+            &type, error, error_size)) {
+        return false;
+    }
+    const k3_json_type actual =
+        instance_document->tokens[instance].type;
+    const bool type_matches =
+        (strcmp(type, "object") == 0 && actual == K3_JSON_OBJECT) ||
+        (strcmp(type, "array") == 0 && actual == K3_JSON_ARRAY) ||
+        (strcmp(type, "string") == 0 && actual == K3_JSON_STRING) ||
+        (strcmp(type, "number") == 0 && actual == K3_JSON_NUMBER) ||
+        (strcmp(type, "integer") == 0 &&
+            json_number_is_integer(instance_document, instance)) ||
+        (strcmp(type, "boolean") == 0 &&
+            (actual == K3_JSON_TRUE || actual == K3_JSON_FALSE)) ||
+        (strcmp(type, "null") == 0 && actual == K3_JSON_NULL);
+    if (!type_matches) {
+        set_error(error, error_size,
+                  "structured response value does not match schema type %s",
+                  type);
+        free(type);
+        return false;
+    }
+
+    bool ok = true;
+    if (strcmp(type, "object") == 0) {
+        if (!json_object_keys_unique(
+                instance_document, instance, "structured response",
+                error, error_size)) {
+            free(type);
+            return false;
+        }
+        const int32_t properties = k3_json_object_get(
+            schema_document, schema, "properties");
+        const int32_t required = k3_json_object_get(
+            schema_document, schema, "required");
+        bool allow_additional = true;
+        const int32_t additional = k3_json_object_get(
+            schema_document, schema, "additionalProperties");
+        if (additional >= 0) {
+            (void)k3_json_bool(
+                schema_document, additional, &allow_additional);
+        }
+        if (required >= 0) {
+            for (size_t i = 0u; ok &&
+                 i < schema_document->tokens[required].size; i++) {
+                char *name = NULL;
+                ok = k3_json_string_dup(
+                    schema_document,
+                    k3_json_array_get(schema_document, required, i),
+                    &name, error, error_size);
+                if (ok && k3_json_object_get(
+                        instance_document, instance, name) < 0) {
+                    set_error(error, error_size,
+                              "structured response is missing required property \"%s\"",
+                              name);
+                    ok = false;
+                }
+                free(name);
+            }
+        }
+        int32_t key = ok ?
+            instance_document->tokens[instance].first_child : -1;
+        while (ok && key >= 0) {
+            const int32_t value =
+                instance_document->tokens[key].next_sibling;
+            char *name = NULL;
+            ok = value >= 0 && k3_json_string_dup(
+                instance_document, key, &name,
+                error, error_size);
+            const int32_t property_schema = ok && properties >= 0 ?
+                k3_json_object_get(
+                    schema_document, properties, name) : -1;
+            if (ok && property_schema < 0 && !allow_additional) {
+                set_error(error, error_size,
+                          "structured response has additional property \"%s\"",
+                          name);
+                ok = false;
+            } else if (ok && property_schema >= 0) {
+                ok = validate_schema_instance(
+                    schema_document, property_schema,
+                    instance_document, value, depth + 1u,
+                    error, error_size);
+            }
+            free(name);
+            if (ok) {
+                key = instance_document->tokens[value].next_sibling;
+            }
+        }
+    } else if (strcmp(type, "array") == 0) {
+        const int32_t items = k3_json_object_get(
+            schema_document, schema, "items");
+        for (size_t i = 0u; ok &&
+             i < instance_document->tokens[instance].size; i++) {
+            ok = validate_schema_instance(
+                schema_document, items,
+                instance_document,
+                k3_json_array_get(instance_document, instance, i),
+                depth + 1u, error, error_size);
+        }
+    }
+    free(type);
+    return ok;
+}
+
 static bool decode_content_parts(
         const k3_json_document *document,
         int32_t content,
@@ -1006,9 +1426,56 @@ bool k3_openai_parse_chat_request(
                 K3_RESPONSE_FORMAT_JSON_OBJECT;
         } else if (k3_json_string_equal(
                        &document, format_type, "json_schema")) {
-            set_error(error, error_size,
-                      "response_format=json_schema is not implemented yet");
-            goto cleanup;
+            const int32_t wrapper = k3_json_object_get(
+                &document, response_format, "json_schema");
+            if (!token_type(
+                    &document, wrapper, K3_JSON_OBJECT)) {
+                set_error(error, error_size,
+                          "response_format.json_schema must be an object");
+                goto cleanup;
+            }
+            char *name = NULL;
+            if (!k3_json_string_dup(
+                    &document,
+                    k3_json_object_get(&document, wrapper, "name"),
+                    &name, error, error_size) ||
+                !valid_function_name(name)) {
+                free(name);
+                set_error(error, error_size,
+                          "response schema names must be 1-64 letters, digits, '_' or '-'");
+                goto cleanup;
+            }
+            free(name);
+            const int32_t description = k3_json_object_get(
+                &document, wrapper, "description");
+            if (description >= 0 && !token_type(
+                    &document, description, K3_JSON_STRING)) {
+                set_error(error, error_size,
+                          "response schema description must be a string");
+                goto cleanup;
+            }
+            const int32_t strict = k3_json_object_get(
+                &document, wrapper, "strict");
+            bool strict_value = false;
+            if (strict >= 0 && !k3_json_bool(
+                    &document, strict, &strict_value)) {
+                set_error(error, error_size,
+                          "response schema strict must be boolean");
+                goto cleanup;
+            }
+            const int32_t schema = k3_json_object_get(
+                &document, wrapper, "schema");
+            if (!validate_schema_definition(
+                    &document, schema, 0u,
+                    error, error_size) ||
+                !k3_json_compact_sorted_dup(
+                    &document, schema,
+                    &request->response_schema_json, NULL,
+                    error, error_size)) {
+                goto cleanup;
+            }
+            request->response_format =
+                K3_RESPONSE_FORMAT_JSON_SCHEMA;
         } else {
             set_error(error, error_size,
                       "response_format.type must be text, json_object, or json_schema");
@@ -1039,8 +1506,8 @@ bool k3_openai_validate_response_format(
         result->tool_call_count != 0u) {
         return true;
     }
-    if (request->response_format !=
-        K3_RESPONSE_FORMAT_JSON_OBJECT) {
+    if (request->response_format != K3_RESPONSE_FORMAT_JSON_OBJECT &&
+        request->response_format != K3_RESPONSE_FORMAT_JSON_SCHEMA) {
         set_error(error, error_size,
                   "unsupported response-format validator %d",
                   (int)request->response_format);
@@ -1056,20 +1523,51 @@ bool k3_openai_validate_response_format(
     if (!parsed) {
         set_error(error, error_size,
                   "model response is not valid JSON for "
-                  "response_format=json_object: %s",
+                  "response_format=%s: %s",
+                  request->response_format == K3_RESPONSE_FORMAT_JSON_SCHEMA ?
+                      "json_schema" : "json_object",
                   parse_error);
         return false;
     }
-    const bool object = document.root >= 0 &&
-        document.tokens[document.root].type == K3_JSON_OBJECT;
-    k3_json_document_free(&document);
-    if (!object) {
+    if (request->response_format == K3_RESPONSE_FORMAT_JSON_OBJECT) {
+        const bool object = document.root >= 0 &&
+            document.tokens[document.root].type == K3_JSON_OBJECT;
+        k3_json_document_free(&document);
+        if (!object) {
+            set_error(error, error_size,
+                      "model response must be a JSON object for "
+                      "response_format=json_object");
+            return false;
+        }
+        return true;
+    }
+
+    k3_json_document schema_document;
+    if (request->response_schema_json == NULL ||
+        !k3_json_parse(
+            &schema_document,
+            request->response_schema_json == NULL ? "" :
+                request->response_schema_json,
+            request->response_schema_json == NULL ? 0u :
+                strlen(request->response_schema_json),
+            parse_error, sizeof(parse_error))) {
+        k3_json_document_free(&document);
         set_error(error, error_size,
-                  "model response must be a JSON object for "
-                  "response_format=json_object");
+                  "stored response schema is invalid: %s",
+                  request->response_schema_json == NULL ?
+                      "schema is missing" : parse_error);
         return false;
     }
-    return true;
+    const bool valid = validate_schema_definition(
+            &schema_document, schema_document.root, 0u,
+            error, error_size) &&
+        validate_schema_instance(
+            &schema_document, schema_document.root,
+            &document, document.root, 0u,
+            error, error_size);
+    k3_json_document_free(&schema_document);
+    k3_json_document_free(&document);
+    return valid;
 }
 
 static bool build_tool_calls_fragment(

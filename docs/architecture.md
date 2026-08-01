@@ -85,9 +85,9 @@ The initial server is a deliberately bounded HTTP/1.1 implementation:
   `auto`/`required`/`none`, and forced named-function selection;
 - K3 preserved-thinking history, `low`/`high`/`max` effort, and separate
   reasoning/content fields in JSON and SSE;
-- native `json_object` response directives with validated, deferred SSE
-  content;
-- fixed greedy execution, with unsupported JSON Schema response formats and
+- native `json_object` and bounded `json_schema` response directives with
+  validated, deferred SSE content;
+- fixed greedy execution, with unsupported schema vocabulary and
   `parallel_tool_calls: false` rejected before inference.
 
 Tool-call SSE is structurally streamed at message completion: ordinary
@@ -103,12 +103,13 @@ accepted. Preserved assistant reasoning is ordinary protected text when it is
 rendered into later history and can therefore participate in exact prefix
 reuse.
 
-JSON-object structured output is post-generation constrained rather than
-grammar-constrained. Moonshine renders K3's official hidden directive, then
-requires the parsed response root to be an object. Streaming response bytes
-are withheld until this check passes, avoiding delivery of an invalid partial
-contract; reasoning remains token-live. JSON Schema mode is intentionally
-rejected until the supported validator subset is explicit.
+Structured output is post-generation validated rather than grammar-
+constrained. Moonshine renders K3's official hidden directive, then requires
+either an object root or conformance to its declared recursive JSON Schema
+subset. Schema requests are canonicalized before rendering and unsupported
+keywords fail before inference. Streaming response bytes are withheld until
+the complete check passes, avoiding delivery of an invalid partial contract;
+reasoning remains token-live.
 
 K3 renders `required` and `none` as hidden system messages immediately before
 the generation prompt. Those messages are absent from the assistant history

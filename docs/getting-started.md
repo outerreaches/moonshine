@@ -260,8 +260,11 @@ use](agentic-api.md). Keep the complete returned assistant message, including
 "tool"` message per call. K3 thinking is always enabled on the API;
 `reasoning_effort` accepts `low`, `high`, or `max` and defaults to `max`.
 Use `response_format: {"type":"json_object"}` for a validated top-level JSON
-object. Structured SSE response content arrives only after validation;
-reasoning still streams live.
+object, or `type: "json_schema"` for Moonshine's bounded typed
+object/array/scalar subset. The schema vocabulary and wrapper are documented
+in [Agentic API and tool use](agentic-api.md). Unsupported keywords fail
+before inference. Structured SSE response content arrives only after complete
+validation; reasoning still streams live.
 
 ## 12. Run prefill fixtures
 

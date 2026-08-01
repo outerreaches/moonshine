@@ -33,9 +33,9 @@ and the [Kimi K3 quickstart](https://platform.kimi.ai/docs/guide/kimi-k3-quickst
 
 `parallel_tool_calls` defaults to true. Explicit false is rejected until the
 engine can enforce a one-call generation constraint rather than silently
-accepting a request it may violate. `response_format: {"type":"json_object"}`
-is supported; `json_schema`, image input, sampling, and concurrent request
-slots remain outside this checkpoint.
+accepting a request it may violate. `response_format` supports `json_object`
+and the bounded `json_schema` subset documented below. Image input, sampling,
+and concurrent request slots remain outside this checkpoint.
 
 ## Minimal two-request loop
 
@@ -213,7 +213,7 @@ The second turn streamed reasoning first, then “Goodbye! Have a great day!
 history reconnects to the exact retained causal state, rather than merely
 round-tripping as unused JSON metadata.
 
-## JSON-object response format
+## Structured response formats
 
 Moonshine implements K3's native hidden `response_format=json_object`
 directive for `response_format: {"type":"json_object"}`. After generation it
@@ -235,7 +235,54 @@ K3 produced `{"greeting":"hello"}`. Moonshine exposed reasoning during
 decode, withheld the response, validated its JSON/object root, then emitted
 the exact object in one SSE `delta.content` chunk.
 
-`response_format=json_schema` remains rejected until Moonshine has a bounded,
-declared JSON Schema validation surface. The next gates are that schema subset,
-an enforceable `parallel_tool_calls: false` constraint, and an SDK-level SSE
-fixture.
+Moonshine also implements K3's native `response_format=json_schema` directive
+for the standard Chat Completions wrapper:
+
+```json
+{
+  "type": "json_schema",
+  "json_schema": {
+    "name": "greeting_record",
+    "strict": true,
+    "schema": {
+      "type": "object",
+      "properties": {
+        "greeting": {"type": "string"},
+        "count": {"type": "integer"}
+      },
+      "required": ["greeting", "count"],
+      "additionalProperties": false
+    }
+  }
+}
+```
+
+This is a declared subset, not a complete JSON Schema implementation:
+
+- every node is an object with one string `type`;
+- supported types are object, array, string, number, integer, boolean, and
+  null;
+- object nodes may use `properties`, `required`, and boolean
+  `additionalProperties`;
+- array nodes require `items`;
+- `title` and `description` string metadata are accepted;
+- all other schema keywords and structures are rejected before inference;
+- schema and instance recursion is capped at 64 levels.
+
+The wrapper requires a 1-64 character alphanumeric/underscore/hyphen `name`;
+optional `description` and boolean `strict` fields are accepted. Moonshine
+validates the declared subset after generation whether or not `strict` is
+present. Tool-call intermediate turns remain exempt because they have no final
+response value.
+
+The accepted 8K low-effort SSE qualification required `greeting` as a string,
+`count` as an integer, both fields present, and no additional properties:
+
+| prompt | prompt time/rate | generation | decode time/rate | finish |
+|---:|---:|---:|---:|---:|
+| 205 | 215.865 s / 0.950 t/s | 57 | 137.230 s / 0.415 t/s | `stop` |
+
+K3 produced `{"greeting":"hello","count":1}`. Reasoning streamed live;
+the response body appeared only once, after the recursive validator accepted
+it. The next gates are enforceable `parallel_tool_calls: false` and an
+SDK-level SSE fixture.
