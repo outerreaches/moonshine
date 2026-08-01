@@ -506,7 +506,9 @@ make test-long-context-retrieval \
 It fills 15,993 rendered tokens with 389 operational records, places three
 retrieval keys near 12.5%, 50%, and 87.5%, and requires the exact decoded
 answer `saffron|7319|Nivens`. Set `MOONSHINE_RETRIEVAL_TARGET=512` for a
-short staged harness check; only the default 16K arm is the qualification.
+short staged harness check. Set it to `32000` for the qualified 31,999-token
+arm, which uses 781 records and requires the same exact answer. The 32K arm
+completed prefill at 7.488 tok/s and retrieved all three values exactly.
 
 For the graduated filled-context program, set both values explicitly:
 

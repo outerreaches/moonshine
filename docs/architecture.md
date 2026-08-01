@@ -335,8 +335,11 @@ The separate 15,993-token natural-text retrieval gate routes much more
 densely: 721–895 experts per layer (868.0 mean) and 1,401,616,232,728 selected
 bytes, or 96.9% of the full-store ceiling. It still sustains 7.924 token/s and
 retrieves three exact values from early, middle, and late prompt positions.
-This density makes further selected-I/O savings a secondary long-context lever
-relative to attention and expert execution.
+At 31,999 tokens, the same semantic gate routes 740–895 experts per layer
+(877.9 mean) and 1,417,570,415,176 selected bytes, or 98.0% of the ceiling. It
+still retrieves all three exact values at 7.488 token/s. This density makes
+further selected-I/O savings a secondary long-context lever relative to MLA,
+expert execution, and the MoE tail.
 
 The matched crossover fixture warms the decode cache, then executes the same
 fixed token prefix sequentially and as one selected range on a single

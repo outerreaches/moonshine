@@ -83,7 +83,7 @@ in and 27.44 MiB out. Sampled SSD temperatures peaked at 56 C composite and
 errors, or error-log entries. The run read approximately 1.171 TB of SSD data
 according to the device data-unit counter.
 
-## Accepted natural-text retrieval
+## Accepted 16K natural-text retrieval
 
 The semantic gate builds 389 deterministic operational records and renders a
 15,993-token non-thinking chat prompt. Three explicitly labeled retrieval keys
@@ -192,6 +192,47 @@ errors, and error-log entries. The SSD data-unit delta was approximately
 
 The expensive execution completed immediately before its exact 32K assertion
 was added to the scale fixture; the production path and fixture inputs are
-otherwise source-equivalent. The next graduated step is a separate semantic
-32K quality gate. Filled 64K and 128K remain unqualified and should wait for
-MLA/tail investigation.
+otherwise source-equivalent. The separate semantic 32K quality gate below
+provides the functional qualification for this context tier.
+
+## Accepted 32K natural-text retrieval
+
+The semantic fixture scales to 781 deterministic operational records and a
+31,999-token prompt. Its three needles are records 98, 391, and 684, again
+approximately 12.5%, 50%, and 87.5% through the record stream. The exact
+answer remains `saffron|7319|Nivens`.
+
+The production selected-prefill path returned that exact response with a
+natural end-of-message stop, 17 generated tokens, no forced trailer, no
+reasoning, and no tool calls:
+
+| Measurement | Result |
+| --- | ---: |
+| Prompt prefill | 4,273.283 s / 7.488 tok/s |
+| Decode | 40.078 s / 0.424 tok/s |
+| Selected read requests | 80,767 |
+| Selected read bytes | 1,417,570,415,176 |
+| Unique experts, min / mean / max | 740 / 877.9 / 895 |
+| Attention | 2,429.727 s |
+| KDA within attention | 1,278.750 s |
+| MLA within attention | 1,150.977 s |
+| Expert streaming | 1,619.315 s |
+| Expert pipeline | 1,575.206 s |
+| MoE tail | 151.089 s |
+
+The phase ledger reconciled 4,273.074 of 4,273.076 seconds. Compared with the
+accepted 15,993-token semantic arm, wall time scales 2.118x, attention 2.284x,
+KDA 1.960x, MLA 2.798x, expert pipeline 1.932x, and MoE tail 3.263x.
+Throughput retains 94.5%. Selected traffic grows only 1.1% because the 32K
+natural route union already reaches 98.0% of the physical routed-store
+ceiling.
+
+The run left approximately 122 GiB available after teardown and 12 GiB while
+resident. Swap allocation grew by 1,536,000 bytes; cumulative counters moved
+by 5.99 MiB in and 5.33 MiB out. Sampled SSD temperature peaked at 59 C
+composite / 62 C sensor 2. SMART retained zero warning/critical-temperature
+time, media errors, and error-log entries. The device data-unit delta was
+approximately 1.767 TB read and zero units written.
+
+This closes the semantic prerequisite through 32K. Filled 64K and 128K remain
+deferred while deterministic MLA range work and MoE-tail profiling proceed.

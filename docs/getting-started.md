@@ -370,7 +370,9 @@ make test-long-context-retrieval \
 The qualified default renders 15,993 tokens, retrieves three fixed values
 from early, middle, and late prompt positions, and requires the exact response
 `saffron|7319|Nivens`. A 512-token staged arm is available through
-`MOONSHINE_RETRIEVAL_TARGET=512`, but it does not replace the 16K gate.
+`MOONSHINE_RETRIEVAL_TARGET=512`. The qualified 31,999-token arm uses
+`MOONSHINE_RETRIEVAL_TARGET=32000`; it expands to 781 records and requires the
+same exact response.
 
 Diagnostic KDA hipBLAS filled-8K test:
 
