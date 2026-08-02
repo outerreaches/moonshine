@@ -132,6 +132,29 @@ int main(int argc, char **argv) {
               error, sizeof(error)),
           error);
 
+    k3_prefill_plan reset_warm_plan;
+    CHECK(k3_engine_plan_reset_prefill(
+              range, 8192u, false, backend,
+              &reset_warm_plan, error, sizeof(error)),
+          error);
+    CHECK(reset_warm_plan.context_remaining == 8192u &&
+          reset_warm_plan.new_device_bytes == 0u &&
+          reset_warm_plan.borrowed_cache_bytes > 0u &&
+          reset_warm_plan.retained_cache_bytes +
+              reset_warm_plan.borrowed_cache_bytes ==
+              reset_warm_plan.decode_cache_bytes,
+          "warm reset preflight did not model position zero");
+    k3_prefill_plan reset_cold_plan;
+    CHECK(k3_engine_plan_reset_prefill(
+              range, 8192u, true, backend,
+              &reset_cold_plan, error, sizeof(error)),
+          error);
+    CHECK(reset_cold_plan.context_remaining == 8192u &&
+          reset_cold_plan.new_device_bytes == 0u &&
+          reset_cold_plan.borrowed_cache_bytes ==
+              reset_cold_plan.batch_workspace_bytes,
+          "cold reset preflight did not model an empty cache loan");
+
     CHECK(range_next == sequential_next,
           "range/sequential greedy token mismatch");
     CHECK(isfinite(range_value),

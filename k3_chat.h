@@ -91,7 +91,7 @@ typedef struct {
     /*
      * Reuse the retained causal state only when the newly rendered history is
      * an exact token-prefix extension. A mismatch falls back to a semantic
-     * reset and full prefill.
+     * reset and full prefill after any range workspace is preflighted.
      */
     bool                              reuse_prefix;
     /*
@@ -177,6 +177,8 @@ bool k3_chat_session_complete_messages(
  * tool-choice, serial-call, and response-format controls before the same exact
  * comparison. Edited, forked, shorter, or otherwise mismatched histories fall
  * back to the same isolated full-prefill behavior as the stateless interface.
+ * A cache-backed position-zero plan must pass before that fallback discards an
+ * existing causal state.
  */
 bool k3_chat_session_complete_messages_with_options(
     k3_chat_session                 *session,

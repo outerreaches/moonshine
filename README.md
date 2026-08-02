@@ -348,6 +348,13 @@ reported `workspace_borrow=4.151GiB` and the exact prefix mismatch. This is a
 resilience path, not a substitute for stable client history: full replay is
 still much slower than a small exact continuation.
 
+Before a divergent full range prefill resets an existing conversation,
+Moonshine now plans that position-zero request against a cache-backed workspace.
+If the empty or warm cache cannot lend the required bytes, the request is
+rejected before the semantic reset and the prior causal state remains available
+for a corrected retry. The preflight does not weaken memory guards or admit an
+approximate prefix.
+
 Example requests:
 
 ```sh
@@ -417,7 +424,7 @@ an interactive user makes the decision without another model request. Use
 review displaced an 11,673-token chat prefix with a divergent 412-token prompt
 and occupied the only slot for 262 seconds. Until Moonshine has a bounded
 multi-entry causal-state cache, all auxiliary calls sharing its endpoint have
-this correctness and latency cost. The qualified Sparky profile now sets
+this correctness and latency cost. The qualified client profile now sets
 `approvals.mode: manual` explicitly.
 
 `response_format` supports both `json_object` and a bounded `json_schema`

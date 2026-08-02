@@ -111,7 +111,7 @@ context/output ceiling.
 ### Reasoning replay is required
 
 Moonshine returns K3 thinking separately as `reasoning_content`. Hermes must
-send that exact field back on every historical assistant message. The Sparky
+send that exact field back on every historical assistant message. A client
 checkout at Hermes commit `87bc710` stored all 181 characters of a first-turn
 reasoning trace, but its generic-custom-provider policy removed the field from
 the next wire request. The resulting prompt rendered to 3,905 tokens while
@@ -132,7 +132,7 @@ The live terminal qualification supplied 4,230 tokens and generated a 70-token
 `Terminal("pwd")` call. After the 0.1-second tool execution, Hermes replayed
 the complete assistant object and result. Moonshine reported 4,351 prompt
 tokens, 4,300 reused/cached tokens, and only 51 evaluated tokens, then generated
-a 47-token final answer containing `/home/alex/Workspace`. Exact reasoning
+a 47-token final answer containing the working directory. Exact reasoning
 replay is therefore qualified across the actual Hermes tool boundary.
 
 Moonshine emits SSE progress comments during prefill, but this engine is much
@@ -181,7 +181,7 @@ seconds. The safe deployment choices are:
 
 Increasing the auxiliary timeout does not preserve the chat prefix. This is a
 current one-state engine limitation, not an OpenAI wire incompatibility.
-Sparky now pins `approvals.mode: manual`; its effective mode was confirmed
+Pin `approvals.mode: manual`; the effective mode was confirmed
 after the qualification process exited.
 
 The current Hermes checkout can render substantially more context than the
@@ -193,12 +193,17 @@ For deliberately long 16K/32K prompts, start with 7,200 seconds for both
 values. The qualified filled-32K prefill took about 73 minutes before decode,
 so the ordinary 30-minute tier is not sufficient for that workload.
 
-The server currently has one blocking accept/inference path. On the qualified
-host, `beelink-dashboard.service` probes port 8080 every five seconds; during a
-long request those probes filled the 16-entry listen backlog (`Recv-Q=17`).
-Stop that dashboard service for qualification, or disable/reroute its probe,
-so an agent continuation is not refused before Moonshine gains an explicit
-busy-response control path.
+The server currently has one blocking accept/inference path, so **do not poll
+it on a timer**. A probe opened while a request is in flight completes its TCP
+handshake in the kernel and then waits in the accept backlog; the client timing
+out does not remove it. A five-second monitor was observed filling the
+16-entry backlog during a single long request (`Recv-Q=17`), after which the
+kernel refuses further connections — including agent continuations.
+
+Until Moonshine offers a busy-safe status path, monitor it passively: the
+listening socket proves residency, `/proc/<pid>/cmdline` carries the configured
+context, and a non-empty accept queue indicates the slot is occupied. Check
+`ss -ltn 'sport = :8080'` rather than issuing a request.
 
 The timeout only prevents premature client cancellation. It does not change
 Moonshine's single-request slot, model speed, context accounting, or output

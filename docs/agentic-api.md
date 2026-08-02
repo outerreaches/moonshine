@@ -168,11 +168,13 @@ message list with no custom session header.
 
 The candidate is accepted only when every retained token is byte-for-byte
 identical and the new prompt has a non-empty suffix. A changed tool schema,
-edited/forked/shorter history, cold-cache benchmark request, invalid marker,
-or allocation failure takes the existing semantic reset and canonical
-full-prefill path. No state file or approximate matching is involved. Forced
-named-tool requests also remain safe: widening the exposed declaration on the
-next turn changes the prefix and triggers full replay.
+edited/forked/shorter history, cold-cache benchmark request, or invalid marker
+takes the canonical full-prefill path. Before that path resets an existing
+state, its position-zero range workspace must fit a cache-backed cold or warm
+lease. An admission failure rejects the request without discarding the retained
+conversation. No state file or approximate matching is involved. Forced named-
+tool requests also remain safe: widening the exposed declaration on the next
+turn changes the prefix and triggers full replay.
 
 Reasoning is causal history under the same rule. A client that stores
 `reasoning_content` for display but removes it from the next API request has
@@ -432,7 +434,7 @@ native client still require no Python runtime.
 
 ## Hermes Agent tool-loop qualification
 
-The patched Sparky Hermes checkout completed a real terminal-tool loop against
+A patched Hermes checkout completed a real terminal-tool loop against
 the persistent 128K/30-expert/64K-output service with `medium` reasoning. The
 exact `moonshine` replay rule preserved returned reasoning byte-for-byte. The
 client used nine tools and ran `pwd` without a wrapper:
@@ -443,13 +445,13 @@ client used nine tools and ran `pwd` without a wrapper:
 | tool-result answer | 4,351 | 51 | 4,300 | 63.790 s | 47 | 117.589 s | `stop` |
 
 Hermes executed `Terminal("pwd")` in 0.1 seconds. The final response reported
-`/home/alex/Workspace`, and the standard cached-token count covered the full
+the working directory, and the standard cached-token count covered the full
 first prompt plus its tool-call completion. This closes reasoning replay and
 tool-result continuation through a real agent client, not only a synthetic SDK
 fixture.
 
 The run kept automatic title generation disabled and deliberately avoided a
-same-endpoint smart-approval request. Afterward Sparky was pinned to
+same-endpoint smart-approval request. The client was afterward pinned to
 `approvals.mode: manual`. A separate earlier test proved why: the smart
 security reviewer sent a divergent 412-token request that replaced the chat
 prefix and held Moonshine's only slot for 262 seconds.

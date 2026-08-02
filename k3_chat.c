@@ -965,6 +965,30 @@ cleanup:
     return ok;
 }
 
+static bool preflight_replacement_prefill(
+        k3_chat_session *session,
+        size_t prompt_tokens,
+        bool clear_expert_cache,
+        char *error,
+        size_t error_size) {
+    if (prompt_tokens <= session->sequential_prefill_limit) {
+        return true;
+    }
+    k3_prefill_plan plan;
+    char plan_error[512] = { 0 };
+    if (k3_engine_plan_reset_prefill(
+            session->engine, (uint32_t)prompt_tokens,
+            clear_expert_cache, session->range_backend,
+            &plan, plan_error, sizeof(plan_error))) {
+        return true;
+    }
+    set_error(
+        error, error_size,
+        "replacement prefill rejected before causal reset: %s",
+        plan_error[0] != '\0' ? plan_error : "planning failed");
+    return false;
+}
+
 bool k3_chat_session_turn(
         k3_chat_session *session,
         const char *user_text,
@@ -1202,18 +1226,31 @@ bool k3_chat_session_complete_messages_with_options(
             (uint32_t)reuse_candidate_count;
         result->prompt_reuse_declined = true;
     }
+    if (ok && (prompt->count < 2u ||
+               prompt->count > UINT32_MAX)) {
+        set_error(error, error_size,
+                  "rendered prompt token count %zu is invalid",
+                  prompt->count);
+        ok = false;
+    }
+    const bool replacement_would_discard_state =
+        session->position != 0u ||
+        session->retained_tokens.count != 0u;
+    if (ok && reused == 0u &&
+        replacement_would_discard_state) {
+        ok = preflight_replacement_prefill(
+            session, prompt->count, clear_expert_cache,
+            error, error_size);
+    }
     if (ok && reused == 0u) {
         ok = k3_chat_session_reset(
             session, clear_expert_cache,
             error, error_size);
     }
-    if (ok) {
-        if (prompt->count > UINT32_MAX ||
-            reused > UINT32_MAX) {
-            set_error(error, error_size,
-                      "rendered prompt is too large");
-            ok = false;
-        }
+    if (ok && reused > UINT32_MAX) {
+        set_error(error, error_size,
+                  "reused prompt token count is too large");
+        ok = false;
     }
     if (ok) {
         const k3_token_buffer suffix = {

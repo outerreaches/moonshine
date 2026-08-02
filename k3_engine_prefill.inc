@@ -1626,9 +1626,10 @@ static bool prefill_routed_layer(
     return true;
 }
 
-extern "C" bool k3_engine_plan_prefill_with_projection_backend(
+static bool k3_engine_plan_prefill_for_remaining(
         const k3_engine *engine,
         uint32_t token_count,
+        uint32_t context_remaining,
         k3_prefill_cache_lease lease,
         k3_prefill_projection_backend backend,
         k3_prefill_plan *plan,
@@ -1637,7 +1638,7 @@ extern "C" bool k3_engine_plan_prefill_with_projection_backend(
     if (error && error_size) error[0] = '\0';
     if (!engine || !engine->causal_state_valid || !plan ||
         engine->decoded_layers != 0u ||
-        engine->token_position > engine->context ||
+        context_remaining > engine->context ||
         (backend != K3_PREFILL_PROJECTION_DEFAULT &&
          backend !=
              K3_PREFILL_PROJECTION_KDA_DEQUANT_BLAS_EXPERIMENT)) {
@@ -1666,11 +1667,32 @@ extern "C" bool k3_engine_plan_prefill_with_projection_backend(
     }
     return k3_prefill_plan_build_with_aux_workspace(
         &engine->model, token_count,
-        engine->context - engine->token_position,
+        context_remaining,
         engine->experts_per_layer,
         engine->staging_slots, lease,
         auxiliary_workspace_bytes,
         plan, error, error_size);
+}
+
+extern "C" bool k3_engine_plan_prefill_with_projection_backend(
+        const k3_engine *engine,
+        uint32_t token_count,
+        k3_prefill_cache_lease lease,
+        k3_prefill_projection_backend backend,
+        k3_prefill_plan *plan,
+        char *error,
+        size_t error_size) {
+    if (!engine || engine->token_position > engine->context) {
+        if (error && error_size) {
+            engine_error(error, error_size,
+                         "invalid K3 engine prefill-plan request");
+        }
+        return false;
+    }
+    return k3_engine_plan_prefill_for_remaining(
+        engine, token_count,
+        engine->context - engine->token_position,
+        lease, backend, plan, error, error_size);
 }
 
 extern "C" bool k3_engine_plan_prefill(
@@ -1684,6 +1706,29 @@ extern "C" bool k3_engine_plan_prefill(
         engine, token_count, lease,
         K3_PREFILL_PROJECTION_DEFAULT,
         plan, error, error_size);
+}
+
+extern "C" bool k3_engine_plan_reset_prefill(
+        const k3_engine *engine,
+        uint32_t token_count,
+        bool clear_expert_cache,
+        k3_prefill_projection_backend backend,
+        k3_prefill_plan *plan,
+        char *error,
+        size_t error_size) {
+    if (!engine) {
+        if (error && error_size) {
+            engine_error(error, error_size,
+                         "invalid K3 reset-prefill plan request");
+        }
+        return false;
+    }
+    return k3_engine_plan_prefill_for_remaining(
+        engine, token_count, engine->context,
+        clear_expert_cache ?
+            K3_PREFILL_CACHE_BORROW_COLD_WORKSPACE :
+            K3_PREFILL_CACHE_BORROW_WARM_WORKSPACE,
+        backend, plan, error, error_size);
 }
 
 static bool k3_engine_forward_range_impl(

@@ -247,6 +247,14 @@ int main(int argc, char **argv) {
               candidate.batch_workspace_bytes,
           "512-token auxiliary retained-cache ledger");
 
+    CHECK(!k3_prefill_plan_build(
+              &model, 65536u, 131072u, 30u, 16u,
+              K3_PREFILL_CACHE_BORROW_WARM_WORKSPACE,
+              &candidate, error, sizeof(error)),
+          "oversized warm reset workspace was accepted");
+    CHECK(strstr(error, "cannot lend") != NULL,
+          "oversized warm reset rejection lost its cache-capacity reason");
+
     CHECK(K3_LAYER_BYTES == K3_EXPERT_BYTES * 896u,
           "layer/expert byte oracle");
     printf("K3 prefill plan: PASS\n");

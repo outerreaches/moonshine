@@ -219,6 +219,22 @@ bool k3_engine_plan_prefill_with_projection_backend(
         size_t                        error_size);
 
 /*
+ * Prove that a position-zero range prefill can use cache-backed workspace
+ * before the caller destroys the current causal state. Clearing the expert
+ * cache plans an exact cold loan; retaining it plans a slot-aligned warm tail.
+ * This is payload-free, does not mutate the engine, and never relies on a
+ * later separate allocation passing the host-memory guard.
+ */
+bool k3_engine_plan_reset_prefill(
+        const k3_engine              *engine,
+        uint32_t                      token_count,
+        bool                          clear_expert_cache,
+        k3_prefill_projection_backend backend,
+        k3_prefill_plan              *plan,
+        char                         *error,
+        size_t                        error_size);
+
+/*
  * Consume a causal token range in layer-major order, returning the greedy
  * next token for the last input row. The initial implementation retains the
  * complete decode cache and streams every routed layer once in physical

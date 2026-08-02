@@ -366,6 +366,13 @@ tail, invalidate only mappings backed by those physical slots, and preserve
 the rest of the warm LRU. Releasing the whole cache would repeat a known
 failure from earlier GLM experiments.
 
+A mismatched request that would replace live causal state first derives the
+position-zero range plan with a cache-backed lease. Cold-cache benchmark resets
+must fit an exact cold loan; normal replacement requests must fit a slot-aligned
+warm tail. Planning is payload-free and non-mutating. A failure therefore
+rejects the new request while leaving the prior conversation available, rather
+than resetting it before workspace admission is known to be possible.
+
 Range prefill streams routed weights directly and does not admit decode-cache
 entries. The workspace loan is therefore exclusive until range execution
 destroys it; token decode resumes only afterward and can safely repopulate the

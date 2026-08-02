@@ -87,6 +87,9 @@ AMD architectures, and not source-precision equivalent.
 - A portable model-free `test_k3_prefix_reuse` gate covering session
   prefix-reuse admission, including edited-same-length history and count-
   arithmetic boundaries. It runs in CPU-only CI without ROCm or model weights.
+- A non-mutating position-zero workspace preflight before a divergent range
+  request resets live causal state. Requests that cannot secure a cache-backed
+  cold or warm lease now fail while preserving the prior conversation.
 - A configurable server output ceiling through `--max-output-tokens`, with an
   8K default, a bounded 64K maximum, context-aware clamping, and advertised
   context/output limits in health and model discovery.
