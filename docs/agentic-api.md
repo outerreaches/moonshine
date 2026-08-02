@@ -40,6 +40,13 @@ grammar. `response_format` supports `json_object` and the bounded
 `json_schema` subset documented below. Image input, sampling, and concurrent
 request slots remain outside this checkpoint.
 
+Moonshine retains one causal prefix. Agent clients must not send unrelated
+auxiliary completions to the same endpoint between a tool call and its result
+turn if they expect reuse. Hermes's smart shell-command approval reviewer is
+one such completion; route `auxiliary.approval` elsewhere or use interactive
+`approvals.mode: manual`. Standard health and model-discovery requests do not
+touch causal state.
+
 ## Minimal two-request loop
 
 First request:
@@ -166,6 +173,13 @@ or allocation failure takes the existing semantic reset and canonical
 full-prefill path. No state file or approximate matching is involved. Forced
 named-tool requests also remain safe: widening the exposed declaration on the
 next turn changes the prefix and triggers full replay.
+
+Reasoning is causal history under the same rule. A client that stores
+`reasoning_content` for display but removes it from the next API request has
+not preserved the assistant message: exact reuse must decline. This was
+observed with a generic-custom-provider Hermes policy, where the candidate was
+shorter than the retained state. Agent integrations must verify the outgoing
+wire request, not only their session database.
 
 ### Live SSE qualification
 
@@ -415,6 +429,47 @@ swap growth.
 
 The SDK is a qualification-only dependency; Moonshine's engine, server, and
 native client still require no Python runtime.
+
+## Hermes Agent tool-loop qualification
+
+The patched Sparky Hermes checkout completed a real terminal-tool loop against
+the persistent 128K/30-expert/64K-output service with `medium` reasoning. The
+exact `moonshine` replay rule preserved returned reasoning byte-for-byte. The
+client used nine tools and ran `pwd` without a wrapper:
+
+| phase | prompt | evaluated | reused | prefill | generated | decode | finish |
+|---|---:|---:|---:|---:|---:|---:|---|
+| terminal call | 4,230 | 4,230 | 0 | 562.932 s | 70 | 193.264 s | `tool_calls` |
+| tool-result answer | 4,351 | 51 | 4,300 | 63.790 s | 47 | 117.589 s | `stop` |
+
+Hermes executed `Terminal("pwd")` in 0.1 seconds. The final response reported
+`/home/alex/Workspace`, and the standard cached-token count covered the full
+first prompt plus its tool-call completion. This closes reasoning replay and
+tool-result continuation through a real agent client, not only a synthetic SDK
+fixture.
+
+The run kept automatic title generation disabled and deliberately avoided a
+same-endpoint smart-approval request. Afterward Sparky was pinned to
+`approvals.mode: manual`. A separate earlier test proved why: the smart
+security reviewer sent a divergent 412-token request that replaced the chat
+prefix and held Moonshine's only slot for 262 seconds.
+
+### Guarded warm prefix-miss qualification
+
+After the Hermes loop, a deliberately divergent request exercised the
+memory-resilience path with a populated 128K/30-expert cache. Exact reuse
+correctly declined at `retained=4398 matched=8 candidate=3990`. A separate
+4.148 GiB workspace would not fit above the live CMA-plus-4-GiB reserve, so
+Moonshine borrowed a slot-aligned 4.151 GiB cache tail instead:
+
+| prompt | evaluated | reused | prefill | rate | cache loan | result |
+|---:|---:|---:|---:|---:|---:|---|
+| 3,990 | 3,990 | 0 | 531.965 s | 7.500 tok/s | 4.151 GiB / 254 slots | HTTP 200 |
+
+The remaining non-overlapping cache storage was 40.953 GiB. The one-token cap
+then finished as `length` after 32.897 seconds, with standard usage
+`3990/1/3991`. This closes the original allocation-failure shape without
+lowering the guard or weakening the exact prefix predicate.
 
 ### Diagnostic KDA backend replay
 

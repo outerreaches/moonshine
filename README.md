@@ -339,6 +339,15 @@ independent 128K requests passed with 30 slots, whose 45.104 GiB cache leaves
 about 3.0 GiB more headroom. Smaller contexts retain the qualified 32-slot
 default.
 
+If a genuine warm prefix miss still cannot fit a separate guarded workspace,
+Moonshine now lends a slot-aligned tail of the warm expert cache instead of
+lowering the memory guard. A live 3,990-token divergent request at the 128K/30
+profile borrowed 4.151 GiB (254 slots), retained 40.953 GiB of cache storage,
+prefilled successfully at 7.500 tokens/s, and returned HTTP 200. The server log
+reported `workspace_borrow=4.151GiB` and the exact prefix mismatch. This is a
+resilience path, not a substitute for stable client history: full replay is
+still much slower than a small exact continuation.
+
 Example requests:
 
 ```sh
@@ -375,6 +384,18 @@ include `reasoning_content`; SSE emits live `delta.reasoning_content` chunks bef
 `reasoning_content`, `content`, and any `tool_calls`—back in the next request.
 Preserved reasoning then participates in the same exact causal-prefix gate.
 
+The Hermes checkout tested on 2026-08-01 stored Moonshine's returned
+reasoning but stripped `reasoning_content` when replaying a generic custom
+endpoint. That behavior prevents exact K3 prefix reuse. Hermes must classify
+the exact `moonshine` model ID as requiring exact reasoning replay (or expose
+an equivalent custom-provider option) before a multi-turn result is considered
+qualified; storing the reasoning in its session database is not sufficient.
+This is not hosted Kimi's padding policy: Moonshine preserves the returned
+string byte-for-byte, including an empty string, and does not synthesize a
+placeholder for missing reasoning. A patched Hermes checkout using that exact
+rule completed a live terminal-tool/result/final-answer loop: the result turn
+reused all 4,300 retained tokens and evaluated only its 51-token suffix.
+
 Hermes Agent's generic custom-provider defaults (`max_tokens: 65536` and
 `reasoning_effort: medium`) match the 128K/64K Moonshine 0.2.0 source
 profile. A running server built before this change still advertises and
@@ -386,6 +407,18 @@ timeout and retries are unsuitable for Moonshine's one slow request slot and
 the divergent prompt replaces the one retained causal prefix. Copy-pasteable
 8K, 16K, 32K, and persistent-128K profiles are in [Deployment profiles and
 Hermes Agent](docs/deployment-profiles.md).
+
+Hermes `approvals.mode: smart` has the same issue for terminal commands that
+its static detector flags: it sends a separate non-streaming security-review
+prompt through `auxiliary.approval`, which defaults to the main model. Route
+that task to a fast independent provider, or use `approvals.mode: manual` so
+an interactive user makes the decision without another model request. Use
+`off` only in an intentionally unrestricted trusted environment. One observed
+review displaced an 11,673-token chat prefix with a divergent 412-token prompt
+and occupied the only slot for 262 seconds. Until Moonshine has a bounded
+multi-entry causal-state cache, all auxiliary calls sharing its endpoint have
+this correctness and latency cost. The qualified Sparky profile now sets
+`approvals.mode: manual` explicitly.
 
 `response_format` supports both `json_object` and a bounded `json_schema`
 mode using K3's native response-format directives. `json_object` requires a

@@ -96,6 +96,11 @@ AMD architectures, and not source-precision equivalent.
   fixture.
 - Standard cached-prefix accounting through
   `usage.prompt_tokens_details.cached_tokens` in JSON and terminal SSE usage.
+- Prefix-miss diagnostics reporting the retained, common, and candidate token
+  counts without changing the exact reuse-admission predicate.
+- A guarded warm-prefill fallback that lends a slot-aligned decode-cache tail,
+  invalidates only overlapping expert mappings, and reports the loan in range
+  telemetry.
 
 ### Changed
 
@@ -128,6 +133,9 @@ AMD architectures, and not source-precision equivalent.
   text when the generated XTML suffix is parsed after streaming.
 - Treat explicit `null` `max_completion_tokens`/`max_tokens` values as
   unspecified, including fallback from the preferred field to the legacy one.
+- Prevent a large warm prefix miss from failing only because its separate
+  prefill workspace would violate the CMA-plus-host reserve; the cache loan
+  retains the guard and the non-overlapping warm expert mappings.
 
 ## [0.1.0-research-preview] - 2026-07-30
 

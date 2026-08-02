@@ -91,6 +91,37 @@ static bool unit_test(void) {
           "hit/miss telemetry");
     CHECK(stats.admissions == 3u && stats.evictions == 0u,
           "admission/eviction telemetry");
+    CHECK(k3_expert_cache_invalidate_slots(
+              cache, other_access[0].destination_slot, 1u,
+              error, sizeof(error)),
+          error);
+    const uint16_t invalidated_probe[] = { 9u };
+    k3_expert_cache_access invalidated_access[1];
+    CHECK(k3_expert_cache_plan(
+              cache, 1u, invalidated_probe, 1u,
+              invalidated_access, error, sizeof(error)),
+          error);
+    CHECK(!invalidated_access[0].hit &&
+              invalidated_access[0].admit &&
+              invalidated_access[0].destination_slot ==
+                  other_access[0].destination_slot,
+          "slot invalidation must forget only its mapping");
+    k3_expert_cache_abort(cache, 1u);
+    const uint16_t preserved_probe[] = { 2u };
+    k3_expert_cache_access preserved_access[1];
+    CHECK(k3_expert_cache_plan(
+              cache, 0u, preserved_probe, 1u,
+              preserved_access, error, sizeof(error)),
+          error);
+    CHECK(preserved_access[0].hit,
+          "slot invalidation must preserve other layers");
+    k3_expert_cache_abort(cache, 0u);
+    k3_expert_cache_get_stats(cache, &stats);
+    CHECK(stats.evictions == 1u,
+          "slot invalidation must count the removed mapping");
+    CHECK(!k3_expert_cache_invalidate_slots(
+              cache, 4u, 1u, error, sizeof(error)),
+          "out-of-range invalidation must fail");
     CHECK(k3_expert_cache_reset(cache, error, sizeof(error)),
           error);
     k3_expert_cache_get_stats(cache, &stats);
@@ -104,6 +135,60 @@ static bool unit_test(void) {
     CHECK(!reset_access[0].hit && reset_access[0].admit,
           "reset must forget resident expert mappings");
     k3_expert_cache_destroy(cache);
+
+    k3_expert_cache *range_cache = NULL;
+    CHECK(k3_expert_cache_create(
+              &range_cache, 3u, 3u, error, sizeof(error)),
+          error);
+    const uint16_t range_seed[][3] = {
+        { 10u, 11u, 12u },
+        { 20u, 21u, 22u },
+        { 30u, 31u, 32u },
+    };
+    for (uint16_t layer = 0u; layer < 3u; layer++) {
+        k3_expert_cache_access seeded[3];
+        CHECK(commit_batch(
+                  range_cache, layer, range_seed[layer], 3u, seeded),
+              "range invalidation seed batch");
+    }
+    CHECK(k3_expert_cache_invalidate_slots(
+              range_cache, 2u, 5u, error, sizeof(error)),
+          error);
+    const uint16_t range_preserved0[] = { 10u, 11u };
+    k3_expert_cache_access range_preserved0_access[2];
+    CHECK(k3_expert_cache_plan(
+              range_cache, 0u, range_preserved0, 2u,
+              range_preserved0_access, error, sizeof(error)),
+          error);
+    CHECK(range_preserved0_access[0].hit &&
+              range_preserved0_access[1].hit,
+          "cross-layer invalidation must preserve the prefix slots");
+    k3_expert_cache_abort(range_cache, 0u);
+    const uint16_t range_removed1[] = { 20u };
+    k3_expert_cache_access range_removed1_access[1];
+    CHECK(k3_expert_cache_plan(
+              range_cache, 1u, range_removed1, 1u,
+              range_removed1_access, error, sizeof(error)),
+          error);
+    CHECK(!range_removed1_access[0].hit &&
+              range_removed1_access[0].admit,
+          "cross-layer invalidation must remove a fully covered layer");
+    k3_expert_cache_abort(range_cache, 1u);
+    const uint16_t range_mixed2[] = { 30u, 31u, 32u };
+    k3_expert_cache_access range_mixed2_access[3];
+    CHECK(k3_expert_cache_plan(
+              range_cache, 2u, range_mixed2, 3u,
+              range_mixed2_access, error, sizeof(error)),
+          error);
+    CHECK(!range_mixed2_access[0].hit &&
+              range_mixed2_access[1].hit &&
+              range_mixed2_access[2].hit,
+          "cross-layer invalidation must preserve the suffix slots");
+    k3_expert_cache_abort(range_cache, 2u);
+    k3_expert_cache_get_stats(range_cache, &stats);
+    CHECK(stats.evictions == 5u,
+          "cross-layer invalidation telemetry must count every mapping");
+    k3_expert_cache_destroy(range_cache);
 
     k3_expert_cache *edge_cache = NULL;
     CHECK(k3_expert_cache_create(&edge_cache, 1u, 2u,

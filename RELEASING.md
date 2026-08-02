@@ -34,8 +34,9 @@ make test-chat-hello MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3
 
 Also verify `moonshine-server` health, model discovery, JSON completion, and
 SSE completion on the qualified host. Confirm pre-TTFT SSE keepalives, a
-warmer second stateless request, exact append-prefix reuse under
-`X-Moonshine-Session`, and mismatch fallback. For a raised-ceiling candidate,
+warmer second stateless request, automatic exact append-prefix reuse through
+`usage.prompt_tokens_details.cached_tokens`, and mismatch fallback. For a
+raised-ceiling candidate,
 confirm health/model metadata, acceptance at the configured ceiling, rejection
 one token above it, explicit-null fallback, and remaining-context clamping.
 The admission gate may stop naturally; it does not need to generate the entire

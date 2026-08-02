@@ -338,3 +338,58 @@ bool k3_expert_cache_reset(k3_expert_cache *cache,
     }
     return true;
 }
+
+bool k3_expert_cache_invalidate_slots(
+        k3_expert_cache *cache,
+        uint32_t first_slot,
+        uint32_t slot_count,
+        char *error,
+        size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (!cache || slot_count == 0u ||
+        first_slot > cache->slot_count ||
+        slot_count > cache->slot_count - first_slot) {
+        k3_cache_error(error, error_size,
+                       "invalid expert-cache invalidation range");
+        return false;
+    }
+    for (uint16_t layer = 0u;
+         layer < cache->layer_count; layer++) {
+        if (cache->pending[layer].active) {
+            k3_cache_error(
+                error, error_size,
+                "cannot invalidate expert cache with a pending plan");
+            return false;
+        }
+    }
+    const uint32_t end_slot = first_slot + slot_count;
+    for (uint16_t layer = 0u;
+         layer < cache->layer_count; layer++) {
+        k3_cache_entry *entries =
+            k3_cache_layer(cache->entries, cache, layer);
+        uint16_t count = cache->counts[layer];
+        uint16_t index = 0u;
+        while (index < count) {
+            const uint32_t global = k3_cache_global_slot(
+                cache, layer, entries[index].slot);
+            if (global < first_slot || global >= end_slot) {
+                index++;
+                continue;
+            }
+            memmove(
+                &entries[index], &entries[index + 1u],
+                (size_t)(count - index - 1u) * sizeof(*entries));
+            count--;
+            cache->stats.evictions++;
+        }
+        cache->counts[layer] = count;
+        for (uint16_t i = count; i < cache->capacity; i++) {
+            entries[i].expert = K3_CACHE_EMPTY;
+            entries[i].slot = i;
+        }
+        memcpy(
+            k3_cache_layer(cache->pending_entries, cache, layer),
+            entries, (size_t)cache->capacity * sizeof(*entries));
+    }
+    return true;
+}

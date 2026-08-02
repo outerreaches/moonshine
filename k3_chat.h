@@ -57,6 +57,10 @@ typedef struct {
     uint32_t                 prompt_tokens;
     uint32_t                 prompt_evaluated_tokens;
     uint32_t                 prompt_reused_tokens;
+    uint32_t                 prompt_reuse_retained_tokens;
+    uint32_t                 prompt_reuse_matched_tokens;
+    uint32_t                 prompt_reuse_candidate_tokens;
+    bool                     prompt_reuse_declined;
     uint32_t                 generated_tokens;
     uint32_t                 forced_trailer_tokens;
     uint32_t                 position;

@@ -24,6 +24,14 @@ typedef enum {
      * exist before selecting this lease.
      */
     K3_PREFILL_CACHE_BORROW_COLD_WORKSPACE = 1,
+
+    /*
+     * Warm-memory fallback: lend a slot-aligned tail of the decode cache to
+     * the batch workspace after invalidating only the overlapping mappings.
+     * The runtime may select this when a separate allocation would violate
+     * the host/CMA guard.
+     */
+    K3_PREFILL_CACHE_BORROW_WARM_WORKSPACE = 2,
 } k3_prefill_cache_lease;
 
 typedef struct {

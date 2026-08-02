@@ -1094,6 +1094,8 @@ bool k3_chat_session_complete_messages_with_options(
     const bool clear_expert_cache =
         options != NULL && options->clear_expert_cache;
     size_t reused = 0u;
+    size_t reuse_matched = 0u;
+    size_t reuse_candidate_count = canonical_prompt.count;
     k3_token_buffer *prompt = &canonical_prompt;
     const bool reuse_eligible =
         ok && options != NULL && options->reuse_prefix &&
@@ -1148,23 +1150,57 @@ bool k3_chat_session_complete_messages_with_options(
         if (k3_tokenizer_encode_chat(
                 session->tokenizer, messages, message_count,
                 &augmented_options, &augmented_prompt,
-                ignored_error, sizeof(ignored_error)) &&
-            k3_prefix_reuse_admits(
+                ignored_error, sizeof(ignored_error))) {
+            const size_t matched =
+                k3_prefix_reuse_common_tokens(
+                    session->retained_tokens.data,
+                    session->retained_tokens.count,
+                    augmented_prompt.data,
+                    augmented_prompt.count);
+            if (matched > reuse_matched) {
+                reuse_matched = matched;
+                reuse_candidate_count = augmented_prompt.count;
+            }
+            if (k3_prefix_reuse_admits(
+                    session->retained_tokens.data,
+                    session->retained_tokens.count,
+                    augmented_prompt.data,
+                    augmented_prompt.count)) {
+                prompt = &augmented_prompt;
+                reused = session->retained_tokens.count;
+            }
+        }
+    }
+    if (reuse_eligible && reused == 0u) {
+        const size_t matched =
+            k3_prefix_reuse_common_tokens(
                 session->retained_tokens.data,
                 session->retained_tokens.count,
-                augmented_prompt.data,
-                augmented_prompt.count)) {
-            prompt = &augmented_prompt;
+                canonical_prompt.data,
+                canonical_prompt.count);
+        if (matched > reuse_matched) {
+            reuse_matched = matched;
+            reuse_candidate_count = canonical_prompt.count;
+        }
+        if (k3_prefix_reuse_admits(
+                session->retained_tokens.data,
+                session->retained_tokens.count,
+                canonical_prompt.data,
+                canonical_prompt.count)) {
             reused = session->retained_tokens.count;
         }
     }
     if (reuse_eligible && reused == 0u &&
-        k3_prefix_reuse_admits(
-            session->retained_tokens.data,
-            session->retained_tokens.count,
-            canonical_prompt.data,
-            canonical_prompt.count)) {
-        reused = session->retained_tokens.count;
+        session->retained_tokens.count <= UINT32_MAX &&
+        reuse_matched <= UINT32_MAX &&
+        reuse_candidate_count <= UINT32_MAX) {
+        result->prompt_reuse_retained_tokens =
+            (uint32_t)session->retained_tokens.count;
+        result->prompt_reuse_matched_tokens =
+            (uint32_t)reuse_matched;
+        result->prompt_reuse_candidate_tokens =
+            (uint32_t)reuse_candidate_count;
+        result->prompt_reuse_declined = true;
     }
     if (ok && reused == 0u) {
         ok = k3_chat_session_reset(

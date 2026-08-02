@@ -121,17 +121,18 @@ static bool prefill_workspace_create(
     workspace->allocation_bytes =
         plan->batch_workspace_bytes;
     hipError_t status = hipSuccess;
-    if (lease ==
-        K3_PREFILL_CACHE_BORROW_COLD_WORKSPACE) {
+    if (lease != K3_PREFILL_CACHE_RETAIN) {
         if (!engine || !engine->cache ||
             plan->borrowed_cache_bytes <
                 workspace->allocation_bytes) {
             engine_error(
                 error, error_size,
-                "K3 cold prefill cache lease is too small");
+                "K3 prefill cache lease is too small");
             return false;
         }
-        workspace->allocation = engine->cache;
+        workspace->allocation = engine->cache +
+            (lease == K3_PREFILL_CACHE_BORROW_WARM_WORKSPACE ?
+                plan->retained_cache_bytes : 0u);
         workspace->owns_allocation = false;
     } else {
         uint64_t available = 0u;
@@ -1717,7 +1718,7 @@ static bool k3_engine_forward_range_impl(
     k3_expert_cache_stats cache_stats;
     k3_expert_cache_get_stats(
         engine->cache_policy, &cache_stats);
-    const k3_prefill_cache_lease lease =
+    k3_prefill_cache_lease lease =
         engine->token_position == 0u &&
         cache_stats.accesses == 0u ?
             K3_PREFILL_CACHE_BORROW_COLD_WORKSPACE :
@@ -1728,6 +1729,48 @@ static bool k3_engine_forward_range_impl(
             &plan, error, error_size)) {
         return false;
     }
+    if (lease == K3_PREFILL_CACHE_RETAIN) {
+        uint64_t available = 0u;
+        uint64_t cma_free = 0u;
+        const bool memory_known =
+            host_memory_bytes(&available, &cma_free);
+        const bool reserve_fits =
+            cma_free <= UINT64_MAX -
+                K3_ENGINE_HOST_GUARD_BYTES;
+        const uint64_t reserve = reserve_fits ?
+            cma_free + K3_ENGINE_HOST_GUARD_BYTES :
+            UINT64_MAX;
+        const bool retain_fits =
+            memory_known && reserve_fits &&
+            plan.new_device_bytes <= UINT64_MAX - reserve &&
+            available >= plan.new_device_bytes + reserve;
+        if (!retain_fits) {
+            lease = K3_PREFILL_CACHE_BORROW_WARM_WORKSPACE;
+            if (!k3_engine_plan_prefill_with_projection_backend(
+                    engine, token_count, lease, backend,
+                    &plan, error, error_size)) {
+                return false;
+            }
+            const uint32_t first_slot = (uint32_t)(
+                plan.retained_cache_bytes /
+                    K3_ENGINE_EXPERT_BYTES);
+            const uint32_t borrowed_slots = (uint32_t)(
+                plan.borrowed_cache_bytes /
+                    K3_ENGINE_EXPERT_BYTES);
+            /*
+             * Range prefill streams routed weights directly and never plans
+             * decode-cache admissions. The workspace is destroyed before
+             * token decode resumes, so invalidating these mappings makes the
+             * borrowed physical range exclusive for the complete loan.
+             */
+            if (!k3_expert_cache_invalidate_slots(
+                    engine->cache_policy,
+                    first_slot, borrowed_slots,
+                    error, error_size)) {
+                return false;
+            }
+        }
+    }
     k3_prefill_workspace workspace;
     if (!prefill_workspace_create(
             engine, &workspace, &plan, lease,
@@ -1736,6 +1779,10 @@ static bool k3_engine_forward_range_impl(
     }
     k3_engine_prefill_stats measured;
     memset(&measured, 0, sizeof(measured));
+    if (lease == K3_PREFILL_CACHE_BORROW_WARM_WORKSPACE) {
+        measured.warm_cache_workspace_bytes =
+            plan.borrowed_cache_bytes;
+    }
     struct timespec start;
     struct timespec end;
     clock_gettime(CLOCK_MONOTONIC, &start);

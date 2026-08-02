@@ -24,6 +24,9 @@ static int test_exact_append(void) {
         10u, 11u, 12u, 13u, 20u, 21u, 22u };
     CHECK(k3_prefix_reuse_admits(retained, 4u, candidate, 7u),
           "exact append with a three-token suffix must be admitted");
+    CHECK(k3_prefix_reuse_common_tokens(
+              retained, 4u, candidate, 7u) == 4u,
+          "exact append diagnostic must report the retained span");
     return 0;
 }
 
@@ -62,6 +65,9 @@ static int test_edited_same_length_history(void) {
           "an edit at the first retained position must be rejected");
     CHECK(!k3_prefix_reuse_admits(retained, 6u, edited_middle, 8u),
           "an edit inside the retained span must be rejected");
+    CHECK(k3_prefix_reuse_common_tokens(
+              retained, 6u, edited_middle, 8u) == 2u,
+          "diagnostic overlap must stop at the edited token");
     CHECK(!k3_prefix_reuse_admits(retained, 6u, edited_last, 8u),
           "an edit at the final retained position must be rejected");
     return 0;
@@ -117,6 +123,11 @@ static int test_degenerate_inputs(void) {
           "a null retained buffer must be rejected");
     CHECK(!k3_prefix_reuse_admits(tokens, 4u, NULL, 8u),
           "a null candidate buffer must be rejected");
+    CHECK(k3_prefix_reuse_common_tokens(
+              NULL, 4u, tokens, 4u) == 0u &&
+          k3_prefix_reuse_common_tokens(
+              tokens, 4u, NULL, 4u) == 0u,
+          "null diagnostic buffers must report no overlap");
     return 0;
 }
 

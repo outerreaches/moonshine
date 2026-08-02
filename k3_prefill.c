@@ -253,7 +253,8 @@ bool k3_prefill_plan_build_with_aux_workspace(
         experts_per_layer == 0u ||
         staging_slots < 2u ||
         (lease != K3_PREFILL_CACHE_RETAIN &&
-         lease != K3_PREFILL_CACHE_BORROW_COLD_WORKSPACE)) {
+         lease != K3_PREFILL_CACHE_BORROW_COLD_WORKSPACE &&
+         lease != K3_PREFILL_CACHE_BORROW_WARM_WORKSPACE)) {
         prefill_error(error, error_size,
                       "invalid K3 prefill-plan arguments");
         return false;
@@ -383,20 +384,46 @@ bool k3_prefill_plan_build_with_aux_workspace(
         return false;
     }
 
-    if (lease == K3_PREFILL_CACHE_BORROW_COLD_WORKSPACE) {
+    if (lease != K3_PREFILL_CACHE_RETAIN) {
         if (plan->decode_cache_bytes <
             plan->batch_workspace_bytes) {
             prefill_error(
                 error, error_size,
-                "cold K3 prefill cache %.3f GiB cannot lend "
+                "%s K3 prefill cache %.3f GiB cannot lend "
                 "%.3f GiB batch workspace",
+                lease == K3_PREFILL_CACHE_BORROW_COLD_WORKSPACE ?
+                    "cold" : "warm",
                 (double)plan->decode_cache_bytes / 1073741824.0,
                 (double)plan->batch_workspace_bytes /
                     1073741824.0);
             return false;
         }
-        plan->borrowed_cache_bytes =
-            plan->batch_workspace_bytes;
+        if (lease == K3_PREFILL_CACHE_BORROW_WARM_WORKSPACE) {
+            if (plan->batch_workspace_bytes >
+                UINT64_MAX - (K3_PREFILL_EXPERT_BYTES - 1u)) {
+                prefill_error(
+                    error, error_size,
+                    "warm K3 prefill cache slot rounding overflow");
+                return false;
+            }
+            const uint64_t slots =
+                (plan->batch_workspace_bytes +
+                 K3_PREFILL_EXPERT_BYTES - 1u) /
+                K3_PREFILL_EXPERT_BYTES;
+            if (!multiply_u64(
+                    slots, K3_PREFILL_EXPERT_BYTES,
+                    &plan->borrowed_cache_bytes) ||
+                plan->borrowed_cache_bytes >
+                    plan->decode_cache_bytes) {
+                prefill_error(
+                    error, error_size,
+                    "warm K3 prefill cache slot rounding overflow");
+                return false;
+            }
+        } else {
+            plan->borrowed_cache_bytes =
+                plan->batch_workspace_bytes;
+        }
         plan->retained_cache_bytes =
             plan->decode_cache_bytes -
             plan->borrowed_cache_bytes;
@@ -409,9 +436,10 @@ bool k3_prefill_plan_build_with_aux_workspace(
     }
 
     /*
-     * Both modes can execute from the fixed QD staging window. The optional
-     * cold lease is an accelerator/overlap buffer, never an implicit new
-     * allocation. Warm prefill therefore retains the complete decode cache.
+     * Every mode executes from the fixed QD staging window. Cache leases are
+     * ownership transfers, never implicit allocations. The warm lease is
+     * selected only when retaining the complete cache would violate the
+     * guarded separate-allocation bound.
      */
     plan->new_layer_buffer_bytes = 0u;
     return true;

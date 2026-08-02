@@ -37,6 +37,7 @@ typedef struct {
 typedef struct {
     uint64_t routed_physical_read_bytes;
     uint64_t embedding_physical_read_bytes;
+    uint64_t warm_cache_workspace_bytes;
     uint32_t routed_layer_sweeps;
     uint32_t expert_read_requests;
     uint64_t selected_expert_routes;

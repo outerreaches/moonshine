@@ -1109,9 +1109,13 @@ static void make_completion_id(char *id, size_t id_size, time_t created) {
              (long long)created, completion_counter);
 }
 
+static void log_reuse_diagnostic(
+    const char *id, const k3_chat_turn_result *result);
+
 static void log_result(const char *id,
                        const k3_chat_turn_result *result,
                        bool streamed, bool client_ok) {
+    log_reuse_diagnostic(id, result);
     const uint64_t cache_hits =
         result->cache_after.hits -
         result->cache_before.hits;
@@ -1151,7 +1155,8 @@ static void log_result(const char *id,
         fprintf(
             stderr,
             "request %s range: unique_experts=%u/%.1f/%u "
-            "routes=%llu read=%.3fGiB read_wait=%.3fs "
+            "routes=%llu read=%.3fGiB workspace_borrow=%.3fGiB "
+            "read_wait=%.3fs "
             "expert_pipeline=%.3fs routed=%.3fs\n",
             id,
             result->range_stats.min_unique_experts_per_layer,
@@ -1161,10 +1166,28 @@ static void log_result(const char *id,
                 result->range_stats.selected_expert_routes,
             (double)result->range_stats.routed_physical_read_bytes /
                 (1024.0 * 1024.0 * 1024.0),
+            (double)result->range_stats.warm_cache_workspace_bytes /
+                (1024.0 * 1024.0 * 1024.0),
             result->range_stats.routed_read_wait_seconds,
             result->range_stats.routed_expert_pipeline_seconds,
             result->range_stats.routed_stream_seconds);
     }
+}
+
+static void log_reuse_diagnostic(
+        const char *id,
+        const k3_chat_turn_result *result) {
+    if (!result->prompt_reuse_declined) {
+        return;
+    }
+    fprintf(
+        stderr,
+        "request %s prefix reuse declined: "
+        "retained=%u matched=%u candidate=%u\n",
+        id,
+        result->prompt_reuse_retained_tokens,
+        result->prompt_reuse_matched_tokens,
+        result->prompt_reuse_candidate_tokens);
 }
 
 static void handle_chat_completion(int fd, k3_chat_session *session,
@@ -1246,6 +1269,7 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
             stream_end(&stream, &result);
             log_result(completion_id, &result, true, !stream.failed);
         } else {
+            log_reuse_diagnostic(completion_id, &result);
             fprintf(stderr, "request %s failed: %s\n",
                     completion_id, error);
             stream_send_inference_error(&stream, error);
@@ -1280,6 +1304,7 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
                 &request, &result, error, sizeof(error));
         }
         if (!ok) {
+            log_reuse_diagnostic(completion_id, &result);
             fprintf(stderr, "request %s failed: %s\n",
                     completion_id, error);
             (void)send_json_error(fd, 500, error);

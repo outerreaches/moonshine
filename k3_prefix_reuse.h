@@ -39,6 +39,17 @@ bool k3_prefix_reuse_admits(
         const uint32_t *candidate,
         size_t          candidate_count);
 
+/*
+ * Return the exact leading-token overlap for diagnostics. This never admits
+ * reuse by itself; callers must still apply k3_prefix_reuse_admits(). Null
+ * buffers have no overlap.
+ */
+size_t k3_prefix_reuse_common_tokens(
+        const uint32_t *retained,
+        size_t          retained_count,
+        const uint32_t *candidate,
+        size_t          candidate_count);
+
 #ifdef __cplusplus
 }
 #endif

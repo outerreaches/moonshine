@@ -78,6 +78,18 @@ bool k3_expert_cache_reset(k3_expert_cache *cache,
                            char *error,
                            size_t error_size);
 
+/*
+ * Forget mappings backed by a contiguous global physical-slot range while
+ * preserving every non-overlapping LRU entry and all telemetry. No layer may
+ * have a pending plan. Used before temporarily lending cache storage.
+ */
+bool k3_expert_cache_invalidate_slots(
+    k3_expert_cache *cache,
+    uint32_t         first_slot,
+    uint32_t         slot_count,
+    char            *error,
+    size_t           error_size);
+
 void k3_expert_cache_destroy(k3_expert_cache *cache);
 
 #ifdef __cplusplus

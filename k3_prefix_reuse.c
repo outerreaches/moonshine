@@ -8,6 +8,24 @@ enum {
     K3_PREFIX_REUSE_MIN_SUFFIX = 2u,
 };
 
+size_t k3_prefix_reuse_common_tokens(
+        const uint32_t *retained,
+        size_t          retained_count,
+        const uint32_t *candidate,
+        size_t          candidate_count) {
+    if (retained == NULL || candidate == NULL) {
+        return 0u;
+    }
+    const size_t limit = retained_count < candidate_count ?
+        retained_count : candidate_count;
+    size_t matched = 0u;
+    while (matched < limit &&
+           retained[matched] == candidate[matched]) {
+        matched++;
+    }
+    return matched;
+}
+
 bool k3_prefix_reuse_admits(
         const uint32_t *retained,
         size_t          retained_count,

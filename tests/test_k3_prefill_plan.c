@@ -85,7 +85,8 @@ static int check_chunk(
               plan.new_device_bytes ==
                   plan.batch_workspace_bytes,
               "warm cache retained exactly");
-    } else {
+    } else if (lease ==
+               K3_PREFILL_CACHE_BORROW_COLD_WORKSPACE) {
         CHECK(plan.borrowed_cache_bytes ==
                   plan.batch_workspace_bytes &&
               plan.retained_cache_bytes ==
@@ -93,12 +94,23 @@ static int check_chunk(
                       plan.batch_workspace_bytes &&
               plan.new_device_bytes == 0u,
               "cold workspace lease is bounded exactly");
+    } else {
+        const uint64_t expected_borrowed =
+            ((plan.batch_workspace_bytes + K3_EXPERT_BYTES - 1u) /
+             K3_EXPERT_BYTES) * K3_EXPERT_BYTES;
+        CHECK(plan.borrowed_cache_bytes == expected_borrowed &&
+              plan.retained_cache_bytes ==
+                  K3_CACHE_32_BYTES - expected_borrowed &&
+              plan.new_device_bytes == 0u,
+              "warm workspace lease is slot aligned");
     }
     printf("  chunk=%u lease=%s workspace=%.3f GiB "
            "MLA-append=%.3f MiB\n",
            chunk,
-           lease == K3_PREFILL_CACHE_RETAIN ?
-               "retain" : "borrow-cold-workspace",
+           lease == K3_PREFILL_CACHE_RETAIN ? "retain" :
+               (lease == K3_PREFILL_CACHE_BORROW_COLD_WORKSPACE ?
+                    "borrow-cold-workspace" :
+                    "borrow-warm-workspace"),
            plan.batch_workspace_bytes / 1073741824.0,
            plan.mla_append_bytes / 1048576.0);
     return 0;
@@ -175,6 +187,14 @@ int main(int argc, char **argv) {
     if (check_chunk(
             &model, 8u,
             K3_PREFILL_CACHE_BORROW_COLD_WORKSPACE,
+            K3_PHYSICAL_READ_BYTES,
+            K3_PHYSICAL_LAYER_SEGMENTS) != 0) {
+        k3_st_model_close(&model);
+        return 1;
+    }
+    if (check_chunk(
+            &model, 3905u,
+            K3_PREFILL_CACHE_BORROW_WARM_WORKSPACE,
             K3_PHYSICAL_READ_BYTES,
             K3_PHYSICAL_LAYER_SEGMENTS) != 0) {
         k3_st_model_close(&model);

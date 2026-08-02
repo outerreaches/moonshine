@@ -359,9 +359,18 @@ production switch begins at 8 to keep the marginal 3--6-token region on the
 simpler schedule.
 
 Cold prefill may borrow a precisely planned slice of the empty 48.111 GiB
-decode cache for workspace. Warm continuation must retain the useful cache and
-allocate only the incremental delta workspace; releasing the whole cache would
-repeat a known failure from earlier GLM experiments.
+decode cache for workspace. Warm prefill normally retains that useful cache
+and allocates only the incremental delta workspace. If the guarded separate
+allocation cannot fit, the runtime may instead borrow a slot-aligned cache
+tail, invalidate only mappings backed by those physical slots, and preserve
+the rest of the warm LRU. Releasing the whole cache would repeat a known
+failure from earlier GLM experiments.
+
+Range prefill streams routed weights directly and does not admit decode-cache
+entries. The workspace loan is therefore exclusive until range execution
+destroys it; token decode resumes only afterward and can safely repopulate the
+invalidated slots. Live qualification borrowed 254 of 2,760 physical slots
+(4.151 GiB), leaving a 40.953 GiB non-overlapping cache region mapped.
 
 ## Projection backends
 
