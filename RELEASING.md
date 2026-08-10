@@ -58,6 +58,16 @@ response. Lower-context/server-ceiling profiles must override Hermes's generic
 65,536-token default. Test with the profile documented in
 `docs/deployment-profiles.md`.
 
+For a server logging change, capture one TTY run and one redirected run. Confirm
+that redirected output contains no ANSI escapes; `NO_COLOR=1` disables TTY
+color; exact reuse is reported before prefill; reasoning, response-or-tool, and
+64-token decode-progress events appear in order; and final usage matches the
+API response. Exercise one mismatch, malformed request, authentication failure,
+and disconnected client. Audit the captured log for prompts, generated text,
+tool arguments, request bodies, credentials, control-character line injection,
+and unbounded records. Use [the operational logging contract](docs/observability.md)
+as the expected event surface.
+
 Run a final audit:
 
 ```sh

@@ -87,6 +87,25 @@ typedef void (*k3_chat_prefill_progress_callback)(
     uint32_t                      total,
     void                         *user_data);
 
+/*
+ * Coarse request lifecycle notifications for transports and operators. These
+ * events never run per expert, layer, or generated token: decode progress is
+ * reported only once per 64 model-produced tokens. Callbacks must return
+ * promptly and must not call back into the session.
+ */
+typedef enum {
+    K3_CHAT_LIFECYCLE_PREFILL_START = 0,
+    K3_CHAT_LIFECYCLE_PREFILL_COMPLETE = 1,
+    K3_CHAT_LIFECYCLE_DECODE_START = 2,
+    K3_CHAT_LIFECYCLE_RESPONSE_START = 3,
+    K3_CHAT_LIFECYCLE_DECODE_PROGRESS = 4,
+} k3_chat_lifecycle_event;
+
+typedef void (*k3_chat_lifecycle_callback)(
+    k3_chat_lifecycle_event       event,
+    const k3_chat_turn_result    *result,
+    void                         *user_data);
+
 typedef struct {
     /*
      * Reuse the retained causal state only when the newly rendered history is
@@ -114,6 +133,8 @@ typedef struct {
     const char                       *response_schema_json;
     /* Retain hidden request directives for exact session-history replay. */
     bool                              preserve_request_directive_history;
+    k3_chat_lifecycle_callback        lifecycle_callback;
+    void                             *lifecycle_data;
 } k3_chat_completion_options;
 
 /*

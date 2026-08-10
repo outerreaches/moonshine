@@ -579,6 +579,16 @@ static void report_layer_progress(uint32_t completed,
     }
 }
 
+static void report_lifecycle(
+        k3_chat_lifecycle_callback callback,
+        void *data,
+        k3_chat_lifecycle_event event,
+        const k3_chat_turn_result *result) {
+    if (callback != NULL) {
+        callback(event, result, data);
+    }
+}
+
 static bool execute_prompt(
         k3_chat_session *session,
         const k3_token_buffer *prompt,
@@ -652,6 +662,8 @@ static bool execute_encoded_turn(
         uint32_t max_generated_tokens,
         k3_chat_prefill_progress_callback progress_callback,
         void *progress_data,
+        k3_chat_lifecycle_callback lifecycle_callback,
+        void *lifecycle_data,
         bool thinking,
         k3_chat_text_callback reasoning_callback,
         void *reasoning_data,
@@ -753,6 +765,9 @@ static bool execute_encoded_turn(
         ok = false;
         goto cleanup;
     }
+    report_lifecycle(
+        lifecycle_callback, lifecycle_data,
+        K3_CHAT_LIFECYCLE_PREFILL_COMPLETE, result);
     mutated = true;
     if (!append_retained_tokens(
             session, prompt->data, prompt->count,
@@ -776,6 +791,9 @@ static bool execute_encoded_turn(
     struct timespec decode_start;
     struct timespec decode_end;
     clock_gettime(CLOCK_MONOTONIC, &decode_start);
+    report_lifecycle(
+        lifecycle_callback, lifecycle_data,
+        K3_CHAT_LIFECYCLE_DECODE_START, result);
     for (uint32_t generated = 0u;
          generated < generation_limit;
          generated++) {
@@ -835,6 +853,9 @@ static bool execute_encoded_turn(
             if (thinking_transition_progress ==
                 thinking_transition_count) {
                 channel = K3_OUTPUT_RESPONSE;
+                report_lifecycle(
+                    lifecycle_callback, lifecycle_data,
+                    K3_CHAT_LIFECYCLE_RESPONSE_START, result);
             }
         } else if (channel == K3_OUTPUT_RESPONSE) {
             if (token == K3_TOKEN_CLOSE) {
@@ -875,6 +896,11 @@ static bool execute_encoded_turn(
                 error, error_size)) {
             ok = false;
             goto cleanup;
+        }
+        if ((result->generated_tokens & 63u) == 0u) {
+            report_lifecycle(
+                lifecycle_callback, lifecycle_data,
+                K3_CHAT_LIFECYCLE_DECODE_PROGRESS, result);
         }
     }
 
@@ -1021,6 +1047,7 @@ bool k3_chat_session_turn(
             session, &prompt,
             (uint32_t)prompt.count, 0u,
             max_generated_tokens, NULL, NULL,
+            NULL, NULL,
             false, NULL, NULL,
             callback, callback_data, result,
             error, error_size);
@@ -1233,6 +1260,28 @@ bool k3_chat_session_complete_messages_with_options(
                   prompt->count);
         ok = false;
     }
+    if (ok && reused > UINT32_MAX) {
+        set_error(error, error_size,
+                  "reused prompt token count is too large");
+        ok = false;
+    }
+    if (ok) {
+        result->prompt_tokens = (uint32_t)prompt->count;
+        result->prompt_evaluated_tokens =
+            (uint32_t)(prompt->count - reused);
+        result->prompt_reused_tokens = (uint32_t)reused;
+        result->prefill_strategy =
+            prompt->count - reused <=
+                session->sequential_prefill_limit ?
+                K3_CHAT_PREFILL_SEQUENTIAL :
+                K3_CHAT_PREFILL_LAYER_MAJOR;
+        report_lifecycle(
+            options == NULL ? NULL :
+                options->lifecycle_callback,
+            options == NULL ? NULL :
+                options->lifecycle_data,
+            K3_CHAT_LIFECYCLE_PREFILL_START, result);
+    }
     const bool replacement_would_discard_state =
         session->position != 0u ||
         session->retained_tokens.count != 0u;
@@ -1246,11 +1295,6 @@ bool k3_chat_session_complete_messages_with_options(
         ok = k3_chat_session_reset(
             session, clear_expert_cache,
             error, error_size);
-    }
-    if (ok && reused > UINT32_MAX) {
-        set_error(error, error_size,
-                  "reused prompt token count is too large");
-        ok = false;
     }
     if (ok) {
         const k3_token_buffer suffix = {
@@ -1266,6 +1310,10 @@ bool k3_chat_session_complete_messages_with_options(
                 options->progress_callback,
             options == NULL ? NULL :
                 options->progress_data,
+            options == NULL ? NULL :
+                options->lifecycle_callback,
+            options == NULL ? NULL :
+                options->lifecycle_data,
             options != NULL && options->thinking,
             options == NULL ? NULL :
                 options->reasoning_callback,

@@ -5,6 +5,17 @@ Semantic Versioning once its first research-preview tag is published.
 
 ## [Unreleased]
 
+### Added
+
+- Timestamped production lifecycle logging for request admission, exact prefix
+  reuse or mismatch, throttled prefill progress, reasoning-to-response/tool
+  decode transitions, 64-token decode heartbeats, completion, failures, and
+  client state. Interactive color is TTY-only and model/request content and
+  credentials are excluded.
+- A transport-facing coarse chat lifecycle callback used by the server without
+  changing inference kernels, arithmetic, routing, I/O, cache policy, or
+  scheduling.
+
 ## [0.2.0-research-preview] - 2026-08-01
 
 Adds an agentic serving surface — function tools, preserved thinking, and

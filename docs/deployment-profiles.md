@@ -1,4 +1,4 @@
-# Deployment profiles and Hermes Agent
+# Deployment profiles and agent clients
 
 These profiles describe configurations exercised on the qualified 128 GB
 Ryzen AI Max+ 395 / Radeon 8060S host. They are operating points, not claims
@@ -66,6 +66,129 @@ Persistent 128K-capacity 0.2.0 profile:
   --context 131072 --experts 30 \
   --max-output-tokens 65536
 ```
+
+## Pi Agent compatibility
+
+Pi Agent 0.83.0 passed a real two-request Bash-tool loop against the persistent
+128K Moonshine profile. Configure a dedicated OpenAI Chat Completions provider
+in `~/.pi/agent/models.json`:
+
+```json
+{
+  "providers": {
+    "moonshine": {
+      "baseUrl": "http://MOONSHINE_HOST:8080/v1",
+      "api": "openai-completions",
+      "apiKey": "$MOONSHINE_API_KEY",
+      "compat": {
+        "supportsReasoningEffort": true,
+        "supportsUsageInStreaming": true,
+        "maxTokensField": "max_completion_tokens",
+        "requiresReasoningContentOnAssistantMessages": true,
+        "thinkingFormat": "reasoning_effort",
+        "supportsStrictMode": false
+      },
+      "models": [{
+        "id": "moonshine",
+        "name": "Kimi K3 (Moonshine)",
+        "reasoning": true,
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "low": "low",
+          "medium": "medium",
+          "high": "high",
+          "xhigh": null,
+          "max": "max"
+        },
+        "input": ["text"],
+        "contextWindow": 131072,
+        "maxTokens": 65536,
+        "cost": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        }
+      }]
+    }
+  }
+}
+```
+
+Set the matching defaults and long-request timeouts in
+`~/.pi/agent/settings.json`:
+
+```json
+{
+  "defaultProvider": "moonshine",
+  "defaultModel": "moonshine",
+  "defaultThinkingLevel": "medium",
+  "showCacheMissNotices": true,
+  "transport": "sse",
+  "httpIdleTimeoutMs": 0,
+  "retry": {
+    "enabled": false,
+    "provider": {
+      "maxRetries": 0,
+      "maxRetryDelayMs": 60000
+    }
+  }
+}
+```
+
+Merge these keys with existing settings rather than replacing unrelated Pi
+preferences. The example deliberately hides Pi's `off`, `minimal`, and
+`xhigh` levels: Moonshine currently accepts only K3's native `low`, `medium`,
+`high`, and `max` effort strings, and K3 currently always thinks through the
+OpenAI endpoint. No nonstandard session header is needed.
+
+Pi preserves streamed `reasoning_content` as a thinking block whose signature
+is the originating wire field. It therefore replays K3's exact reasoning on a
+tool-result continuation without a client patch. The qualified loop supplied
+675 prompt tokens, generated an 81-token `bash({"command":"pwd"})` call, and
+then reported a standard cached-token hit on the result turn: 789 prompt
+tokens, 756 cached, 33 evaluated, and 31 generated. Moonshine returned
+`tool_calls` and then `stop`; Pi executed the tool and produced the correct
+working-directory answer.
+
+Moonshine does not yet report
+`usage.completion_tokens_details.reasoning_tokens`, so Pi displays reasoning
+token usage as zero even though it renders and replays the reasoning text.
+This is a telemetry limitation only; total completion and cached-token usage
+remain correct.
+
+### Long buffered tool payloads
+
+Disable Pi's HTTP idle timeout and both retry layers for the current one-slot
+server. A real medium-reasoning request for a complete single-file Tetris game
+generated continuously for 8 hours 35 minutes. Moonshine produced 2,849
+reasoning tokens and then spent about 6 hours 34 minutes generating a 9,018-
+token response/tool region before completing one tool call. Decode remained at
+0.387 token/s; the unusual wall time came from the 11,867-token output, not a
+throughput regression.
+
+Pi received live reasoning until Moonshine entered the response/tool region.
+The structured tool payload then provided no client-visible SSE data for an
+hour, so `httpIdleTimeoutMs: 3600000` terminated the stream. Setting
+`retry.provider.maxRetries: 0` had not disabled Pi's separate agent retry
+layer: its default three retries each opened a connection behind the original
+blocking request and timed out after another hour. When the original finally
+completed, Moonshine accepted an already-abandoned retry and began the full
+request again.
+
+Use `httpIdleTimeoutMs: 0`, omit `retry.provider.timeoutMs`, set
+`retry.enabled: false`, and retain `retry.provider.maxRetries: 0` as in the
+configuration above. Pi maps the disabled timeout to its maximum SDK timeout
+instead of passing a zero-duration request. Start a fresh Pi session after
+changing these values; a session that already contains a partial `terminated`
+assistant response and retry errors is not a clean continuation candidate.
+
+This configuration is a necessary client workaround, not the final server
+behavior. Moonshine still needs decode-phase SSE keepalives during buffered
+tool/structured output, inference cancellation after peer disconnect, passive
+half-close detection, and busy-safe handling that does not leave stale sockets
+in the accept backlog.
 
 ## Hermes Agent compatibility
 

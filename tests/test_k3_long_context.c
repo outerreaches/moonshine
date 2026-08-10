@@ -28,6 +28,10 @@ enum {
 
 typedef struct {
     struct timespec start;
+    k3_chat_lifecycle_event lifecycle[8];
+    size_t lifecycle_count;
+    uint32_t planned_prompt;
+    uint32_t planned_evaluated;
 } retrieval_progress;
 
 static bool append_format(FILE *stream, const char *format, ...) {
@@ -176,6 +180,21 @@ static void report_progress(k3_chat_prefill_progress_unit unit,
            unit == K3_CHAT_PREFILL_PROGRESS_LAYERS ? "layer" : "token",
            completed, total, elapsed);
     fflush(stdout);
+}
+
+static void report_lifecycle(
+        k3_chat_lifecycle_event event,
+        const k3_chat_turn_result *turn,
+        void *user_data) {
+    retrieval_progress *progress = (retrieval_progress *)user_data;
+    if (progress->lifecycle_count <
+        sizeof(progress->lifecycle) / sizeof(progress->lifecycle[0])) {
+        progress->lifecycle[progress->lifecycle_count++] = event;
+    }
+    if (event == K3_CHAT_LIFECYCLE_PREFILL_START) {
+        progress->planned_prompt = turn->prompt_tokens;
+        progress->planned_evaluated = turn->prompt_evaluated_tokens;
+    }
 }
 
 static bool exact_trimmed_answer(const char *response,
@@ -337,11 +356,13 @@ int main(int argc, char **argv) {
         .role = K3_CHAT_ROLE_USER,
         .content = prompt_text,
     };
-    retrieval_progress progress;
+    retrieval_progress progress = { 0 };
     clock_gettime(CLOCK_MONOTONIC, &progress.start);
     const k3_chat_completion_options options = {
         .progress_callback = report_progress,
         .progress_data = &progress,
+        .lifecycle_callback = report_lifecycle,
+        .lifecycle_data = &progress,
     };
     CHECK(k3_chat_session_complete_messages_with_options(
               session, &message, 1u,
@@ -349,6 +370,18 @@ int main(int argc, char **argv) {
               &options, NULL, NULL, &turn,
               error, sizeof(error)),
           error);
+    CHECK(progress.lifecycle_count >= 3u &&
+              progress.lifecycle[0] ==
+                  K3_CHAT_LIFECYCLE_PREFILL_START &&
+              progress.lifecycle[1] ==
+                  K3_CHAT_LIFECYCLE_PREFILL_COMPLETE &&
+              progress.lifecycle[2] ==
+                  K3_CHAT_LIFECYCLE_DECODE_START,
+          "request lifecycle event order changed");
+    CHECK(progress.planned_prompt == turn.prompt_tokens &&
+              progress.planned_evaluated ==
+                  turn.prompt_evaluated_tokens,
+          "prefill lifecycle plan did not expose final token accounting");
     CHECK(turn.prefill_strategy == K3_CHAT_PREFILL_LAYER_MAJOR,
           "retrieval prompt did not use selected range prefill");
     CHECK(turn.prompt_tokens >= minimum_prompt &&

@@ -471,6 +471,16 @@ responses send spec-legal SSE comment keepalives during prefill, with token or
 layer progress throttled to ten seconds and emitted at completed-unit
 boundaries. Ordinary JSON responses cannot send keepalives.
 
+The server also emits timestamped lifecycle logs to standard error. They make
+the exact prefix-reuse decision visible before prefill, distinguish hidden
+reasoning from the buffered response/tool region, report coarse progress for
+long work, and finish with prompt/decode/cache/I/O accounting. Interactive
+terminals receive restrained level color; redirected logs remain plain text,
+and `NO_COLOR=1` disables color explicitly. Prompts, reasoning, response text,
+tool arguments, request bodies, bearer tokens, and API keys are never logged.
+See [Operational logging](docs/observability.md) for the event contract and
+examples.
+
 Append-only reuse is automatic; send each turn with the complete history:
 
 ```sh

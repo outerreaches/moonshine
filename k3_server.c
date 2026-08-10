@@ -31,7 +31,14 @@ enum {
     K3_SERVER_MAX_HEADERS = 64 * 1024,
     K3_SERVER_DEFAULT_MAX_BODY = 8 * 1024 * 1024,
     K3_SERVER_KEEPALIVE_SECONDS = 10,
+    K3_SERVER_LOG_PROGRESS_SECONDS = 60,
 };
+
+typedef enum {
+    SERVER_LOG_INFO = 0,
+    SERVER_LOG_WARN = 1,
+    SERVER_LOG_ERROR = 2,
+} server_log_level;
 
 typedef struct {
     char   method[16];
@@ -70,9 +77,23 @@ typedef struct {
     bool        failed;
 } stream_state;
 
+typedef struct {
+    const char     *completion_id;
+    stream_state   *stream;
+    struct timespec request_start;
+    struct timespec prefill_start;
+    struct timespec decode_start;
+    struct timespec last_prefill_log;
+    const char     *decode_phase;
+    uint32_t        max_output_tokens;
+    bool            thinking;
+    bool            clear_expert_cache;
+} request_observer;
+
 static volatile sig_atomic_t stop_requested = 0;
 static volatile sig_atomic_t active_listener = -1;
 static unsigned long long completion_counter = 0u;
+static bool interactive_log = false;
 
 static void stop_handler(int signum) {
     (void)signum;
@@ -97,6 +118,110 @@ static double elapsed_seconds(struct timespec start,
                               struct timespec end) {
     return (double)(end.tv_sec - start.tv_sec) +
            (double)(end.tv_nsec - start.tv_nsec) / 1e9;
+}
+
+static const char *log_level_name(server_log_level level) {
+    return level == SERVER_LOG_ERROR ? "ERROR" :
+        (level == SERVER_LOG_WARN ? "WARN" : "INFO");
+}
+
+static const char *log_level_color(server_log_level level) {
+    return level == SERVER_LOG_ERROR ? "\033[31m" :
+        (level == SERVER_LOG_WARN ? "\033[33m" : "\033[36m");
+}
+
+static void server_log(server_log_level level,
+                       const char *event,
+                       const char *completion_id,
+                       const char *fmt, ...) {
+    struct timespec now;
+    struct tm utc;
+    char timestamp[40];
+    clock_gettime(CLOCK_REALTIME, &now);
+    gmtime_r(&now.tv_sec, &utc);
+    if (strftime(timestamp, sizeof(timestamp),
+                 "%Y-%m-%dT%H:%M:%S.000Z", &utc) == 0u) {
+        memcpy(timestamp, "1970-01-01T00:00:00.000Z", 25u);
+    }
+    const unsigned milliseconds =
+        (unsigned)((now.tv_nsec / 1000000L) % 1000L);
+    timestamp[20] = (char)('0' + milliseconds / 100u);
+    timestamp[21] = (char)('0' + (milliseconds / 10u) % 10u);
+    timestamp[22] = (char)('0' + milliseconds % 10u);
+
+    char message[3072] = { 0 };
+    bool truncated = false;
+    if (fmt != NULL && fmt[0] != '\0') {
+        va_list ap;
+        va_start(ap, fmt);
+        const int required = vsnprintf(
+            message, sizeof(message), fmt, ap);
+        va_end(ap);
+        if (required >= 0) {
+            truncated = (size_t)required >= sizeof(message);
+            for (size_t i = 0u; message[i] != '\0'; i++) {
+                if ((unsigned char)message[i] < 0x20u) {
+                    message[i] = ' ';
+                }
+            }
+        }
+    }
+
+    char line[4096];
+    const char *id_prefix = completion_id == NULL ? "" : " id=";
+    const char *id_value = completion_id == NULL ? "" : completion_id;
+    const char *message_prefix = message[0] == '\0' ? "" : " ";
+    const char *truncation = truncated ? " log_truncated=yes" : "";
+    const int required = interactive_log ?
+        snprintf(
+            line, sizeof(line),
+            "%s %s%-5s\033[0m %-25s%s%s%s%s%s\n",
+            timestamp, log_level_color(level),
+            log_level_name(level), event,
+            id_prefix, id_value, message_prefix, message, truncation) :
+        snprintf(
+            line, sizeof(line),
+            "%s %-5s %-25s%s%s%s%s%s\n",
+            timestamp, log_level_name(level), event,
+            id_prefix, id_value, message_prefix, message, truncation);
+    if (required <= 0) {
+        return;
+    }
+    const size_t line_size = (size_t)required < sizeof(line) ?
+        (size_t)required : sizeof(line) - 1u;
+    ssize_t written;
+    do {
+        written = write(STDERR_FILENO, line, line_size);
+    } while (written < 0 && errno == EINTR);
+}
+
+static const char *prefill_strategy_name(
+        k3_chat_prefill_strategy strategy) {
+    return strategy == K3_CHAT_PREFILL_LAYER_MAJOR ?
+        "layer-major" : "token-major";
+}
+
+static const char *tool_choice_name(k3_tool_choice choice) {
+    return choice == K3_TOOL_CHOICE_REQUIRED ? "required" :
+        (choice == K3_TOOL_CHOICE_NONE ? "none" : "auto");
+}
+
+static const char *response_format_name(k3_response_format format) {
+    return format == K3_RESPONSE_FORMAT_JSON_SCHEMA ? "json_schema" :
+        (format == K3_RESPONSE_FORMAT_JSON_OBJECT ?
+            "json_object" : "text");
+}
+
+static bool reject_config(const char *fmt, ...) {
+    char error[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(error, sizeof(error), fmt, ap);
+    va_end(ap);
+    server_log(
+        SERVER_LOG_ERROR, "server.config.reject", NULL,
+        "error=\"%s\"", error);
+    return false;
 }
 
 static bool parse_u32(const char *text, uint32_t min_value,
@@ -188,8 +313,7 @@ static bool parse_args(int argc, char **argv, server_config *config) {
             strcmp(argument, "--range-backend") == 0 ||
             strcmp(argument, "--max-body") == 0) {
             if (++i >= argc) {
-                fprintf(stderr, "error: %s needs a value\n", argument);
-                return false;
+                return reject_config("%s needs a value", argument);
             }
             const char *value = argv[i];
             uint32_t parsed = 0u;
@@ -199,44 +323,38 @@ static bool parse_args(int argc, char **argv, server_config *config) {
                 config->api_key = value;
             } else if (strcmp(argument, "--port") == 0) {
                 if (!parse_u32(value, 1u, 65535u, &parsed)) {
-                    fprintf(stderr, "error: invalid port %s\n", value);
-                    return false;
+                    return reject_config("invalid port %s", value);
                 }
                 config->port = (uint16_t)parsed;
             } else if (strcmp(argument, "--context") == 0) {
                 if (!parse_u32(value, 64u, 1048576u, &parsed)) {
-                    fprintf(stderr, "error: invalid context %s\n", value);
-                    return false;
+                    return reject_config("invalid context %s", value);
                 }
                 config->context = parsed;
             } else if (strcmp(argument, "--sequential-limit") == 0) {
                 if (!parse_u32(value, 1u, 8192u, &parsed)) {
-                    fprintf(stderr, "error: invalid sequential limit %s\n",
-                            value);
-                    return false;
+                    return reject_config(
+                        "invalid sequential limit %s", value);
                 }
                 config->sequential_limit = parsed;
             } else if (strcmp(argument, "--experts") == 0) {
                 if (!parse_u32(value, 1u, 256u, &parsed)) {
-                    fprintf(stderr, "error: invalid expert count %s\n", value);
-                    return false;
+                    return reject_config(
+                        "invalid expert count %s", value);
                 }
                 config->experts = (uint16_t)parsed;
             } else if (strcmp(argument, "--staging") == 0) {
                 if (!parse_u32(value, 1u, 256u, &parsed)) {
-                    fprintf(stderr, "error: invalid staging count %s\n", value);
-                    return false;
+                    return reject_config(
+                        "invalid staging count %s", value);
                 }
                 config->staging = (uint16_t)parsed;
             } else if (strcmp(argument, "--max-output-tokens") == 0) {
                 if (!parse_u32(
                         value, 1u, K3_SERVER_MAX_OUTPUT_TOKENS,
                         &parsed)) {
-                    fprintf(
-                        stderr,
-                        "error: invalid maximum output tokens %s\n",
-                        value);
-                    return false;
+                    return reject_config(
+                        "invalid maximum output tokens %s", value);
                 }
                 config->max_output_tokens = parsed;
             } else if (strcmp(argument, "--range-backend") == 0) {
@@ -247,33 +365,29 @@ static bool parse_args(int argc, char **argv, server_config *config) {
                     config->range_backend =
                         K3_PREFILL_PROJECTION_KDA_DEQUANT_BLAS_EXPERIMENT;
                 } else {
-                    fprintf(stderr,
-                            "error: invalid range backend %s\n", value);
-                    return false;
+                    return reject_config(
+                        "invalid range backend %s", value);
                 }
             } else {
                 if (!parse_u32(value, 1024u, UINT32_MAX, &parsed)) {
-                    fprintf(stderr, "error: invalid maximum body %s\n", value);
-                    return false;
+                    return reject_config(
+                        "invalid maximum body %s", value);
                 }
                 config->max_body = parsed;
             }
             continue;
         }
         if (argument[0] == '-') {
-            fprintf(stderr, "error: unknown option %s\n", argument);
-            return false;
+            return reject_config("unknown option %s", argument);
         }
         if (positional_model) {
-            fprintf(stderr, "error: more than one model path supplied\n");
-            return false;
+            return reject_config("more than one model path supplied");
         }
         config->model_root = argument;
         positional_model = true;
     }
     if (config->model_root == NULL || config->model_root[0] == '\0') {
-        fprintf(stderr, "error: MODEL or MOONSHINE_MODEL is required\n");
-        return false;
+        return reject_config("MODEL or MOONSHINE_MODEL is required");
     }
     if (config->api_key != NULL && config->api_key[0] == '\0') {
         config->api_key = NULL;
@@ -1002,6 +1116,124 @@ static void stream_progress(
     stream->last_progress = now;
 }
 
+static void observe_prefill_progress(
+        k3_chat_prefill_progress_unit unit,
+        uint32_t completed,
+        uint32_t total,
+        void *user_data) {
+    request_observer *observer = (request_observer *)user_data;
+    if (observer->stream != NULL) {
+        stream_progress(unit, completed, total, observer->stream);
+    }
+    if (completed == total) {
+        return;
+    }
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (elapsed_seconds(observer->last_prefill_log, now) <
+        K3_SERVER_LOG_PROGRESS_SECONDS) {
+        return;
+    }
+    server_log(
+        SERVER_LOG_INFO, "request.prefill.progress",
+        observer->completion_id,
+        "unit=%s completed=%u total=%u elapsed=%.3fs",
+        unit == K3_CHAT_PREFILL_PROGRESS_LAYERS ? "layer" : "token",
+        completed, total,
+        elapsed_seconds(observer->prefill_start, now));
+    observer->last_prefill_log = now;
+}
+
+static void observe_lifecycle(
+        k3_chat_lifecycle_event event,
+        const k3_chat_turn_result *result,
+        void *user_data) {
+    request_observer *observer = (request_observer *)user_data;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (event == K3_CHAT_LIFECYCLE_PREFILL_START) {
+        observer->prefill_start = now;
+        observer->last_prefill_log = now;
+        const char *reuse = result->prompt_reused_tokens != 0u ? "hit" :
+            (result->prompt_reuse_declined ? "miss" :
+             (observer->clear_expert_cache ? "disabled" : "cold"));
+        server_log(
+            result->prompt_reuse_declined ?
+                SERVER_LOG_WARN : SERVER_LOG_INFO,
+            "request.prefill.start", observer->completion_id,
+            "prompt=%u evaluated=%u reused=%u reuse=%s "
+            "strategy=%s%s",
+            result->prompt_tokens,
+            result->prompt_evaluated_tokens,
+            result->prompt_reused_tokens,
+            reuse,
+            prefill_strategy_name(result->prefill_strategy),
+            result->prompt_reuse_declined ?
+                " replacement=guarded" : "");
+        if (result->prompt_reuse_declined) {
+            server_log(
+                SERVER_LOG_WARN, "request.prefix.miss",
+                observer->completion_id,
+                "retained=%u matched=%u candidate=%u",
+                result->prompt_reuse_retained_tokens,
+                result->prompt_reuse_matched_tokens,
+                result->prompt_reuse_candidate_tokens);
+        }
+        return;
+    }
+    if (event == K3_CHAT_LIFECYCLE_PREFILL_COMPLETE) {
+        const double rate = result->prompt_seconds > 0.0 ?
+            (double)result->prompt_evaluated_tokens /
+                result->prompt_seconds : 0.0;
+        server_log(
+            SERVER_LOG_INFO, "request.prefill.complete",
+            observer->completion_id,
+            "evaluated=%u reused=%u seconds=%.3f rate=%.3f_tok/s "
+            "read=%.3f_GiB workspace_borrow=%.3f_GiB",
+            result->prompt_evaluated_tokens,
+            result->prompt_reused_tokens,
+            result->prompt_seconds, rate,
+            (double)result->range_stats.routed_physical_read_bytes /
+                (1024.0 * 1024.0 * 1024.0),
+            (double)result->range_stats.warm_cache_workspace_bytes /
+                (1024.0 * 1024.0 * 1024.0));
+        return;
+    }
+    if (event == K3_CHAT_LIFECYCLE_DECODE_START) {
+        observer->decode_start = now;
+        observer->decode_phase = observer->thinking ?
+            "reasoning" : "response_or_tool";
+        server_log(
+            SERVER_LOG_INFO, "request.decode.start",
+            observer->completion_id,
+            "phase=%s max_output=%u",
+            observer->decode_phase,
+            observer->max_output_tokens);
+        return;
+    }
+    if (event == K3_CHAT_LIFECYCLE_RESPONSE_START) {
+        observer->decode_phase = "response_or_tool";
+        server_log(
+            SERVER_LOG_INFO, "request.decode.phase",
+            observer->completion_id,
+            "phase=%s generated=%u elapsed=%.3fs note=tool_payloads_buffered",
+            observer->decode_phase,
+            result->generated_tokens,
+            elapsed_seconds(observer->decode_start, now));
+        return;
+    }
+    if (event == K3_CHAT_LIFECYCLE_DECODE_PROGRESS) {
+        server_log(
+            SERVER_LOG_INFO, "request.decode.progress",
+            observer->completion_id,
+            "phase=%s generated=%u elapsed=%.3fs",
+            observer->decode_phase == NULL ? "unknown" :
+                observer->decode_phase,
+            result->generated_tokens,
+            elapsed_seconds(observer->decode_start, now));
+    }
+}
+
 static void stream_end(stream_state *stream,
                        const k3_chat_turn_result *result) {
     if (stream->pending_size != 0u && !stream->failed) {
@@ -1109,39 +1341,38 @@ static void make_completion_id(char *id, size_t id_size, time_t created) {
              (long long)created, completion_counter);
 }
 
-static void log_reuse_diagnostic(
-    const char *id, const k3_chat_turn_result *result);
-
-static void log_result(const char *id,
+static void log_result(const request_observer *observer,
                        const k3_chat_turn_result *result,
                        bool streamed, bool client_ok) {
-    log_reuse_diagnostic(id, result);
     const uint64_t cache_hits =
         result->cache_after.hits -
         result->cache_before.hits;
     const uint64_t cache_accesses =
         result->cache_after.accesses -
         result->cache_before.accesses;
-    fprintf(
-        stderr,
-        "request %s complete: prompt=%u evaluated=%u "
-        "reused=%u %.3fs %.3f tok/s; "
-        "generated=%u %.3fs %.3f tok/s; finish=%s; "
-        "stream=%s client=%s cache_delta=%llu/%llu "
-        "cache_total=%llu/%llu\n",
-        id, result->prompt_tokens,
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    server_log(
+        SERVER_LOG_INFO, "request.complete",
+        observer->completion_id,
+        "prompt=%u evaluated=%u reused=%u prefill=%.3fs "
+        "generated=%u decode=%.3fs rate=%.3f_tok/s total=%.3fs "
+        "finish=%s tool_calls=%zu reasoning_bytes=%zu content_bytes=%zu "
+        "stream=%s client=%s cache=%llu/%llu cache_total=%llu/%llu",
+        result->prompt_tokens,
         result->prompt_evaluated_tokens,
         result->prompt_reused_tokens,
         result->prompt_seconds,
-        result->prompt_seconds > 0.0 ?
-            (double)result->prompt_evaluated_tokens /
-                result->prompt_seconds : 0.0,
         result->generated_tokens, result->decode_seconds,
         result->tokens_per_second,
+        elapsed_seconds(observer->request_start, now),
         result->finish_reason == K3_CHAT_FINISH_TOOL_CALLS ?
             "tool_calls" :
             (result->finish_reason ==
                 K3_CHAT_FINISH_END_OF_MESSAGE ? "stop" : "length"),
+        result->tool_call_count,
+        result->reasoning_content.size,
+        result->response.size,
         streamed ? "yes" : "no",
         client_ok ? "connected" : "disconnected",
         (unsigned long long)cache_hits,
@@ -1152,13 +1383,12 @@ static void log_result(const char *id,
         const double average_unique =
             (double)result->range_stats.unique_experts_across_layers /
             result->range_stats.routed_layer_sweeps;
-        fprintf(
-            stderr,
-            "request %s range: unique_experts=%u/%.1f/%u "
-            "routes=%llu read=%.3fGiB workspace_borrow=%.3fGiB "
-            "read_wait=%.3fs "
-            "expert_pipeline=%.3fs routed=%.3fs\n",
-            id,
+        server_log(
+            SERVER_LOG_INFO, "request.prefill.io",
+            observer->completion_id,
+            "unique_experts=%u/%.1f/%u routes=%llu read=%.3f_GiB "
+            "workspace_borrow=%.3f_GiB read_wait=%.3fs "
+            "expert_pipeline=%.3fs routed=%.3fs",
             result->range_stats.min_unique_experts_per_layer,
             average_unique,
             result->range_stats.max_unique_experts_per_layer,
@@ -1174,32 +1404,30 @@ static void log_result(const char *id,
     }
 }
 
-static void log_reuse_diagnostic(
-        const char *id,
-        const k3_chat_turn_result *result) {
-    if (!result->prompt_reuse_declined) {
-        return;
-    }
-    fprintf(
-        stderr,
-        "request %s prefix reuse declined: "
-        "retained=%u matched=%u candidate=%u\n",
-        id,
-        result->prompt_reuse_retained_tokens,
-        result->prompt_reuse_matched_tokens,
-        result->prompt_reuse_candidate_tokens);
-}
-
 static void handle_chat_completion(int fd, k3_chat_session *session,
                                    const http_request *http,
-                                   const server_config *config) {
+                                   const server_config *config,
+                                   const char *peer) {
     char error[1024];
+    const time_t created = time(NULL);
+    char completion_id[128];
+    make_completion_id(completion_id, sizeof(completion_id), created);
+    request_observer observer = {
+        .completion_id = completion_id,
+        .clear_expert_cache =
+            config->clear_expert_cache_per_request,
+    };
+    clock_gettime(CLOCK_MONOTONIC, &observer.request_start);
     k3_openai_chat_request request;
     memset(&request, 0, sizeof(request));
     if (!k3_openai_parse_chat_request(
             http->body, http->body_size,
             effective_max_output_tokens(config), &request,
             error, sizeof(error))) {
+        server_log(
+            SERVER_LOG_WARN, "request.reject", completion_id,
+            "peer=%s status=400 error=\"%s\"",
+            peer, error);
         (void)send_json_error(fd, 400, error);
         return;
     }
@@ -1208,14 +1436,27 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
             error, sizeof(error),
             "model \"%s\" is unavailable; use \"%s\"",
             request.model, MOONSHINE_MODEL_ID);
+        server_log(
+            SERVER_LOG_WARN, "request.reject", completion_id,
+            "peer=%s status=400 error=\"%s\"",
+            peer, error);
         (void)send_json_error(fd, 400, error);
         k3_openai_chat_request_free(&request);
         return;
     }
 
-    const time_t created = time(NULL);
-    char completion_id[128];
-    make_completion_id(completion_id, sizeof(completion_id), created);
+    observer.max_output_tokens = request.max_tokens;
+    observer.thinking = request.thinking;
+    server_log(
+        SERVER_LOG_INFO, "request.start", completion_id,
+        "peer=%s stream=%s messages=%zu max_output=%u reasoning=%s "
+        "tools=%zu tool_choice=%s parallel_tools=%s format=%s",
+        peer, request.stream ? "yes" : "no",
+        request.message_count, request.max_tokens,
+        request.reasoning_effort,
+        request.tool_count, tool_choice_name(request.tool_choice),
+        request.parallel_tool_calls ? "yes" : "no",
+        response_format_name(request.response_format));
     k3_chat_turn_result result;
     memset(&result, 0, sizeof(result));
     bool ok;
@@ -1228,7 +1469,12 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
             .defer_content = request.response_format !=
                 K3_RESPONSE_FORMAT_TEXT,
         };
+        observer.stream = &stream;
         if (!stream_begin(&stream)) {
+            server_log(
+                SERVER_LOG_WARN, "request.client_disconnect",
+                completion_id,
+                "peer=%s stage=stream_begin", peer);
             k3_openai_chat_request_free(&request);
             return;
         }
@@ -1236,8 +1482,10 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
             .reuse_prefix = true,
             .clear_expert_cache =
                 config->clear_expert_cache_per_request,
-            .progress_callback = stream_progress,
-            .progress_data = &stream,
+            .progress_callback = observe_prefill_progress,
+            .progress_data = &observer,
+            .lifecycle_callback = observe_lifecycle,
+            .lifecycle_data = &observer,
             .thinking = request.thinking,
             .thinking_effort = request.reasoning_effort,
             .reasoning_callback = stream_reasoning_callback,
@@ -1267,11 +1515,12 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
         }
         if (ok) {
             stream_end(&stream, &result);
-            log_result(completion_id, &result, true, !stream.failed);
+            log_result(&observer, &result, true, !stream.failed);
         } else {
-            log_reuse_diagnostic(completion_id, &result);
-            fprintf(stderr, "request %s failed: %s\n",
-                    completion_id, error);
+            server_log(
+                SERVER_LOG_ERROR, "request.failed", completion_id,
+                "peer=%s stage=inference error=\"%s\"",
+                peer, error);
             stream_send_inference_error(&stream, error);
         }
     } else {
@@ -1279,6 +1528,10 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
             .reuse_prefix = true,
             .clear_expert_cache =
                 config->clear_expert_cache_per_request,
+            .progress_callback = observe_prefill_progress,
+            .progress_data = &observer,
+            .lifecycle_callback = observe_lifecycle,
+            .lifecycle_data = &observer,
             .thinking = request.thinking,
             .thinking_effort = request.reasoning_effort,
             .tools_json = request.tools_json,
@@ -1304,9 +1557,10 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
                 &request, &result, error, sizeof(error));
         }
         if (!ok) {
-            log_reuse_diagnostic(completion_id, &result);
-            fprintf(stderr, "request %s failed: %s\n",
-                    completion_id, error);
+            server_log(
+                SERVER_LOG_ERROR, "request.failed", completion_id,
+                "peer=%s stage=inference error=\"%s\"",
+                peer, error);
             (void)send_json_error(fd, 500, error);
         } else {
             char *json = NULL;
@@ -1316,6 +1570,11 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
                 &result, &json, &json_size,
                 error, sizeof(error));
             if (!ok) {
+                server_log(
+                    SERVER_LOG_ERROR, "request.failed",
+                    completion_id,
+                    "peer=%s stage=response_build error=\"%s\"",
+                    peer, error);
                 (void)send_json_error(fd, 500, error);
             } else {
                 char metrics[512];
@@ -1334,8 +1593,7 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
                 const bool client_ok = send_response(
                     fd, 200, "application/json",
                     json, json_size, metrics);
-                log_result(
-                    completion_id, &result, false, client_ok);
+                log_result(&observer, &result, false, client_ok);
                 free(json);
             }
         }
@@ -1345,19 +1603,28 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
 }
 
 static void handle_request(int fd, k3_chat_session *session,
-                           const server_config *config) {
+                           const server_config *config,
+                           const char *peer) {
     http_request request;
     int status = 400;
     char error[1024];
     if (!receive_request(
             fd, config->max_body, &request, &status,
             error, sizeof(error))) {
+        server_log(
+            SERVER_LOG_WARN, "http.reject", NULL,
+            "peer=%s status=%d error=\"%s\"",
+            peer, status, error);
         (void)send_json_error(fd, status, error);
         http_request_free(&request);
         return;
     }
     if (strcmp(request.path, "/health") == 0) {
         if (strcmp(request.method, "GET") != 0) {
+            server_log(
+                SERVER_LOG_WARN, "http.reject", NULL,
+                "peer=%s status=405 method=%s path=%s",
+                peer, request.method, request.path);
             (void)send_json_error(fd, 405, "method not allowed");
         } else {
             char body[512];
@@ -1388,12 +1655,19 @@ static void handle_request(int fd, k3_chat_session *session,
         return;
     }
     if (!authorized(&request, config->api_key)) {
+        server_log(
+            SERVER_LOG_WARN, "http.unauthorized", NULL,
+            "peer=%s path=%s", peer, request.path);
         (void)send_json_error(fd, 401, "invalid or missing API key");
         http_request_free(&request);
         return;
     }
     if (strcmp(request.path, "/v1/models") == 0) {
         if (strcmp(request.method, "GET") != 0) {
+            server_log(
+                SERVER_LOG_WARN, "http.reject", NULL,
+                "peer=%s status=405 method=%s path=%s",
+                peer, request.method, request.path);
             (void)send_json_error(fd, 405, "method not allowed");
         } else {
             char body[512];
@@ -1421,28 +1695,38 @@ static void handle_request(int fd, k3_chat_session *session,
                    request.path,
                    "/v1/chat/completions") == 0) {
         if (strcmp(request.method, "POST") != 0) {
+            server_log(
+                SERVER_LOG_WARN, "http.reject", NULL,
+                "peer=%s status=405 method=%s path=%s",
+                peer, request.method, request.path);
             (void)send_json_error(fd, 405, "method not allowed");
         } else {
             handle_chat_completion(
-                fd, session, &request, config);
+                fd, session, &request, config, peer);
         }
     } else {
+        server_log(
+            SERVER_LOG_WARN, "http.reject", NULL,
+            "peer=%s status=404 method=%s path=%s",
+            peer, request.method, request.path);
         (void)send_json_error(fd, 404, "endpoint not found");
     }
     http_request_free(&request);
 }
 
 int main(int argc, char **argv) {
+    interactive_log =
+        isatty(STDERR_FILENO) && getenv("NO_COLOR") == NULL;
     server_config config;
     if (!parse_args(argc, argv, &config)) {
         usage(stderr, argv[0]);
         return 2;
     }
     if (!loopback_host(config.host) && config.api_key == NULL) {
-        fprintf(
-            stderr,
-            "error: refusing non-loopback bind without --api-key "
-            "or MOONSHINE_API_KEY\n");
+        server_log(
+            SERVER_LOG_ERROR, "server.config.reject", NULL,
+            "error=\"refusing non-loopback bind without --api-key "
+            "or MOONSHINE_API_KEY\"");
         return 2;
     }
     signal(SIGPIPE, SIG_IGN);
@@ -1456,15 +1740,20 @@ int main(int argc, char **argv) {
     const int listener =
         create_listener(&config, error, sizeof(error));
     if (listener < 0) {
-        fprintf(stderr, "error: %s\n", error);
+        server_log(
+            SERVER_LOG_ERROR, "server.listen.failed", NULL,
+            "error=\"%s\"", error);
         return 1;
     }
     active_listener = listener;
-    fprintf(
-        stderr,
-        "loading %s (context=%u experts=%u staging=%u q8=yes)...\n",
+    server_log(
+        SERVER_LOG_INFO, "server.load.start", NULL,
+        "model_root=%s context=%u experts=%u staging=%u q8=yes "
+        "range_backend=%s",
         config.model_root, config.context,
-        config.experts, config.staging);
+        config.experts, config.staging,
+        config.range_backend == K3_PREFILL_PROJECTION_DEFAULT ?
+            "default" : "kda-blas");
     k3_chat_session *session = NULL;
     k3_engine_stats stats;
     memset(&stats, 0, sizeof(stats));
@@ -1480,17 +1769,20 @@ int main(int argc, char **argv) {
     if (!k3_chat_session_create(
             &session, &session_config, &stats,
             error, sizeof(error))) {
-        fprintf(stderr, "error: loading engine failed: %s\n", error);
+        server_log(
+            SERVER_LOG_ERROR, "server.load.failed", NULL,
+            "error=\"%s\"", error);
         close(listener);
         return 1;
     }
-    fprintf(
-        stderr,
-        "ready: http://%s:%u model=%s context=%u max_output=%u load=%.3fs "
-        "static=%.3f GiB cache=%.3f GiB state=%.3f GiB "
-        "slot=1 auth=%s range_backend=%s\n",
+    server_log(
+        SERVER_LOG_INFO, "server.ready", NULL,
+        "listen=http://%s:%u model=%s version=%s context=%u "
+        "max_output=%u load=%.3fs static=%.3f_GiB cache=%.3f_GiB "
+        "state=%.3f_GiB slots=1 auth=%s range_backend=%s",
         config.host, config.port, MOONSHINE_MODEL_ID,
-        config.context, effective_max_output_tokens(&config),
+        MOONSHINE_VERSION, config.context,
+        effective_max_output_tokens(&config),
         stats.startup_seconds,
         (double)stats.static_store.resident_bytes /
             (1024.0 * 1024.0 * 1024.0),
@@ -1501,20 +1793,30 @@ int main(int argc, char **argv) {
             "default" : "kda-blas");
 
     while (!stop_requested) {
-        const int client = accept(listener, NULL, NULL);
+        struct sockaddr_storage peer_address;
+        socklen_t peer_size = sizeof(peer_address);
+        const int client = accept(
+            listener, (struct sockaddr *)&peer_address, &peer_size);
         if (client < 0) {
             if (errno == EINTR) {
                 continue;
             }
             if (!stop_requested) {
-                fprintf(stderr, "accept failed: %s\n", strerror(errno));
+                server_log(
+                    SERVER_LOG_ERROR, "server.accept.failed", NULL,
+                    "error=\"%s\"", strerror(errno));
             }
             break;
         }
-        handle_request(client, session, &config);
+        char peer[NI_MAXHOST] = "unknown";
+        (void)getnameinfo(
+            (struct sockaddr *)&peer_address, peer_size,
+            peer, sizeof(peer), NULL, 0, NI_NUMERICHOST);
+        handle_request(client, session, &config, peer);
         close(client);
     }
-    fprintf(stderr, "shutting down\n");
+    server_log(SERVER_LOG_INFO, "server.stop", NULL,
+               "reason=signal_or_listener_close");
     k3_chat_session_destroy(session);
     if (active_listener >= 0) {
         close(listener);

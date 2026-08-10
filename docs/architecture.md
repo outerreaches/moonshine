@@ -81,6 +81,9 @@ The initial server is a deliberately bounded HTTP/1.1 implementation:
 - strict native JSON parsing with an 8 MiB default body limit;
 - ordinary JSON completion responses and incremental SSE chunks;
 - SSE comment keepalives with token/layer prefill progress;
+- bounded server-side lifecycle logs covering reuse admission, prefill,
+  reasoning/response-or-tool decode phases, completion, and failures without
+  recording prompt or generated content;
 - automatic one-slot append-prefix reuse selected by exact token content;
 - UTF-8 boundary buffering so tokenizer byte fragments never corrupt a stream;
 - standard OpenAI error envelopes and usage accounting, including cached
@@ -103,6 +106,14 @@ the OpenAI wire contract without exposing half-parsed XTML attributes.
 For `parallel_tool_calls: false`, a Moonshine-specific hidden directive steers
 K3 toward one call and the parsed set is rejected if its count exceeds one.
 Policy validation precedes emission of those complete call chunks.
+
+The transport observes coarse chat-session lifecycle events. Prefix accounting
+is reported before a guarded replacement can reset state; prefill progress is
+limited to one terminal record per minute; decode progress is reported every
+64 generated tokens. Thinking-to-response transition logging labels the latter
+region `response_or_tool` because tool structure is known only after the full
+generated XTML parses. These callbacks do not participate in engine scheduling
+or numerical execution.
 
 Thinking SSE is token-live. The session tracks the native `<think>` close and
 `<response>` open sequence exactly, sends pre-transition text only as
