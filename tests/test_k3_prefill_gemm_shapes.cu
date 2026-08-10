@@ -40,7 +40,7 @@ enum {
     K3_EXPERT_GATE_COLUMNS = 3584,
     K3_EXPERT_DOWN_ROWS = 3584,
     K3_EXPERT_DOWN_COLUMNS = 3072,
-    K3_EXPERT_MAX_TOKENS = 192,
+    K3_EXPERT_MAX_TOKENS = 1170,
     K3_Q8_BLOCK = 128,
     K3_Q8_STEPS = 3,
     K3_ROUTER_STEPS = 5,
@@ -49,7 +49,7 @@ enum {
 
 static const uint32_t k_tiles[] = {16u, 32u, 64u};
 static const uint32_t k_expert_counts[] = {
-    9u, 32u, 64u, 128u, 146u, 192u,
+    9u, 32u, 64u, 128u, 146u, 192u, 585u, 1170u,
 };
 
 __global__ static void fill_bf16(

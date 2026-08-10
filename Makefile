@@ -90,7 +90,8 @@ ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS)
 	test-model-layout test-model-components test-engine-init \
 	test-engine-hello test-chat-hello test-state-checkpoint test-tokenizer \
 	test-prefill-2 test-prefill-scale test-prefill-kda-blas \
-	test-prefill-crossover test-long-context-retrieval \
+	test-prefill-crossover test-prefill-gemm-shapes \
+	test-long-context-retrieval \
 	test-mla-batch-determinism test-mla-batch-kernels \
 	test-moe-tail-profile \
 	test-reduction-qualification \
@@ -129,6 +130,8 @@ help:
 	@echo "                               Run the diagnostic KDA hipBLAS candidate"
 	@echo "  make test-prefill-crossover MOONSHINE_MODEL=/path/to/Kimi-K3 MOONSHINE_CROSSOVER_TOKENS='2 4 8 16'"
 	@echo "                               Compare exact warm sequential/range suffixes"
+	@echo "  make test-prefill-gemm-shapes"
+	@echo "                               Screen exact MXFP4 expert tiles at production scale"
 	@echo "  make test-long-context-retrieval MOONSHINE_MODEL=/path/to/Kimi-K3 MOONSHINE_RETRIEVAL_TARGET=512|16000|32000"
 	@echo "                               Run a deterministic natural-text gate"
 	@echo "  make test-mla-batch-determinism"
@@ -299,6 +302,9 @@ test-prefill-kda-blas: check-model tests/test_k3_prefill_512
 test-prefill-crossover: check-model tests/test_k3_prefill_crossover
 	./tests/test_k3_prefill_crossover \
 		"$(MOONSHINE_MODEL)" $(MOONSHINE_CROSSOVER_TOKENS)
+
+test-prefill-gemm-shapes: tests/test_k3_prefill_gemm_shapes
+	./tests/test_k3_prefill_gemm_shapes
 
 test-long-context-retrieval: check-model tests/test_k3_long_context
 	MOONSHINE_RETRIEVAL_TARGET="$(MOONSHINE_RETRIEVAL_TARGET)" \
