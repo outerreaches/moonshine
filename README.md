@@ -479,7 +479,8 @@ terminals receive restrained level color; redirected logs remain plain text,
 and `NO_COLOR=1` disables color explicitly. Prompts, reasoning, response text,
 tool arguments, request bodies, bearer tokens, and API keys are never logged.
 See [Operational logging](docs/observability.md) for the event contract and
-examples.
+examples, and [its qualification](docs/qualification-observability.md) for the
+gate evidence.
 
 Append-only reuse is automatic; send each turn with the complete history:
 
