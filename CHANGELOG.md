@@ -26,6 +26,11 @@ Semantic Versioning once its first research-preview tag is published.
   route structure, strict ledger semantics and totals, source-capacity hit
   masks, provenance-safe expansion, and cache/ledger/route identity before
   reporting fixed-capacity counterfactuals.
+- A deterministic standard-library offline cache analyzer with uniform and
+  per-layer marginal curves, exact fixed-memory allocation, experimental online
+  frequency retention, explicitly nonpromotable full-trace oracles, and a
+  prefix-trained cold-suffix bound. Private reports include stable input hashes
+  and never embed absolute host paths or raw routes.
 
 ## [0.2.0-research-preview] - 2026-08-01
 

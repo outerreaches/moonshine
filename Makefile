@@ -28,6 +28,7 @@ MOONSHINE_DECODE_CACHE_TRACE ?=
 MOONSHINE_DECODE_CACHE_SOURCE_CAPACITY ?=
 MOONSHINE_DECODE_CACHE_FRESH_EMPTY_SOURCE ?= 0
 MOONSHINE_DECODE_CACHE_CAPACITIES ?= 24 26 28 30 31 32 34 36 40
+MOONSHINE_CACHE_ANALYZER_GOLDEN_RUN ?=
 
 K3_OBJS := \
 	k3_chat.o \
@@ -99,7 +100,7 @@ ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS)
 	test-prefill-crossover test-prefill-gemm-shapes \
 	test-long-context-retrieval \
 	test-mla-batch-determinism test-mla-batch-kernels \
-	test-moe-tail-profile test-decode-cache-replay \
+	test-moe-tail-profile test-decode-cache-replay test-cache-analyzer \
 	test-reduction-qualification \
 	test-openai-sdk clean
 
@@ -149,6 +150,9 @@ help:
 	@echo "       MOONSHINE_DECODE_TRACE=/path/to/routes.csv MOONSHINE_DECODE_CACHE_SOURCE_CAPACITY=32"
 	@echo "                               Validate one capture and replay LRU capacities"
 	@echo "       Set MOONSHINE_DECODE_CACHE_FRESH_EMPTY_SOURCE=1 only for a proven fresh empty seed"
+	@echo "  make test-cache-analyzer"
+	@echo "                               Run portable offline cache-analysis tests"
+	@echo "       MOONSHINE_CACHE_ANALYZER_GOLDEN_RUN=/path/to/accepted-run adds offline goldens"
 	@echo "  make test-reduction-qualification MOONSHINE_MODEL=/path/to/Kimi-K3"
 	@echo "                               Run the MXFP4 reduction-change gate bundle"
 	@echo "  make clean                  Remove local build products"
@@ -221,7 +225,13 @@ moonshine-server: k3_server.o libmoonshine.a
 $(ROCM_TESTS): %: %.o libmoonshine.a
 	$(HIPCC) $(HIPFLAGS) -o $@ $< libmoonshine.a $(ROCM_LDLIBS)
 
-test-cpu: $(PORTABLE_CPU_TESTS)
+test-cache-analyzer:
+	PYTHONDONTWRITEBYTECODE=1 \
+		MOONSHINE_CACHE_ANALYZER_GOLDEN_RUN="$(MOONSHINE_CACHE_ANALYZER_GOLDEN_RUN)" \
+		$(PYTHON) -m unittest discover -s tests \
+		-p 'test_analyze_decode_cache.py' -v
+
+test-cpu: $(PORTABLE_CPU_TESTS) test-cache-analyzer
 	./tests/test_k3_expert_cache
 	./tests/test_k3_prefix_reuse
 	./tests/test_k3_json

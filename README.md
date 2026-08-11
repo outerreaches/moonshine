@@ -489,7 +489,10 @@ comparison fingerprints for paired runs. Both are sensitive, opt-in
 qualification tools, not production logging. The schemas, privacy boundary,
 required baseline comparison, and
 [qualification gate](docs/qualification-decode-diagnostics.md) are documented
-in [Operational logging](docs/observability.md).
+in [Operational logging](docs/observability.md). Accepted captures can be
+replayed with the deterministic
+[offline cache analyzer](docs/offline-decode-cache-analysis.md); its optimized
+allocations and full-trace pinning results are explicitly nonpromotable oracles.
 
 Append-only reuse is automatic; send each turn with the complete history:
 

@@ -120,7 +120,10 @@ capacity explicitly; snapshots do not encode evicted prefill history. Replay at
 or below a warm source capacity is valid. A larger target requires both a
 completely empty snapshot and an explicit operator assertion that it came from
 a fresh process before any cache history; the tool otherwise rejects expansion
-because prior evictions or explicit slot invalidations cannot be reconstructed. See
+because prior evictions or explicit slot invalidations cannot be reconstructed.
+The [offline cache analyzer](offline-decode-cache-analysis.md) applies the same
+source-replay trust gate before producing uniform, marginal, fixed-memory, and
+explicitly labeled policy counterfactuals. See
 [Decode-diagnostics qualification](qualification-decode-diagnostics.md) for
 the paired exactness, accounting, privacy, replay, and overhead gates.
 
