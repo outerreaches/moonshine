@@ -29,6 +29,10 @@ typedef struct {
     bool        q8_projections;
     /* Diagnostic range backend; zero keeps the release/default schedule. */
     k3_prefill_projection_backend range_backend;
+    /* Optional PREFIX for sensitive decode cache/ledger/route CSVs. */
+    const char *decode_diagnostics_prefix;
+    /* Expensive non-cryptographic state fingerprints for qualification. */
+    bool        capture_state_digest;
 } k3_chat_session_config;
 
 typedef enum {
@@ -71,6 +75,9 @@ typedef struct {
     k3_engine_prefill_stats  range_stats;
     k3_engine_cache_stats    cache_before;
     k3_engine_cache_stats    cache_after;
+    k3_engine_decode_stats   decode_stats;
+    bool                     state_digest_valid;
+    k3_engine_state_digest   state_digest;
 } k3_chat_turn_result;
 
 /*

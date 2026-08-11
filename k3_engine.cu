@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
@@ -167,10 +168,20 @@ struct k3_engine {
     uint64_t model_layout_crc64;
     bool q8_projections;
     bool causal_state_valid;
+    FILE *decode_ledger;
+    FILE *decode_routes;
+    FILE *decode_cache;
+    k3_engine_decode_stats decode_stats;
+    uint64_t decode_capture;
+    off_t decode_ledger_offset;
+    off_t decode_routes_offset;
+    off_t decode_cache_offset;
+    bool decode_diagnostics_active;
 };
 
 static uint64_t engine_model_layout_crc64(
     const k3_st_model *model);
+static bool rollback_decode_diagnostics_capture(k3_engine *engine);
 
 static void engine_error(char *error,
                          size_t error_size,
@@ -354,6 +365,21 @@ static bool hip_allocate_zero(void **pointer,
 
 extern "C" void k3_engine_destroy(k3_engine *engine) {
     if (!engine) return;
+    if (engine->decode_diagnostics_active &&
+        engine->decode_cache && engine->decode_routes &&
+        engine->decode_ledger) {
+        (void)rollback_decode_diagnostics_capture(engine);
+        engine->decode_diagnostics_active = false;
+    }
+    if (engine->decode_cache) {
+        (void)fclose(engine->decode_cache);
+    }
+    if (engine->decode_routes) {
+        (void)fclose(engine->decode_routes);
+    }
+    if (engine->decode_ledger) {
+        (void)fclose(engine->decode_ledger);
+    }
     if (engine->expert_stream) {
         (void)hipStreamDestroy(engine->expert_stream);
     }
@@ -1414,6 +1440,21 @@ static bool decode_routed_layer(
                      layer);
         return false;
     }
+    const bool diagnostics = engine->decode_diagnostics_active;
+    struct timespec layer_start;
+    struct timespec pre_moe_end;
+    struct timespec pipeline_start;
+    struct timespec pipeline_end;
+    double io_wait_seconds = 0.0;
+    double expert_sync_seconds = 0.0;
+    double shared_sync_seconds = 0.0;
+    uint64_t wait_calls = 0u;
+    uint64_t completion_total = 0u;
+    uint32_t max_inflight = 0u;
+    uint32_t inflight = 0u;
+    if (diagnostics) {
+        clock_gettime(CLOCK_MONOTONIC, &layer_start);
+    }
 #define LAYER_WEIGHT(variable, suffix)                                      \
     const k3_static_weight *variable = required_layer_weight(               \
         engine, layer, suffix, error, error_size);                           \
@@ -1532,6 +1573,9 @@ static bool decode_routed_layer(
                      layer, hipGetErrorString(status));
         return false;
     }
+    if (diagnostics) {
+        clock_gettime(CLOCK_MONOTONIC, &pre_moe_end);
+    }
 
     const uint16_t cache_layer = (uint16_t)(layer - 1u);
     uint16_t expert_ids[K3_ENGINE_TOP_K];
@@ -1566,6 +1610,40 @@ static bool decode_routed_layer(
             miss_ranks[miss_count++] = rank;
         }
     }
+    uint32_t hit_mask = 0u;
+    uint64_t physical_read_bytes = 0u;
+    for (uint32_t rank = 0u; rank < K3_ENGINE_TOP_K; rank++) {
+        if (accesses[rank].hit) {
+            hit_mask |= UINT32_C(1) << rank;
+        } else {
+            physical_read_bytes += layouts[rank].aligned_bytes;
+        }
+    }
+    if (diagnostics) {
+        if (fprintf(
+                engine->decode_routes,
+                "%llu,%llu,%u,%u,%u,"
+                "%u,%u,%u,%u,%u,%u,%u,%u,"
+                "%u,%u,%u,%u,%u,%u,%u,%u\n",
+                (unsigned long long)engine->decode_stats.capture,
+                (unsigned long long)engine->decode_stats.steps,
+                engine->token_position, layer, hit_mask,
+                expert_ids[0], expert_ids[1],
+                expert_ids[2], expert_ids[3],
+                expert_ids[4], expert_ids[5],
+                expert_ids[6], expert_ids[7],
+                expert_ids[8], expert_ids[9],
+                expert_ids[10], expert_ids[11],
+                expert_ids[12], expert_ids[13],
+                expert_ids[14], expert_ids[15]) < 0) {
+            engine_error(error, error_size,
+                         "writing layer-%u decode route failed", layer);
+            abort_layer_moe(engine, cache_layer);
+            return false;
+        }
+        engine->decode_stats.trace_rows++;
+        clock_gettime(CLOCK_MONOTONIC, &pipeline_start);
+    }
     uint32_t next_miss = 0u;
     k3_io_request requests[K3_ENGINE_STREAM_QD];
     uint16_t initial_count = 0u;
@@ -1581,6 +1659,10 @@ static bool decode_routed_layer(
             error, error_size)) {
         abort_layer_moe(engine, cache_layer);
         return false;
+    }
+    if (diagnostics) {
+        inflight = initial_count;
+        max_inflight = inflight;
     }
 
     if (!k3_static_weight_gemv_bf16(
@@ -1630,12 +1712,26 @@ static bool decode_routed_layer(
     while (completed_misses < miss_count) {
         k3_io_completion completions[K3_ENGINE_STREAM_QD];
         uint16_t completion_count = 0u;
-        if (!k3_io_uring_wait(
-                engine->staging_ring, completions,
-                K3_ENGINE_STREAM_QD, &completion_count,
-                error, error_size)) {
+        struct timespec wait_start;
+        struct timespec wait_end;
+        if (diagnostics) {
+            clock_gettime(CLOCK_MONOTONIC, &wait_start);
+        }
+        bool wait_ok = k3_io_uring_wait(
+            engine->staging_ring, completions,
+            K3_ENGINE_STREAM_QD, &completion_count,
+            error, error_size);
+        if (diagnostics) {
+            clock_gettime(CLOCK_MONOTONIC, &wait_end);
+            io_wait_seconds += elapsed_seconds(wait_start, wait_end);
+        }
+        if (!wait_ok) {
             abort_layer_moe(engine, cache_layer);
             return false;
+        }
+        if (diagnostics) {
+            wait_calls++;
+            completion_total += completion_count;
         }
         uint16_t refill_count = 0u;
         while (next_miss < miss_count &&
@@ -1650,6 +1746,18 @@ static bool decode_routed_layer(
                 error, error_size)) {
             abort_layer_moe(engine, cache_layer);
             return false;
+        }
+        if (diagnostics) {
+            if (completion_count > inflight) {
+                engine_error(
+                    error, error_size,
+                    "layer-%u decode ledger queue underflow", layer);
+                abort_layer_moe(engine, cache_layer);
+                return false;
+            }
+            inflight -= completion_count;
+            inflight += refill_count;
+            if (inflight > max_inflight) max_inflight = inflight;
         }
         for (uint16_t i = 0; i < completion_count; i++) {
             const uint32_t rank =
@@ -1719,7 +1827,18 @@ static bool decode_routed_layer(
         abort_layer_moe(engine, cache_layer);
         return false;
     }
+    struct timespec expert_sync_start;
+    struct timespec expert_sync_end;
+    if (diagnostics) {
+        clock_gettime(CLOCK_MONOTONIC, &expert_sync_start);
+    }
     status = hipStreamSynchronize(engine->expert_stream);
+    if (diagnostics) {
+        clock_gettime(CLOCK_MONOTONIC, &expert_sync_end);
+        expert_sync_seconds =
+            elapsed_seconds(expert_sync_start, expert_sync_end);
+        pipeline_end = expert_sync_end;
+    }
     if (status != hipSuccess) {
         engine_error(error, error_size,
                      "layer-%u expert stream failed: %s",
@@ -1748,7 +1867,17 @@ static bool decode_routed_layer(
         abort_layer_moe(engine, cache_layer);
         return false;
     }
+    struct timespec shared_sync_start;
+    struct timespec shared_sync_end;
+    if (diagnostics) {
+        clock_gettime(CLOCK_MONOTONIC, &shared_sync_start);
+    }
     status = hipStreamSynchronize(engine->shared_stream);
+    if (diagnostics) {
+        clock_gettime(CLOCK_MONOTONIC, &shared_sync_end);
+        shared_sync_seconds =
+            elapsed_seconds(shared_sync_start, shared_sync_end);
+    }
     if (status != hipSuccess) {
         engine_error(error, error_size,
                      "layer-%u shared MoE stream failed: %s",
@@ -1777,6 +1906,33 @@ static bool decode_routed_layer(
             error, error_size)) {
         abort_layer_moe(engine, cache_layer);
         return false;
+    }
+    if (diagnostics) {
+        struct timespec layer_end;
+        clock_gettime(CLOCK_MONOTONIC, &layer_end);
+        k3_engine_decode_layer_stats *row =
+            &engine->decode_stats.layer[cache_layer];
+        row->steps++;
+        row->accesses += K3_ENGINE_TOP_K;
+        row->hits += K3_ENGINE_TOP_K - miss_count;
+        row->misses += miss_count;
+        row->read_requests += miss_count;
+        row->logical_expert_bytes +=
+            (uint64_t)miss_count * K3_ENGINE_EXPERT_BYTES;
+        row->physical_read_bytes += physical_read_bytes;
+        row->wait_calls += wait_calls;
+        row->completions += completion_total;
+        if (max_inflight > row->max_inflight) {
+            row->max_inflight = max_inflight;
+        }
+        row->pre_moe_seconds +=
+            elapsed_seconds(layer_start, pre_moe_end);
+        row->io_wait_seconds += io_wait_seconds;
+        row->expert_pipeline_seconds +=
+            elapsed_seconds(pipeline_start, pipeline_end);
+        row->expert_sync_seconds += expert_sync_seconds;
+        row->shared_sync_seconds += shared_sync_seconds;
+        row->host_interval_seconds += elapsed_seconds(layer_start, layer_end);
     }
     engine->decoded_layers = layer + 1u;
     return true;
@@ -1948,6 +2104,352 @@ extern "C" void k3_engine_get_cache_stats(
     stats->evictions = internal.evictions;
 }
 
+static FILE *open_private_decode_diagnostics_file(const char *path) {
+    int fd;
+    do {
+        fd = open(
+            path,
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+            S_IRUSR | S_IWUSR);
+    } while (fd < 0 && errno == EINTR);
+    if (fd < 0) return NULL;
+    if (fchmod(fd, S_IRUSR | S_IWUSR) != 0) {
+        const int saved_errno = errno;
+        (void)close(fd);
+        errno = saved_errno;
+        return NULL;
+    }
+    FILE *stream = fdopen(fd, "w");
+    if (!stream) {
+        const int saved_errno = errno;
+        (void)close(fd);
+        errno = saved_errno;
+        return NULL;
+    }
+    return stream;
+}
+
+static bool capture_decode_diagnostics_offsets(
+        k3_engine *engine,
+        char *error,
+        size_t error_size) {
+    if (fflush(engine->decode_ledger) != 0 ||
+        fflush(engine->decode_routes) != 0 ||
+        fflush(engine->decode_cache) != 0) {
+        engine_error(error, error_size,
+                     "flushing decode diagnostics before capture failed: %s",
+                     strerror(errno));
+        return false;
+    }
+    engine->decode_ledger_offset = ftello(engine->decode_ledger);
+    engine->decode_routes_offset = ftello(engine->decode_routes);
+    engine->decode_cache_offset = ftello(engine->decode_cache);
+    if (engine->decode_ledger_offset < 0 ||
+        engine->decode_routes_offset < 0 ||
+        engine->decode_cache_offset < 0) {
+        engine_error(error, error_size,
+                     "recording decode diagnostics offsets failed: %s",
+                     strerror(errno));
+        return false;
+    }
+    return true;
+}
+
+static bool rollback_decode_diagnostics_stream(
+        FILE *stream,
+        off_t offset) {
+    bool ok = true;
+    if (fflush(stream) != 0) ok = false;
+    clearerr(stream);
+    if (ftruncate(fileno(stream), offset) != 0) ok = false;
+    if (fseeko(stream, offset, SEEK_SET) != 0) ok = false;
+    clearerr(stream);
+    return ok;
+}
+
+static bool rollback_decode_diagnostics_capture(k3_engine *engine) {
+    const bool ledger_ok = rollback_decode_diagnostics_stream(
+        engine->decode_ledger, engine->decode_ledger_offset);
+    const bool routes_ok = rollback_decode_diagnostics_stream(
+        engine->decode_routes, engine->decode_routes_offset);
+    const bool cache_ok = rollback_decode_diagnostics_stream(
+        engine->decode_cache, engine->decode_cache_offset);
+    return ledger_ok && routes_ok && cache_ok;
+}
+
+extern "C" bool k3_engine_configure_decode_diagnostics(
+        k3_engine *engine,
+        const char *prefix,
+        char *error,
+        size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (!engine || !prefix || prefix[0] == '\0' ||
+        engine->decode_ledger || engine->decode_routes ||
+        engine->decode_cache || engine->decode_diagnostics_active) {
+        engine_error(error, error_size,
+                     "invalid decode diagnostics configuration");
+        return false;
+    }
+    char ledger_path[4096];
+    char routes_path[4096];
+    char cache_path[4096];
+    int ledger_length = snprintf(
+        ledger_path, sizeof(ledger_path), "%s.ledger.csv", prefix);
+    int routes_length = snprintf(
+        routes_path, sizeof(routes_path), "%s.routes.csv", prefix);
+    int cache_length = snprintf(
+        cache_path, sizeof(cache_path), "%s.cache.csv", prefix);
+    if (ledger_length < 0 ||
+        (size_t)ledger_length >= sizeof(ledger_path) ||
+        routes_length < 0 ||
+        (size_t)routes_length >= sizeof(routes_path) ||
+        cache_length < 0 ||
+        (size_t)cache_length >= sizeof(cache_path)) {
+        engine_error(error, error_size,
+                     "decode diagnostics prefix is too long");
+        return false;
+    }
+    FILE *ledger = open_private_decode_diagnostics_file(ledger_path);
+    if (!ledger) {
+        engine_error(error, error_size,
+                     "opening decode ledger %s failed: %s",
+                     ledger_path, strerror(errno));
+        return false;
+    }
+    FILE *routes = open_private_decode_diagnostics_file(routes_path);
+    if (!routes) {
+        engine_error(error, error_size,
+                     "opening decode routes %s failed: %s",
+                     routes_path, strerror(errno));
+        (void)fclose(ledger);
+        (void)unlink(ledger_path);
+        return false;
+    }
+    FILE *cache = open_private_decode_diagnostics_file(cache_path);
+    if (!cache) {
+        engine_error(error, error_size,
+                     "opening decode cache snapshot %s failed: %s",
+                     cache_path, strerror(errno));
+        (void)fclose(routes);
+        (void)fclose(ledger);
+        (void)unlink(routes_path);
+        (void)unlink(ledger_path);
+        return false;
+    }
+    if (fprintf(
+            ledger,
+            "capture,scope,layer,steps,accesses,hits,misses,"
+            "read_requests,logical_expert_bytes,physical_read_bytes,"
+            "wait_calls,completions,max_inflight,pre_moe_seconds,"
+            "io_wait_seconds,expert_pipeline_seconds,"
+            "expert_sync_seconds,shared_sync_seconds,host_interval_seconds\n") < 0 ||
+        fprintf(
+            routes,
+            "capture,step,position,layer,observed_hit_mask,"
+            "expert_0,expert_1,expert_2,expert_3,expert_4,expert_5,"
+            "expert_6,expert_7,expert_8,expert_9,expert_10,expert_11,"
+            "expert_12,expert_13,expert_14,expert_15\n") < 0 ||
+        fprintf(cache, "capture,layer,lru_rank,expert_id\n") < 0 ||
+        fflush(ledger) != 0 || fflush(routes) != 0 ||
+        fflush(cache) != 0) {
+        engine_error(error, error_size,
+                     "writing decode diagnostics headers failed");
+        (void)fclose(cache);
+        (void)fclose(routes);
+        (void)fclose(ledger);
+        (void)unlink(cache_path);
+        (void)unlink(routes_path);
+        (void)unlink(ledger_path);
+        return false;
+    }
+    engine->decode_ledger = ledger;
+    engine->decode_routes = routes;
+    engine->decode_cache = cache;
+    return true;
+}
+
+extern "C" bool k3_engine_begin_decode_diagnostics(
+        k3_engine *engine,
+        char *error,
+        size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (!engine || engine->decode_diagnostics_active) {
+        engine_error(error, error_size,
+                     "invalid decode diagnostics begin");
+        return false;
+    }
+    memset(&engine->decode_stats, 0, sizeof(engine->decode_stats));
+    if (!engine->decode_ledger && !engine->decode_routes &&
+        !engine->decode_cache) {
+        return true;
+    }
+    if (!engine->decode_ledger || !engine->decode_routes ||
+        !engine->decode_cache) {
+        engine_error(error, error_size,
+                     "decode diagnostics files are incomplete");
+        return false;
+    }
+    if (!capture_decode_diagnostics_offsets(
+            engine, error, error_size)) {
+        return false;
+    }
+    engine->decode_capture++;
+    engine->decode_stats.capture = engine->decode_capture;
+    engine->decode_diagnostics_active = true;
+    uint16_t expert_ids[K3_ENGINE_EXPERTS];
+    for (uint16_t layer = 0u;
+         layer < K3_ENGINE_MOE_LAYERS; layer++) {
+        uint16_t count = 0u;
+        if (!k3_expert_cache_snapshot_layer(
+                engine->cache_policy, layer, expert_ids,
+                K3_ENGINE_EXPERTS, &count, error, error_size)) {
+            goto rollback;
+        }
+        for (uint16_t rank = 0u; rank < count; rank++) {
+            if (fprintf(
+                    engine->decode_cache, "%llu,%u,%u,%u\n",
+                    (unsigned long long)engine->decode_stats.capture,
+                    layer + 1u, rank, expert_ids[rank]) < 0) {
+                engine_error(
+                    error, error_size,
+                    "writing decode cache snapshot layer %u failed",
+                    layer + 1u);
+                goto rollback;
+            }
+        }
+    }
+    return true;
+
+rollback:
+    if (!rollback_decode_diagnostics_capture(engine) &&
+        (!error || error_size == 0u || error[0] == '\0')) {
+        engine_error(error, error_size,
+                     "rolling back decode diagnostics capture failed: %s",
+                     strerror(errno));
+    }
+    engine->decode_diagnostics_active = false;
+    return false;
+}
+
+static bool write_decode_ledger(
+        k3_engine *engine,
+        char *error,
+        size_t error_size) {
+    k3_engine_decode_layer_stats total;
+    memset(&total, 0, sizeof(total));
+    for (uint32_t i = 0u;
+         i < K3_ENGINE_DECODE_LAYER_COUNT; i++) {
+        const k3_engine_decode_layer_stats *layer =
+            &engine->decode_stats.layer[i];
+        total.accesses += layer->accesses;
+        total.hits += layer->hits;
+        total.misses += layer->misses;
+        total.read_requests += layer->read_requests;
+        total.logical_expert_bytes += layer->logical_expert_bytes;
+        total.physical_read_bytes += layer->physical_read_bytes;
+        total.wait_calls += layer->wait_calls;
+        total.completions += layer->completions;
+        if (layer->max_inflight > total.max_inflight) {
+            total.max_inflight = layer->max_inflight;
+        }
+        total.pre_moe_seconds += layer->pre_moe_seconds;
+        total.io_wait_seconds += layer->io_wait_seconds;
+        total.expert_pipeline_seconds +=
+            layer->expert_pipeline_seconds;
+        total.expert_sync_seconds += layer->expert_sync_seconds;
+        total.shared_sync_seconds += layer->shared_sync_seconds;
+        total.host_interval_seconds += layer->host_interval_seconds;
+    }
+    total.steps = engine->decode_stats.steps;
+#define WRITE_LEDGER_ROW(scope_value, layer_value, row)                     \
+    fprintf(                                                                \
+        engine->decode_ledger,                                              \
+        "%llu,%s,%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"                  \
+        "%llu,%llu,%u,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f\n",                  \
+        (unsigned long long)engine->decode_stats.capture,                   \
+        scope_value, layer_value,                                           \
+        (unsigned long long)(row).steps,                                    \
+        (unsigned long long)(row).accesses,                                 \
+        (unsigned long long)(row).hits,                                     \
+        (unsigned long long)(row).misses,                                   \
+        (unsigned long long)(row).read_requests,                            \
+        (unsigned long long)(row).logical_expert_bytes,                     \
+        (unsigned long long)(row).physical_read_bytes,                      \
+        (unsigned long long)(row).wait_calls,                               \
+        (unsigned long long)(row).completions,                              \
+        (row).max_inflight,                                                 \
+        (row).pre_moe_seconds, (row).io_wait_seconds,                       \
+        (row).expert_pipeline_seconds, (row).expert_sync_seconds,           \
+        (row).shared_sync_seconds, (row).host_interval_seconds)
+    if (WRITE_LEDGER_ROW("summary", 0u, total) < 0) {
+        engine_error(error, error_size,
+                     "writing decode ledger summary failed");
+        return false;
+    }
+    for (uint32_t i = 0u;
+         i < K3_ENGINE_DECODE_LAYER_COUNT; i++) {
+        if (WRITE_LEDGER_ROW(
+                "layer", i + 1u,
+                engine->decode_stats.layer[i]) < 0) {
+            engine_error(error, error_size,
+                         "writing decode ledger layer %u failed", i + 1u);
+            return false;
+        }
+    }
+#undef WRITE_LEDGER_ROW
+    return true;
+}
+
+extern "C" bool k3_engine_end_decode_diagnostics(
+        k3_engine *engine,
+        double wall_seconds,
+        k3_engine_decode_stats *stats,
+        char *error,
+        size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (stats) memset(stats, 0, sizeof(*stats));
+    if (!engine) {
+        engine_error(error, error_size,
+                     "invalid decode diagnostics end");
+        return false;
+    }
+    if (!engine->decode_diagnostics_active) {
+        if (stats) *stats = engine->decode_stats;
+        return true;
+    }
+    if (!(wall_seconds >= 0.0)) {
+        engine_error(error, error_size,
+                     "invalid decode diagnostics wall time");
+        (void)rollback_decode_diagnostics_capture(engine);
+        engine->decode_diagnostics_active = false;
+        return false;
+    }
+    engine->decode_stats.wall_seconds = wall_seconds;
+    if (!write_decode_ledger(engine, error, error_size) ||
+        fflush(engine->decode_ledger) != 0 ||
+        fflush(engine->decode_routes) != 0 ||
+        fflush(engine->decode_cache) != 0) {
+        if (!error || error_size == 0u || error[0] == '\0') {
+            engine_error(error, error_size,
+                         "flushing decode diagnostics failed: %s",
+                         strerror(errno));
+        }
+        (void)rollback_decode_diagnostics_capture(engine);
+        engine->decode_diagnostics_active = false;
+        return false;
+    }
+    engine->decode_diagnostics_active = false;
+    if (stats) *stats = engine->decode_stats;
+    return true;
+}
+
+extern "C" void k3_engine_abort_decode_diagnostics(
+        k3_engine *engine) {
+    if (!engine || !engine->decode_diagnostics_active) return;
+    (void)rollback_decode_diagnostics_capture(engine);
+    engine->decode_diagnostics_active = false;
+}
+
 extern "C" bool k3_engine_forward_token(
         k3_engine *engine,
         uint32_t input_token,
@@ -1986,9 +2488,13 @@ extern "C" bool k3_engine_forward_token(
         input = output;
         output = swap;
     }
-    return k3_engine_decode_greedy(
+    bool ok = k3_engine_decode_greedy(
         engine, input, next_token, token_value,
         error, error_size);
+    if (ok && engine->decode_diagnostics_active) {
+        engine->decode_stats.steps++;
+    }
+    return ok;
 }
 
 extern "C" bool k3_engine_reset_state(

@@ -15,6 +15,17 @@ Semantic Versioning once its first research-preview tag is published.
 - A transport-facing coarse chat lifecycle callback used by the server without
   changing inference kernels, arithmetic, routing, I/O, cache policy, or
   scheduling.
+- A production-scale MXFP4/BF16 expert GEMM shape screen spanning selected-row
+  counts through 1,170, with numerical envelopes and tile/backend timing.
+- Opt-in decode cache snapshots, per-layer I/O/timing ledgers, content-derived
+  expert-route traces, and non-cryptographic causal-state comparison
+  fingerprints for paired qualification. Private CSV creation, abort rollback,
+  and explicit baseline comparison keep the diagnostics outside normal
+  production logging.
+- A model-free batch-LRU replay gate that validates complete single-capture
+  route structure, strict ledger semantics and totals, source-capacity hit
+  masks, provenance-safe expansion, and cache/ledger/route identity before
+  reporting fixed-capacity counterfactuals.
 
 ## [0.2.0-research-preview] - 2026-08-01
 

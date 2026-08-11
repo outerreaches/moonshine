@@ -69,6 +69,19 @@ uint64_t k3_expert_cache_storage_bytes(const k3_expert_cache *cache,
                                        uint64_t bytes_per_expert);
 void k3_expert_cache_get_stats(const k3_expert_cache *cache,
                                k3_expert_cache_stats *stats);
+/*
+ * Copy one layer's current LRU order, oldest to newest. The snapshot contains
+ * logical expert IDs only; physical cache storage remains caller-owned.
+ */
+bool k3_expert_cache_snapshot_layer(
+    const k3_expert_cache *cache,
+    uint16_t               layer,
+    uint16_t              *expert_ids,
+    uint16_t               expert_capacity,
+    uint16_t              *expert_count,
+    char                  *error,
+    size_t                 error_size);
+
 
 /*
  * Forget every resident mapping and zero telemetry without touching the

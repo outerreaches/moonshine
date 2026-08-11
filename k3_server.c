@@ -61,6 +61,8 @@ typedef struct {
     size_t      max_body;
     k3_prefill_projection_backend range_backend;
     bool        clear_expert_cache_per_request;
+    const char *decode_diagnostics_prefix;
+    bool        capture_state_digest;
 } server_config;
 
 typedef struct {
@@ -261,6 +263,10 @@ static void usage(FILE *stream, const char *program) {
         "  --max-body BYTES      Maximum JSON request body (default 8388608)\n"
         "  --clear-expert-cache-per-request\n"
         "                        Force cold-cache request benchmarks\n"
+        "  --decode-diagnostics PREFIX\n"
+        "                        Write sensitive decode cache/ledger/route CSVs\n"
+        "  --decode-state-digest\n"
+        "                        Log state-comparison fingerprints (expensive)\n"
         "  -h, --help            Show this help\n"
         "  --version             Show the Moonshine version\n"
         "\n"
@@ -302,6 +308,10 @@ static bool parse_args(int argc, char **argv, server_config *config) {
             config->clear_expert_cache_per_request = true;
             continue;
         }
+        if (strcmp(argument, "--decode-state-digest") == 0) {
+            config->capture_state_digest = true;
+            continue;
+        }
         if (strcmp(argument, "--host") == 0 ||
             strcmp(argument, "--port") == 0 ||
             strcmp(argument, "--api-key") == 0 ||
@@ -311,6 +321,7 @@ static bool parse_args(int argc, char **argv, server_config *config) {
             strcmp(argument, "--staging") == 0 ||
             strcmp(argument, "--max-output-tokens") == 0 ||
             strcmp(argument, "--range-backend") == 0 ||
+            strcmp(argument, "--decode-diagnostics") == 0 ||
             strcmp(argument, "--max-body") == 0) {
             if (++i >= argc) {
                 return reject_config("%s needs a value", argument);
@@ -368,6 +379,14 @@ static bool parse_args(int argc, char **argv, server_config *config) {
                     return reject_config(
                         "invalid range backend %s", value);
                 }
+            } else if (strcmp(
+                           argument,
+                           "--decode-diagnostics") == 0) {
+                if (value[0] == '\0') {
+                    return reject_config(
+                        "decode diagnostics prefix is empty");
+                }
+                config->decode_diagnostics_prefix = value;
             } else {
                 if (!parse_u32(value, 1024u, UINT32_MAX, &parsed)) {
                     return reject_config(
@@ -1352,33 +1371,70 @@ static void log_result(const request_observer *observer,
         result->cache_before.accesses;
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
-    server_log(
-        SERVER_LOG_INFO, "request.complete",
-        observer->completion_id,
-        "prompt=%u evaluated=%u reused=%u prefill=%.3fs "
-        "generated=%u decode=%.3fs rate=%.3f_tok/s total=%.3fs "
-        "finish=%s tool_calls=%zu reasoning_bytes=%zu content_bytes=%zu "
-        "stream=%s client=%s cache=%llu/%llu cache_total=%llu/%llu",
-        result->prompt_tokens,
-        result->prompt_evaluated_tokens,
-        result->prompt_reused_tokens,
-        result->prompt_seconds,
-        result->generated_tokens, result->decode_seconds,
-        result->tokens_per_second,
-        elapsed_seconds(observer->request_start, now),
-        result->finish_reason == K3_CHAT_FINISH_TOOL_CALLS ?
-            "tool_calls" :
-            (result->finish_reason ==
-                K3_CHAT_FINISH_END_OF_MESSAGE ? "stop" : "length"),
-        result->tool_call_count,
-        result->reasoning_content.size,
-        result->response.size,
-        streamed ? "yes" : "no",
-        client_ok ? "connected" : "disconnected",
-        (unsigned long long)cache_hits,
-        (unsigned long long)cache_accesses,
-        (unsigned long long)result->cache_after.hits,
-        (unsigned long long)result->cache_after.accesses);
+    if (result->state_digest_valid) {
+        server_log(
+            SERVER_LOG_INFO, "request.state.digest",
+            observer->completion_id,
+            "position=%u kda=%016llx conv=%016llx "
+            "mla=%016llx attnres=%016llx",
+            result->state_digest.token_position,
+            (unsigned long long)result->state_digest.kda_state_hash,
+            (unsigned long long)result->state_digest.kda_conv_hash,
+            (unsigned long long)result->state_digest.mla_cache_hash,
+            (unsigned long long)result->state_digest.attn_res_hash);
+    }
+    if (result->decode_stats.steps != 0u) {
+        uint64_t hits = 0u;
+        uint64_t accesses = 0u;
+        uint64_t logical_bytes = 0u;
+        uint64_t physical_bytes = 0u;
+        uint64_t read_requests = 0u;
+        double io_wait = 0.0;
+        double expert_pipeline = 0.0;
+        double layer_host_intervals = 0.0;
+        uint32_t max_inflight = 0u;
+        for (uint32_t i = 0u;
+             i < K3_ENGINE_DECODE_LAYER_COUNT; i++) {
+            const k3_engine_decode_layer_stats *layer =
+                &result->decode_stats.layer[i];
+            hits += layer->hits;
+            accesses += layer->accesses;
+            logical_bytes += layer->logical_expert_bytes;
+            physical_bytes += layer->physical_read_bytes;
+            read_requests += layer->read_requests;
+            io_wait += layer->io_wait_seconds;
+            expert_pipeline += layer->expert_pipeline_seconds;
+            layer_host_intervals += layer->host_interval_seconds;
+            if (layer->max_inflight > max_inflight) {
+                max_inflight = layer->max_inflight;
+            }
+        }
+        double unattributed =
+            result->decode_stats.wall_seconds - layer_host_intervals;
+        if (unattributed < 0.0) unattributed = 0.0;
+        server_log(
+            SERVER_LOG_INFO, "request.decode.io",
+            observer->completion_id,
+            "capture=%llu steps=%llu trace_rows=%llu "
+            "cache=%llu/%llu reads=%llu logical=%.3f_GiB "
+            "physical=%.3f_GiB io_wait=%.3fs "
+            "expert_pipeline=%.3fs layer_host_intervals=%.3fs "
+            "unattributed=%.3fs "
+            "max_inflight=%u",
+            (unsigned long long)result->decode_stats.capture,
+            (unsigned long long)result->decode_stats.steps,
+            (unsigned long long)result->decode_stats.trace_rows,
+            (unsigned long long)hits,
+            (unsigned long long)accesses,
+            (unsigned long long)read_requests,
+            (double)logical_bytes /
+                (1024.0 * 1024.0 * 1024.0),
+            (double)physical_bytes /
+                (1024.0 * 1024.0 * 1024.0),
+            io_wait, expert_pipeline, layer_host_intervals,
+            unattributed,
+            max_inflight);
+    }
     if (result->range_stats.routed_layer_sweeps != 0u) {
         const double average_unique =
             (double)result->range_stats.unique_experts_across_layers /
@@ -1402,6 +1458,35 @@ static void log_result(const request_observer *observer,
             result->range_stats.routed_expert_pipeline_seconds,
             result->range_stats.routed_stream_seconds);
     }
+    server_log(
+        SERVER_LOG_INFO, "request.complete",
+        observer->completion_id,
+        "prompt=%u evaluated=%u reused=%u prefill=%.3fs "
+        "generated=%u decode=%.3fs rate=%.3f_tok/s total=%.3fs "
+        "finish=%s forced_trailer=%u tool_calls=%zu "
+        "reasoning_bytes=%zu content_bytes=%zu "
+        "stream=%s client=%s cache=%llu/%llu cache_total=%llu/%llu",
+        result->prompt_tokens,
+        result->prompt_evaluated_tokens,
+        result->prompt_reused_tokens,
+        result->prompt_seconds,
+        result->generated_tokens, result->decode_seconds,
+        result->tokens_per_second,
+        elapsed_seconds(observer->request_start, now),
+        result->finish_reason == K3_CHAT_FINISH_TOOL_CALLS ?
+            "tool_calls" :
+            (result->finish_reason ==
+                K3_CHAT_FINISH_END_OF_MESSAGE ? "stop" : "length"),
+        result->forced_trailer_tokens,
+        result->tool_call_count,
+        result->reasoning_content.size,
+        result->response.size,
+        streamed ? "yes" : "no",
+        client_ok ? "connected" : "disconnected",
+        (unsigned long long)cache_hits,
+        (unsigned long long)cache_accesses,
+        (unsigned long long)result->cache_after.hits,
+        (unsigned long long)result->cache_after.accesses);
 }
 
 static void handle_chat_completion(int fd, k3_chat_session *session,
@@ -1519,7 +1604,8 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
         } else {
             server_log(
                 SERVER_LOG_ERROR, "request.failed", completion_id,
-                "peer=%s stage=inference error=\"%s\"",
+                "capture=%llu peer=%s stage=inference error=\"%s\"",
+                (unsigned long long)result.decode_stats.capture,
                 peer, error);
             stream_send_inference_error(&stream, error);
         }
@@ -1559,7 +1645,8 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
         if (!ok) {
             server_log(
                 SERVER_LOG_ERROR, "request.failed", completion_id,
-                "peer=%s stage=inference error=\"%s\"",
+                "capture=%llu peer=%s stage=inference error=\"%s\"",
+                (unsigned long long)result.decode_stats.capture,
                 peer, error);
             (void)send_json_error(fd, 500, error);
         } else {
@@ -1573,7 +1660,9 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
                 server_log(
                     SERVER_LOG_ERROR, "request.failed",
                     completion_id,
-                    "peer=%s stage=response_build error=\"%s\"",
+                    "capture=%llu peer=%s "
+                    "stage=response_build error=\"%s\"",
+                    (unsigned long long)result.decode_stats.capture,
                     peer, error);
                 (void)send_json_error(fd, 500, error);
             } else {
@@ -1765,6 +1854,9 @@ int main(int argc, char **argv) {
         .staging_slots = config.staging,
         .q8_projections = true,
         .range_backend = config.range_backend,
+        .decode_diagnostics_prefix =
+            config.decode_diagnostics_prefix,
+        .capture_state_digest = config.capture_state_digest,
     };
     if (!k3_chat_session_create(
             &session, &session_config, &stats,

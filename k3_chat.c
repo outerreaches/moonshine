@@ -28,6 +28,7 @@ struct k3_chat_session {
     uint32_t      context;
     uint32_t      sequential_prefill_limit;
     k3_prefill_projection_backend range_backend;
+    bool          capture_state_digest;
     uint32_t      position;
     k3_token_buffer retained_tokens;
     k3_tool_choice_marker *historical_tool_choices;
@@ -464,6 +465,7 @@ bool k3_chat_session_create(
         return false;
     }
     session->range_backend = config->range_backend;
+    session->capture_state_digest = config->capture_state_digest;
     session->healthy = true;
     if (config->system_prompt != NULL &&
         config->system_prompt[0] != '\0') {
@@ -496,6 +498,15 @@ bool k3_chat_session_create(
             session->context, experts, staging,
             config->q8_projections,
             engine_stats, error, error_size)) {
+        k3_chat_session_destroy(session);
+        return false;
+    }
+    if (config->decode_diagnostics_prefix != NULL &&
+        config->decode_diagnostics_prefix[0] != '\0' &&
+        !k3_engine_configure_decode_diagnostics(
+            session->engine,
+            config->decode_diagnostics_prefix,
+            error, error_size)) {
         k3_chat_session_destroy(session);
         return false;
     }
@@ -677,6 +688,7 @@ static bool execute_encoded_turn(
     k3_token_buffer thinking_trailer = { 0 };
     bool ok = true;
     bool mutated = false;
+    bool diagnostics_active = false;
     if (thinking && !k3_tokenizer_encode(
             session->tokenizer,
             "<|close|>think<|sep|><|open|>response<|sep|>"
@@ -788,6 +800,12 @@ static bool execute_encoded_turn(
     bool natural_stop = false;
     uint32_t tail[32];
     size_t tail_count = 0u;
+    if (!k3_engine_begin_decode_diagnostics(
+            session->engine, error, error_size)) {
+        ok = false;
+        goto cleanup;
+    }
+    diagnostics_active = true;
     struct timespec decode_start;
     struct timespec decode_end;
     clock_gettime(CLOCK_MONOTONIC, &decode_start);
@@ -965,11 +983,31 @@ static bool execute_encoded_turn(
         result->decode_seconds > 0.0 ?
             (double)result->generated_tokens /
                 result->decode_seconds : 0.0;
+    if (session->capture_state_digest) {
+        if (!k3_engine_get_state_digest(
+                session->engine, &result->state_digest,
+                error, error_size)) {
+            ok = false;
+            goto cleanup;
+        }
+        result->state_digest_valid = true;
+    }
+    if (!k3_engine_end_decode_diagnostics(
+            session->engine, result->decode_seconds,
+            &result->decode_stats, error, error_size)) {
+        diagnostics_active = false;
+        ok = false;
+        goto cleanup;
+    }
+    diagnostics_active = false;
     result->position = session->position;
     k3_engine_get_cache_stats(
         session->engine, &result->cache_after);
 
 cleanup:
+    if (diagnostics_active) {
+        k3_engine_abort_decode_diagnostics(session->engine);
+    }
     k3_token_buffer_free(&thinking_trailer);
     k3_token_buffer_free(&generated_tokens);
     k3_text_buffer_free(&token_piece);
@@ -977,6 +1015,7 @@ cleanup:
         k3_text_buffer_free(&result->reasoning_content);
         k3_text_buffer_free(&result->response);
         for (size_t i = 0u; i < result->tool_call_count; i++) {
+            free((char *)result->tool_calls[i].id);
             free((char *)result->tool_calls[i].name);
             free((char *)result->tool_calls[i].arguments);
         }

@@ -22,6 +22,12 @@ MOONSHINE_CROSSOVER_TOKENS ?= 2 3 4 6 8 12 16 24 32 42
 MOONSHINE_RETRIEVAL_TARGET ?= 16000
 MOONSHINE_RETRIEVAL_BACKEND ?=
 MOONSHINE_STATE_DIR ?= /tmp
+MOONSHINE_DECODE_TRACE ?=
+MOONSHINE_DECODE_LEDGER_TRACE ?=
+MOONSHINE_DECODE_CACHE_TRACE ?=
+MOONSHINE_DECODE_CACHE_SOURCE_CAPACITY ?=
+MOONSHINE_DECODE_CACHE_FRESH_EMPTY_SOURCE ?= 0
+MOONSHINE_DECODE_CACHE_CAPACITIES ?= 24 26 28 30 31 32 34 36 40
 
 K3_OBJS := \
 	k3_chat.o \
@@ -93,7 +99,7 @@ ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS)
 	test-prefill-crossover test-prefill-gemm-shapes \
 	test-long-context-retrieval \
 	test-mla-batch-determinism test-mla-batch-kernels \
-	test-moe-tail-profile \
+	test-moe-tail-profile test-decode-cache-replay \
 	test-reduction-qualification \
 	test-openai-sdk clean
 
@@ -138,6 +144,11 @@ help:
 	@echo "                               Compare looped and strided-batched MLA GEMMs"
 	@echo "  make test-mla-batch-kernels  Check exact batched MLA launch primitives"
 	@echo "  make test-moe-tail-profile  Profile model-shape MoE-tail kernels"
+	@echo "  make test-decode-cache-replay MOONSHINE_DECODE_CACHE_TRACE=/path/to/cache.csv \\"
+	@echo "       MOONSHINE_DECODE_LEDGER_TRACE=/path/to/ledger.csv \\"
+	@echo "       MOONSHINE_DECODE_TRACE=/path/to/routes.csv MOONSHINE_DECODE_CACHE_SOURCE_CAPACITY=32"
+	@echo "                               Validate one capture and replay LRU capacities"
+	@echo "       Set MOONSHINE_DECODE_CACHE_FRESH_EMPTY_SOURCE=1 only for a proven fresh empty seed"
 	@echo "  make test-reduction-qualification MOONSHINE_MODEL=/path/to/Kimi-K3"
 	@echo "                               Run the MXFP4 reduction-change gate bundle"
 	@echo "  make clean                  Remove local build products"
@@ -215,6 +226,37 @@ test-cpu: $(PORTABLE_CPU_TESTS)
 	./tests/test_k3_prefix_reuse
 	./tests/test_k3_json
 	./tests/test_k3_openai
+
+test-decode-cache-replay: tests/test_k3_expert_cache
+	@test -n "$(MOONSHINE_DECODE_TRACE)" || \
+		{ echo "error: set MOONSHINE_DECODE_TRACE"; exit 2; }
+	@test -n "$(MOONSHINE_DECODE_CACHE_TRACE)" || \
+		{ echo "error: set MOONSHINE_DECODE_CACHE_TRACE"; exit 2; }
+	@test -n "$(MOONSHINE_DECODE_LEDGER_TRACE)" || \
+		{ echo "error: set MOONSHINE_DECODE_LEDGER_TRACE"; exit 2; }
+	@test -n "$(MOONSHINE_DECODE_CACHE_SOURCE_CAPACITY)" || \
+		{ echo "error: set MOONSHINE_DECODE_CACHE_SOURCE_CAPACITY"; exit 2; }
+	@test "$(MOONSHINE_DECODE_CACHE_FRESH_EMPTY_SOURCE)" = 0 -o \
+		"$(MOONSHINE_DECODE_CACHE_FRESH_EMPTY_SOURCE)" = 1 || \
+		{ echo "error: fresh-empty source flag must be 0 or 1"; exit 2; }
+	@set -e; source_seen=0; provenance=; \
+	if test "$(MOONSHINE_DECODE_CACHE_FRESH_EMPTY_SOURCE)" = 1; then \
+		provenance=fresh-empty-source; \
+	fi; \
+	for capacity in $(MOONSHINE_DECODE_CACHE_CAPACITIES); do \
+		if test "$$capacity" = \
+			"$(MOONSHINE_DECODE_CACHE_SOURCE_CAPACITY)"; then \
+			source_seen=1; \
+		fi; \
+		./tests/test_k3_expert_cache \
+			"$(MOONSHINE_DECODE_CACHE_TRACE)" \
+			"$(MOONSHINE_DECODE_LEDGER_TRACE)" \
+			"$(MOONSHINE_DECODE_TRACE)" \
+			"$(MOONSHINE_DECODE_CACHE_SOURCE_CAPACITY)" "$$capacity" \
+			$$provenance; \
+	done; \
+	test "$$source_seen" = 1 || \
+		{ echo "error: capacity sweep must include source capacity"; exit 2; }
 
 test: \
 	tests/test_k3_expert_cache \

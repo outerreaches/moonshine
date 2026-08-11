@@ -32,8 +32,10 @@ disable terminal color explicitly.
 | `request.decode.start` | Decode began in the reasoning or response/tool region. |
 | `request.decode.phase` | Thinking closed and generation entered the response-or-tool region. Tool payloads are structurally buffered until they parse and validate. |
 | `request.decode.progress` | A heartbeat every 64 model-produced tokens, including the current region and decode elapsed time. |
-| `request.complete` | Final prompt/decode/total timing, finish reason, output byte counts, tool-call count, client state, and cache counters. |
-| `request.reject` / `request.failed` | Admission or inference failure with an HTTP/inference stage and bounded diagnostic. |
+| `request.state.digest` | Non-cryptographic causal-state comparison fingerprints emitted only with `--decode-state-digest`; expensive and intended for paired qualification. |
+| `request.decode.io` | Per-request decode I/O/timing aggregate emitted only when decode diagnostics are enabled. |
+| `request.complete` | Final prompt/decode/total timing, finish reason, forced-trailer count, output byte counts, tool-call count, client state, and cache counters. |
+| `request.reject` / `request.failed` | Admission or inference failure with an HTTP/inference stage and bounded diagnostic; post-decode failures include the diagnostic capture ID. |
 | `request.client_disconnect` | The client disappeared before the initial SSE event could be established. Later disconnects appear as `client=disconnected` on completion. |
 
 The `request.prefill.start` event is intentionally emitted before a divergent
@@ -48,6 +50,79 @@ complete XTML call is valid. A quiet user interface can therefore represent
 active reasoning or active buffered tool generation rather than a stalled
 server. The phase and 64-token heartbeat events make that state visible without
 logging model output.
+
+## Opt-in decode diagnostics
+
+`--decode-diagnostics PREFIX` creates three new regular files with mode `0600`
+and refuses to follow symlinks or overwrite an existing path:
+
+```text
+PREFIX.cache.csv
+capture,layer,lru_rank,expert_id
+
+PREFIX.ledger.csv
+capture,scope,layer,steps,accesses,hits,misses,read_requests,logical_expert_bytes,physical_read_bytes,wait_calls,completions,max_inflight,pre_moe_seconds,io_wait_seconds,expert_pipeline_seconds,expert_sync_seconds,shared_sync_seconds,host_interval_seconds
+
+PREFIX.routes.csv
+capture,step,position,layer,observed_hit_mask,expert_0,...,expert_15
+```
+
+Capture IDs start at 1 for each server process; aborted attempts can leave gaps
+between committed IDs. Route steps start at 0, routed layers are 1 through 92, and hit-mask bit *r* describes `expert_r`. Cache rank 0
+is the oldest LRU resident; increasing ranks run to the newest resident. A
+header-only cache file is a valid empty pre-decode snapshot. A capture commits
+when the native chat decode and optional state fingerprint complete. Engine or
+chat-decode failures before that boundary roll all three streams back to their
+pre-request offsets. Later server tool-policy, response-format, allocation, or
+transport failures do not invalidate the completed engine trace and can leave a
+committed capture beside `request.failed`; those post-decode failures carry the
+capture ID so consumers can correlate them when HTTP success is part of the
+analysis. A process or storage crash can still leave a
+partial final capture, so consumers must validate capture IDs, step/layer
+completeness, and ledger reconciliation rather than accepting a CSV merely
+because it parses.
+
+The ledger contains one `scope=summary,layer=0` row and 92 `scope=layer` rows
+per committed capture. Summary `steps` is the number of decode engine token
+evaluations; each layer row records that layer's invocation count. Access,
+read, byte, completion, and timing totals aggregate the layer rows. Integer byte
+fields are bytes; timing fields are seconds. `host_interval_seconds` is a host
+clock interval from layer entry until its final work is enqueued, not an
+independent GPU completion time. A following layer's synchronization can charge
+prior asynchronous tail work to its own pre-MoE interval, so use the timing
+columns for bounded attribution rather than summing them as disjoint phases.
+
+Decode steps include structural tokens evaluated to leave retained chat state
+well formed. Consequently `request.decode.io steps` and route step count equal
+`generated_tokens + forced_trailer_tokens`; an API `completion_tokens=128`
+length stop can, for example, produce 141 routed steps after 13 forced closure
+tokens. The route trace contains no token IDs, prompt text, generated text, or
+gate weights, but its selected experts and positions are content-derived and
+can fingerprint a workload.
+
+`--decode-state-digest` adds `request.state.digest` before the final
+`request.complete` event. It computes deterministic 64-bit FNV-1a comparison
+fingerprints over the complete causal-state regions after decode. Matching all
+four values and position is a useful paired qualification gate, but the hashes
+are non-cryptographic, collision-prone in principle, and not an independent
+proof of state equality. Digest computation is deliberately outside the decode
+timer and is too expensive for normal service. `request.decode.io` appears in
+the same pre-completion diagnostic block when CSV capture is active.
+
+Both options are experimental and off by default. Use a fresh single-request
+server for paired measurements: baseline with only `--decode-state-digest`,
+then an identical process with both flags. Keep the prefix outside the source
+tree and retain the `0600` modes. Raw routes and state fingerprints require an
+explicit disclosure review.
+
+The built-in replay gate accepts one complete capture and requires its source
+capacity explicitly; snapshots do not encode evicted prefill history. Replay at
+or below a warm source capacity is valid. A larger target requires both a
+completely empty snapshot and an explicit operator assertion that it came from
+a fresh process before any cache history; the tool otherwise rejects expansion
+because prior evictions or explicit slot invalidations cannot be reconstructed. See
+[Decode-diagnostics qualification](qualification-decode-diagnostics.md) for
+the paired exactness, accounting, privacy, replay, and overhead gates.
 
 ## Privacy and safety
 
@@ -66,13 +141,16 @@ oversized diagnostic is bounded with `log_truncated=yes`.
 
 ## Performance boundary
 
-Logging does not alter kernels, model arithmetic, routing, SSD queueing, expert
-cache policy, or scheduling. Host callbacks occur only at lifecycle boundaries,
-once per prefill minute, and once per 64 generated tokens. There is no per-layer
-terminal output other than the existing throttled prefill mechanism and no
-per-token logging. Each record is assembled in a bounded stack buffer and
-submitted with one best-effort host `write(2)` call, preventing line
-interleaving and avoiding repeated stdio operations.
+Default lifecycle logging does not alter kernels, model arithmetic, routing,
+SSD queueing, expert-cache policy, or scheduling. Host callbacks occur only at
+lifecycle boundaries, once per prefill minute, and once per 64 generated
+tokens. Each record is assembled in a bounded stack buffer and submitted with
+one best-effort host `write(2)` call.
+
+`--decode-diagnostics` is the explicit exception: it adds per-layer clocks and
+buffered CSV writes. Qualification must compare it with an identical baseline,
+require exact output/cache/state results, and bound measured decode overhead
+before using its timing fields.
 
 For systemd, keep standard error attached to the journal. For a manual run:
 

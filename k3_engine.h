@@ -34,6 +34,38 @@ typedef struct {
     uint64_t evictions;
 } k3_engine_cache_stats;
 
+enum {
+    K3_ENGINE_DECODE_LAYER_COUNT = 92,
+    K3_ENGINE_DECODE_TOP_K = 16,
+};
+
+typedef struct {
+    uint64_t steps;
+    uint64_t accesses;
+    uint64_t hits;
+    uint64_t misses;
+    uint64_t read_requests;
+    uint64_t logical_expert_bytes;
+    uint64_t physical_read_bytes;
+    uint64_t wait_calls;
+    uint64_t completions;
+    uint32_t max_inflight;
+    double   pre_moe_seconds;
+    double   io_wait_seconds;
+    double   expert_pipeline_seconds;
+    double   expert_sync_seconds;
+    double   shared_sync_seconds;
+    double   host_interval_seconds;
+} k3_engine_decode_layer_stats;
+
+typedef struct {
+    uint64_t capture;
+    uint64_t steps;
+    uint64_t trace_rows;
+    double   wall_seconds;
+    k3_engine_decode_layer_stats layer[K3_ENGINE_DECODE_LAYER_COUNT];
+} k3_engine_decode_stats;
+
 typedef struct {
     uint64_t routed_physical_read_bytes;
     uint64_t embedding_physical_read_bytes;
@@ -180,6 +212,34 @@ void k3_engine_get_cache_stats(
     k3_engine_cache_stats *stats);
 
 /*
+ * Diagnostic capture is opt-in. PREFIX creates private (0600)
+ * PREFIX.cache.csv, PREFIX.ledger.csv, and PREFIX.routes.csv files. Route rows
+ * contain positions, layer/rank expert IDs, and observed hit masks. They omit
+ * token IDs, gate weights, and text but remain sensitive workload fingerprints.
+ * An aborted capture is rolled back to its pre-request file offsets.
+ */
+bool k3_engine_configure_decode_diagnostics(
+    k3_engine *engine,
+    const char *prefix,
+    char *error,
+    size_t error_size);
+
+bool k3_engine_begin_decode_diagnostics(
+    k3_engine *engine,
+    char *error,
+    size_t error_size);
+
+/* wall_seconds is the caller's decode interval and excludes state hashing. */
+bool k3_engine_end_decode_diagnostics(
+    k3_engine *engine,
+    double wall_seconds,
+    k3_engine_decode_stats *stats,
+    char *error,
+    size_t error_size);
+
+void k3_engine_abort_decode_diagnostics(k3_engine *engine);
+
+/*
  * Complete one autoregressive token step from an input token ID. The engine
  * streams its embedding, traverses all 93 layers in order, applies the output
  * head, returns greedy next-token ID/value, and retains recurrent/cache state.
@@ -308,7 +368,10 @@ bool k3_engine_reset_state(
         char      *error,
         size_t     error_size);
 
-/* Diagnostic causal-state digest used by sequential/range oracle tests. */
+/*
+ * Diagnostic non-cryptographic causal-state comparison fingerprints. Equality
+ * is a deterministic qualification signal, not a collision-free proof.
+ */
 bool k3_engine_get_state_digest(
         const k3_engine         *engine,
         k3_engine_state_digest  *digest,

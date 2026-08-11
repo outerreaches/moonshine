@@ -26,6 +26,7 @@ make test-cpu
 make
 make tests
 make test
+make test-prefill-gemm-shapes
 make test-model-layout MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3
 make test-tokenizer MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3
 make test-reduction-qualification MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3
@@ -67,6 +68,40 @@ and disconnected client. Audit the captured log for prompts, generated text,
 tool arguments, request bodies, credentials, control-character line injection,
 and unbounded records. Use [the operational logging contract](docs/observability.md)
 as the expected event surface.
+
+For a decode-diagnostics change, use fresh single-request servers with the
+same model, context, expert capacity, and fixed request. Run the baseline with
+`--decode-state-digest`; run the candidate with that option plus
+`--decode-diagnostics PREFIX`, using a new prefix outside the checkout. Before
+measurement, set the acceptance bound to at most 2.0% candidate decode
+overhead.
+Normalize only response `id` and `created`, then require exact remaining JSON,
+finish/usage, cache deltas/totals, state position, and all four comparison
+fingerprints. Diagnostic events must precede the final `request.complete`.
+
+Require all three CSVs to be regular mode-`0600` files. Validate one capture,
+92 ordered layers per zero-based step, `routes = steps * 92`, 16 unique experts
+per route, ledger summary plus 92 layer rows, integer accounting, and consistent
+capture IDs. Remember that decode steps include forced structural trailer
+evaluations and can exceed API completion tokens. Replay must include the
+explicit live source capacity and must reproduce its observed hit masks exactly:
+
+```sh
+make test-decode-cache-replay \
+  MOONSHINE_DECODE_CACHE_TRACE=/path/to/capture.cache.csv \
+  MOONSHINE_DECODE_LEDGER_TRACE=/path/to/capture.ledger.csv \
+  MOONSHINE_DECODE_TRACE=/path/to/capture.routes.csv \
+  MOONSHINE_DECODE_CACHE_SOURCE_CAPACITY=32 \
+  MOONSHINE_DECODE_CACHE_CAPACITIES='24 28 30 32'
+```
+
+Do not interpret targets above the source without a proven fresh-process empty
+snapshot and `MOONSHINE_DECODE_CACHE_FRESH_EMPTY_SOURCE=1`. Prior evictions and
+explicit slot invalidations are otherwise absent, so the replay gate rejects
+the ambiguous expansion. Audit route
+traces and state fingerprints as sensitive derived workload data. Record the
+full gate in
+[decode-diagnostics qualification](docs/qualification-decode-diagnostics.md).
 
 Run a final audit:
 

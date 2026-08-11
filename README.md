@@ -482,6 +482,15 @@ See [Operational logging](docs/observability.md) for the event contract and
 examples, and [its qualification](docs/qualification-observability.md) for the
 gate evidence.
 
+For a bounded decode investigation, `--decode-diagnostics PREFIX` writes
+private (`0600`) cache, per-layer ledger, and content-derived expert-route
+CSVs, while `--decode-state-digest` logs non-cryptographic causal-state
+comparison fingerprints for paired runs. Both are sensitive, opt-in
+qualification tools, not production logging. The schemas, privacy boundary,
+required baseline comparison, and
+[qualification gate](docs/qualification-decode-diagnostics.md) are documented
+in [Operational logging](docs/observability.md).
+
 Append-only reuse is automatic; send each turn with the complete history:
 
 ```sh

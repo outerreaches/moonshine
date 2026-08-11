@@ -308,6 +308,32 @@ void k3_expert_cache_get_stats(const k3_expert_cache *cache,
         memset(stats, 0, sizeof(*stats));
     }
 }
+bool k3_expert_cache_snapshot_layer(
+        const k3_expert_cache *cache,
+        uint16_t layer,
+        uint16_t *expert_ids,
+        uint16_t expert_capacity,
+        uint16_t *expert_count,
+        char *error,
+        size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (expert_count) *expert_count = 0u;
+    if (!cache || layer >= cache->layer_count || !expert_ids ||
+        !expert_count || cache->pending[layer].active ||
+        expert_capacity < cache->counts[layer]) {
+        k3_cache_error(error, error_size,
+                       "invalid expert-cache snapshot request");
+        return false;
+    }
+    const k3_cache_entry *entries =
+        k3_cache_layer(cache->entries, cache, layer);
+    for (uint16_t i = 0u; i < cache->counts[layer]; i++) {
+        expert_ids[i] = entries[i].expert;
+    }
+    *expert_count = cache->counts[layer];
+    return true;
+}
+
 
 bool k3_expert_cache_reset(k3_expert_cache *cache,
                            char *error,
