@@ -151,6 +151,39 @@ int main(int argc, char **argv) {
                   error, sizeof(error)),
               error);
 
+        if (token_count >= 4u) {
+            CHECK(k3_engine_reset_state(
+                      engine, false, error, sizeof(error)),
+                  error);
+            const uint32_t first_chunk = token_count - 2u;
+            uint32_t split_next = 0u;
+            float split_value = 0.0f;
+            k3_engine_prefill_stats split_stats;
+            CHECK(k3_engine_forward_range(
+                      engine, tokens, first_chunk,
+                      &split_next, &split_value, &split_stats,
+                      error, sizeof(error)),
+                  error);
+            CHECK(k3_engine_forward_range(
+                      engine, tokens + first_chunk, 2u,
+                      &split_next, &split_value, &split_stats,
+                      error, sizeof(error)),
+                  error);
+            k3_engine_state_digest split_digest;
+            CHECK(k3_engine_get_state_digest(
+                      engine, &split_digest,
+                      error, sizeof(error)),
+                  error);
+            CHECK(split_next == range_next,
+                  "split-range greedy token mismatch");
+            CHECK(memcmp(
+                      &split_value, &range_value,
+                      sizeof(split_value)) == 0,
+                  "split-range selected value mismatch");
+            CHECK(digest_equal(&split_digest, &range_digest),
+                  "split-range causal-state digest mismatch");
+        }
+
         CHECK(range_next == sequential_next,
               "crossover greedy token mismatch");
         CHECK(memcmp(

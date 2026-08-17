@@ -31,6 +31,10 @@ Semantic Versioning once its first research-preview tag is published.
   frequency retention, explicitly nonpromotable full-trace oracles, and a
   prefix-trained cold-suffix bound. Private reports include stable input hashes
   and never embed absolute host paths or raw routes.
+- Planner-driven chunked replacement prefill when a monolithic position-zero
+  range cannot fit one cache-backed workspace loan. Each bounded range releases
+  transient workspace before the next, reports whole-prompt progress, aggregates
+  range telemetry, and publishes retained tokens only after complete success.
 
 ## [0.2.0-research-preview] - 2026-08-01
 

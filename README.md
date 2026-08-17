@@ -349,11 +349,13 @@ resilience path, not a substitute for stable client history: full replay is
 still much slower than a small exact continuation.
 
 Before a divergent full range prefill resets an existing conversation,
-Moonshine now plans that position-zero request against a cache-backed workspace.
-If the empty or warm cache cannot lend the required bytes, the request is
-rejected before the semantic reset and the prior causal state remains available
-for a corrected retry. The preflight does not weaken memory guards or admit an
-approximate prefix.
+Moonshine plans that position-zero request against a cache-backed workspace.
+If the complete prompt cannot fit one cache loan, the server selects the
+largest exact-planner-approved chunk, resets only after that chunk is admitted,
+and advances the prompt through bounded range calls. Each call releases its
+transient workspace before the next one. Exact-prefix and monolithic prefill
+remain the fast paths; chunking preserves the memory guard but repeats layer
+sweeps and can make time to first token much longer.
 
 Example requests:
 

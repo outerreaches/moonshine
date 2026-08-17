@@ -1442,9 +1442,10 @@ static void log_result(const request_observer *observer,
         server_log(
             SERVER_LOG_INFO, "request.prefill.io",
             observer->completion_id,
-            "unique_experts=%u/%.1f/%u routes=%llu read=%.3f_GiB "
-            "workspace_borrow=%.3f_GiB read_wait=%.3fs "
+            "sweeps=%u unique_experts=%u/%.1f/%u routes=%llu "
+            "read=%.3f_GiB workspace_borrow=%.3f_GiB read_wait=%.3fs "
             "expert_pipeline=%.3fs routed=%.3fs",
+            result->range_stats.routed_layer_sweeps,
             result->range_stats.min_unique_experts_per_layer,
             average_unique,
             result->range_stats.max_unique_experts_per_layer,

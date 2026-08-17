@@ -576,6 +576,10 @@ static bool encode_turn_prompt(k3_chat_session *session,
 typedef struct {
     k3_chat_prefill_progress_callback callback;
     void                             *data;
+    uint32_t                          completed_tokens;
+    uint32_t                          chunk_tokens;
+    uint32_t                          total_tokens;
+    bool                              chunked;
 } prefill_progress_bridge;
 
 static void report_layer_progress(uint32_t completed,
@@ -583,11 +587,116 @@ static void report_layer_progress(uint32_t completed,
                                   void *user_data) {
     prefill_progress_bridge *bridge =
         (prefill_progress_bridge *)user_data;
-    if (bridge->callback != NULL) {
+    if (bridge->callback == NULL) return;
+    if (!bridge->chunked) {
         bridge->callback(
             K3_CHAT_PREFILL_PROGRESS_LAYERS,
             completed, total, bridge->data);
+        return;
     }
+    const uint64_t chunk_progress =
+        (uint64_t)bridge->chunk_tokens * completed / total;
+    uint64_t prompt_progress =
+        (uint64_t)bridge->completed_tokens + chunk_progress;
+    if (prompt_progress > bridge->total_tokens) {
+        prompt_progress = bridge->total_tokens;
+    }
+    bridge->callback(
+        K3_CHAT_PREFILL_PROGRESS_TOKENS,
+        (uint32_t)prompt_progress,
+        bridge->total_tokens,
+        bridge->data);
+}
+
+static void add_prefill_stats(k3_engine_prefill_stats *total,
+                              const k3_engine_prefill_stats *part) {
+    total->routed_physical_read_bytes +=
+        part->routed_physical_read_bytes;
+    total->embedding_physical_read_bytes +=
+        part->embedding_physical_read_bytes;
+    if (part->warm_cache_workspace_bytes >
+        total->warm_cache_workspace_bytes) {
+        total->warm_cache_workspace_bytes =
+            part->warm_cache_workspace_bytes;
+    }
+    total->routed_layer_sweeps += part->routed_layer_sweeps;
+    total->expert_read_requests += part->expert_read_requests;
+    total->selected_expert_routes += part->selected_expert_routes;
+    total->unique_experts_across_layers +=
+        part->unique_experts_across_layers;
+    if (part->routed_layer_sweeps != 0u &&
+        (total->min_unique_experts_per_layer == 0u ||
+         part->min_unique_experts_per_layer <
+             total->min_unique_experts_per_layer)) {
+        total->min_unique_experts_per_layer =
+            part->min_unique_experts_per_layer;
+    }
+    if (part->max_unique_experts_per_layer >
+        total->max_unique_experts_per_layer) {
+        total->max_unique_experts_per_layer =
+            part->max_unique_experts_per_layer;
+    }
+    total->layer0_seconds += part->layer0_seconds;
+    total->attention_seconds += part->attention_seconds;
+    total->kda_attention_seconds += part->kda_attention_seconds;
+    total->mla_attention_seconds += part->mla_attention_seconds;
+    total->kda_projection_seconds += part->kda_projection_seconds;
+    total->kda_convolution_seconds += part->kda_convolution_seconds;
+    total->kda_recurrent_seconds += part->kda_recurrent_seconds;
+    total->kda_gate_norm_seconds += part->kda_gate_norm_seconds;
+    total->kda_output_projection_seconds +=
+        part->kda_output_projection_seconds;
+    total->kda_dequantize_seconds += part->kda_dequantize_seconds;
+    total->kda_blas_seconds += part->kda_blas_seconds;
+    total->router_seconds += part->router_seconds;
+    total->routed_stream_seconds += part->routed_stream_seconds;
+    total->routed_read_wait_seconds +=
+        part->routed_read_wait_seconds;
+    total->routed_submit_seconds += part->routed_submit_seconds;
+    total->routed_index_seconds += part->routed_index_seconds;
+    total->routed_expert_pipeline_seconds +=
+        part->routed_expert_pipeline_seconds;
+    total->moe_tail_seconds += part->moe_tail_seconds;
+    total->output_seconds += part->output_seconds;
+    total->wall_seconds += part->wall_seconds;
+}
+
+static bool largest_current_prefill_chunk(
+        k3_chat_session *session,
+        uint32_t maximum,
+        uint32_t *chunk_tokens,
+        char *error,
+        size_t error_size) {
+    if (maximum < 2u) {
+        *chunk_tokens = maximum;
+        return true;
+    }
+    uint32_t low = 2u;
+    uint32_t high = maximum;
+    uint32_t best = 0u;
+    while (low <= high) {
+        const uint32_t candidate = low + (high - low) / 2u;
+        k3_prefill_plan plan;
+        char ignored[512] = { 0 };
+        if (k3_engine_plan_prefill_with_projection_backend(
+                session->engine, candidate,
+                K3_PREFILL_CACHE_BORROW_WARM_WORKSPACE,
+                session->range_backend, &plan,
+                ignored, sizeof(ignored))) {
+            best = candidate;
+            low = candidate + 1u;
+        } else {
+            high = candidate - 1u;
+        }
+    }
+    if (best == 0u) {
+        set_error(
+            error, error_size,
+            "no two-token chunk fits the current prefill workspace");
+        return false;
+    }
+    *chunk_tokens = best;
+    return true;
 }
 
 static void report_lifecycle(
@@ -603,6 +712,7 @@ static void report_lifecycle(
 static bool execute_prompt(
         k3_chat_session *session,
         const k3_token_buffer *prompt,
+        uint32_t range_chunk_tokens,
         uint32_t *predicted,
         k3_chat_prefill_progress_callback progress_callback,
         void *progress_data,
@@ -630,28 +740,83 @@ static bool execute_prompt(
         }
     } else {
         result->prefill_strategy = K3_CHAT_PREFILL_LAYER_MAJOR;
+        /*
+         * Range calls advance engine state per chunk. The caller publishes
+         * retained prompt tokens only after this function succeeds; any
+         * partial failure marks the session unhealthy below.
+         */
+        memset(&result->range_stats, 0, sizeof(result->range_stats));
+        const uint32_t total_tokens = (uint32_t)prompt->count;
+        uint32_t completed_tokens = 0u;
+        bool first_chunk = true;
         float value = 0.0f;
-        prefill_progress_bridge bridge = {
-            .callback = progress_callback,
-            .data = progress_data,
-        };
-        if (session->range_backend ==
-            K3_PREFILL_PROJECTION_DEFAULT) {
-            ok = k3_engine_forward_range_with_progress(
-                session->engine, prompt->data,
-                (uint32_t)prompt->count,
-                predicted, &value, &result->range_stats,
-                report_layer_progress, &bridge,
-                error, error_size);
-        } else {
-            ok =
-                k3_engine_forward_range_with_projection_backend_and_progress(
-                session->engine, prompt->data,
-                (uint32_t)prompt->count,
-                session->range_backend,
-                predicted, &value, &result->range_stats,
-                report_layer_progress, &bridge,
-                error, error_size);
+        while (ok && completed_tokens < total_tokens) {
+            const uint32_t remaining = total_tokens - completed_tokens;
+            uint32_t chunk_tokens = remaining;
+            if (range_chunk_tokens != 0u &&
+                chunk_tokens > range_chunk_tokens) {
+                chunk_tokens = range_chunk_tokens;
+            }
+            if (range_chunk_tokens != 0u && !first_chunk &&
+                !largest_current_prefill_chunk(
+                    session, chunk_tokens, &chunk_tokens,
+                    error, error_size)) {
+                ok = false;
+                break;
+            }
+            if (remaining > chunk_tokens &&
+                remaining - chunk_tokens == 1u &&
+                chunk_tokens > 2u) {
+                chunk_tokens--;
+            }
+            if (chunk_tokens == 1u) {
+                ok = k3_engine_forward_token(
+                    session->engine,
+                    prompt->data[completed_tokens],
+                    predicted, &value, error, error_size);
+                if (ok && progress_callback != NULL) {
+                    progress_callback(
+                        K3_CHAT_PREFILL_PROGRESS_TOKENS,
+                        completed_tokens + 1u, total_tokens,
+                        progress_data);
+                }
+            } else {
+                k3_engine_prefill_stats measured;
+                memset(&measured, 0, sizeof(measured));
+                prefill_progress_bridge bridge = {
+                    .callback = progress_callback,
+                    .data = progress_data,
+                    .completed_tokens = completed_tokens,
+                    .chunk_tokens = chunk_tokens,
+                    .total_tokens = total_tokens,
+                    .chunked = range_chunk_tokens != 0u,
+                };
+                if (session->range_backend ==
+                    K3_PREFILL_PROJECTION_DEFAULT) {
+                    ok = k3_engine_forward_range_with_progress(
+                        session->engine,
+                        prompt->data + completed_tokens,
+                        chunk_tokens, predicted, &value, &measured,
+                        report_layer_progress, &bridge,
+                        error, error_size);
+                } else {
+                    ok =
+                        k3_engine_forward_range_with_projection_backend_and_progress(
+                            session->engine,
+                            prompt->data + completed_tokens,
+                            chunk_tokens, session->range_backend,
+                            predicted, &value, &measured,
+                            report_layer_progress, &bridge,
+                            error, error_size);
+                }
+                if (ok) {
+                    add_prefill_stats(&result->range_stats, &measured);
+                }
+            }
+            if (ok) {
+                completed_tokens += chunk_tokens;
+                first_chunk = false;
+            }
         }
     }
     clock_gettime(CLOCK_MONOTONIC, &end);
@@ -670,6 +835,7 @@ static bool execute_encoded_turn(
         const k3_token_buffer *prompt,
         uint32_t total_prompt_tokens,
         uint32_t reused_prompt_tokens,
+        uint32_t range_chunk_tokens,
         uint32_t max_generated_tokens,
         k3_chat_prefill_progress_callback progress_callback,
         void *progress_data,
@@ -771,7 +937,7 @@ static bool execute_encoded_turn(
         session->engine, &result->cache_before);
     uint32_t predicted = 0u;
     if (!execute_prompt(
-            session, prompt, &predicted,
+            session, prompt, range_chunk_tokens, &predicted,
             progress_callback, progress_data,
             result, error, error_size)) {
         ok = false;
@@ -1034,23 +1200,46 @@ static bool preflight_replacement_prefill(
         k3_chat_session *session,
         size_t prompt_tokens,
         bool clear_expert_cache,
+        uint32_t *range_chunk_tokens,
         char *error,
         size_t error_size) {
+    *range_chunk_tokens = 0u;
     if (prompt_tokens <= session->sequential_prefill_limit) {
         return true;
     }
     k3_prefill_plan plan;
-    char plan_error[512] = { 0 };
+    char full_plan_error[512] = { 0 };
     if (k3_engine_plan_reset_prefill(
             session->engine, (uint32_t)prompt_tokens,
             clear_expert_cache, session->range_backend,
-            &plan, plan_error, sizeof(plan_error))) {
+            &plan, full_plan_error, sizeof(full_plan_error))) {
+        return true;
+    }
+    uint32_t low = 2u;
+    uint32_t high = (uint32_t)prompt_tokens - 1u;
+    uint32_t best = 0u;
+    while (low <= high) {
+        const uint32_t candidate = low + (high - low) / 2u;
+        char ignored[512] = { 0 };
+        if (k3_engine_plan_reset_prefill(
+                session->engine, candidate,
+                clear_expert_cache, session->range_backend,
+                &plan, ignored, sizeof(ignored))) {
+            best = candidate;
+            low = candidate + 1u;
+        } else {
+            high = candidate - 1u;
+        }
+    }
+    if (best != 0u) {
+        *range_chunk_tokens = best;
         return true;
     }
     set_error(
         error, error_size,
         "replacement prefill rejected before causal reset: %s",
-        plan_error[0] != '\0' ? plan_error : "planning failed");
+        full_plan_error[0] != '\0' ?
+            full_plan_error : "no two-token chunk fits");
     return false;
 }
 
@@ -1084,7 +1273,7 @@ bool k3_chat_session_turn(
     if (ok) {
         ok = execute_encoded_turn(
             session, &prompt,
-            (uint32_t)prompt.count, 0u,
+            (uint32_t)prompt.count, 0u, 0u,
             max_generated_tokens, NULL, NULL,
             NULL, NULL,
             false, NULL, NULL,
@@ -1321,14 +1510,11 @@ bool k3_chat_session_complete_messages_with_options(
                 options->lifecycle_data,
             K3_CHAT_LIFECYCLE_PREFILL_START, result);
     }
-    const bool replacement_would_discard_state =
-        session->position != 0u ||
-        session->retained_tokens.count != 0u;
-    if (ok && reused == 0u &&
-        replacement_would_discard_state) {
+    uint32_t range_chunk_tokens = 0u;
+    if (ok && reused == 0u) {
         ok = preflight_replacement_prefill(
             session, prompt->count, clear_expert_cache,
-            error, error_size);
+            &range_chunk_tokens, error, error_size);
     }
     if (ok && reused == 0u) {
         ok = k3_chat_session_reset(
@@ -1344,7 +1530,7 @@ bool k3_chat_session_complete_messages_with_options(
         ok = execute_encoded_turn(
             session, &suffix,
             (uint32_t)prompt->count, (uint32_t)reused,
-            max_generated_tokens,
+            range_chunk_tokens, max_generated_tokens,
             options == NULL ? NULL :
                 options->progress_callback,
             options == NULL ? NULL :

@@ -369,13 +369,20 @@ slots, retained 40.953 GiB of non-overlapping cache, and completed the full
 prefill in 531.965 seconds at 7.500 tokens/s. The client received HTTP 200 with
 standard usage `3990/1/3991`; no memory guard was reduced.
 
+Replacement prompts larger than the lendable cache tail no longer fail solely
+because their monolithic batch workspace exceeds that tail. Moonshine selects
+the largest exact-planner-approved chunk and performs multiple range sweeps,
+releasing transient workspace between them. This is a survivability fallback:
+each chunk can reread most routed expert weights, so stable exact history and
+ordinary prefix reuse remain operationally important.
+
 ## Client-side failure map
 
 | HTTP 400 message | likely correction |
 |---|---|
 | `max tokens must be an integer in [1,N]` | set Hermes `model.max_tokens` to the advertised server ceiling `N` or lower |
 | `reasoning_effort must be low, high, or max` | the running binary predates `medium`; use `low`, `high`, or `max`, or rebuild after stopping it |
-| `K3 prefill workspace rejected` on a continuation | first verify that every prior assistant `reasoning_content` and tool call was replayed; a prefix miss can turn a small suffix into a full warm prefill |
+| `K3 prefill workspace rejected` on a continuation | first verify complete replay of prior `reasoning_content` and tool calls; current builds chunk oversized replacement prefills, so this error means even a two-token chunk could not be admitted or the running binary predates the fallback |
 | prompt/context capacity error | reduce history/output cap or select a larger qualified context profile |
 
 Always confirm the running server's effective contract before client tests:

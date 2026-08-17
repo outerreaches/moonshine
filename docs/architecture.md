@@ -369,6 +369,18 @@ at 12, 1.285x at 16, 1.577x at 24, 1.794x at 32, and 2.108x at 42. The
 production switch begins at 8 to keep the marginal 3--6-token region on the
 simpler schedule.
 
+Replacement prompts that exceed one cache-backed workspace loan use bounded
+range calls. A payload-free binary search chooses the largest feasible first
+chunk before causal reset; later chunks are replanned at the current engine
+position. Successful calls advance the one live causal state and destroy their
+transient workspace. They do not create prefix-cache entries. The chat layer
+publishes retained prompt tokens only after every chunk succeeds, so a partial
+failure leaves the session unhealthy rather than advertising mismatched token
+and engine state. Chunk progress is reported against the whole prompt, range
+counters and durations are aggregated, and the logged workspace loan is the
+largest reported warm-cache loan. A position-zero cold loan uses the empty
+cache but is not included in `warm_cache_workspace_bytes`.
+
 Cold prefill may borrow a precisely planned slice of the empty 48.111 GiB
 decode cache for workspace. Warm prefill normally retains that useful cache
 and allocates only the incremental delta workspace. If the guarded separate
@@ -379,10 +391,11 @@ failure from earlier GLM experiments.
 
 A mismatched request that would replace live causal state first derives the
 position-zero range plan with a cache-backed lease. Cold-cache benchmark resets
-must fit an exact cold loan; normal replacement requests must fit a slot-aligned
-warm tail. Planning is payload-free and non-mutating. A failure therefore
-rejects the new request while leaving the prior conversation available, rather
-than resetting it before workspace admission is known to be possible.
+must fit an exact cold loan; normal replacements use a slot-aligned warm tail.
+Planning is payload-free and non-mutating. If the monolithic plan fails, the
+server admits a bounded first chunk before reset rather than discarding the
+conversation speculatively. Only the absence of any two-token feasible chunk
+remains a pre-reset workspace rejection.
 
 Range prefill streams routed weights directly and does not admit decode-cache
 entries. The workspace loan is therefore exclusive until range execution
