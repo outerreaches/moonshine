@@ -545,7 +545,6 @@ bool k3_mzg_store_open_optional(k3_mzg_store **out,
     }
     struct stat root_status;
     if (stat(root, &root_status) != 0) {
-        if (errno == ENOENT) return true;
         k3_mzg_error(error, error_size, "stat %s: %s", root, strerror(errno));
         return false;
     }

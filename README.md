@@ -490,9 +490,12 @@ gate evidence.
 
 For a bounded decode investigation, `--decode-diagnostics PREFIX` writes
 private (`0600`) cache, per-layer ledger, and content-derived expert-route
-CSVs, while `--decode-state-digest` logs non-cryptographic causal-state
-comparison fingerprints for paired runs. Both are sensitive, opt-in
-qualification tools, not production logging. The schemas, privacy boundary,
+CSVs. Adding `--router-logits-tap` writes raw float32 router logits only inside
+the active decode-diagnostics transaction. It is more content-sensitive than
+the route IDs and remains disabled by default. `--decode-state-digest` logs
+non-cryptographic causal-state comparison fingerprints for paired runs. These
+are sensitive, opt-in qualification tools, not production logging. The schemas,
+privacy boundary,
 required baseline comparison, and
 [qualification gate](docs/qualification-decode-diagnostics.md) are documented
 in [Operational logging](docs/observability.md). Accepted captures can be

@@ -96,12 +96,21 @@ Those are scheduling and systems-design lessons. The K3 SafeTensors loader,
 cache policy, engine composition, and layer-major implementation in this
 repository are K3-specific code.
 
+## GPU entropy-code influence
+
+MZG2 uses standard static rANS and a wave-coalesced renormalization structure
+informed by Meta's [DietGPU](https://github.com/facebookresearch/dietgpu)
+GPU ANS design. The Moonshine implementation is independent K3-specific
+HIP/wave32 code; no DietGPU source is vendored or copied into this repository.
+DietGPU is design prior art, not a runtime dependency.
+
 ## Platform dependencies
 
 The runtime directly uses:
 
 - AMD HIP;
 - hipBLAS and hipBLASLt;
+- Zstandard (`libzstd`) for the opt-in MZG1 research codec and offline screens;
 - ICU's Unicode regular-expression API;
 - Linux `io_uring` syscalls;
 - Linux `O_DIRECT`;

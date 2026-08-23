@@ -22,6 +22,9 @@ Semantic Versioning once its first research-preview tag is published.
   fingerprints for paired qualification. Private CSV creation, abort rollback,
   and explicit baseline comparison keep the diagnostics outside normal
   production logging.
+- An additional explicit router-logits tap for decode qualification. It writes
+  private raw float32 logits only inside an active diagnostics transaction,
+  participates in rollback, and is labeled more content-sensitive than routes.
 - A model-free batch-LRU replay gate that validates complete single-capture
   route structure, strict ledger semantics and totals, source-capacity hit
   masks, provenance-safe expansion, and cache/ledger/route identity before
@@ -73,6 +76,15 @@ Semantic Versioning once its first research-preview tag is published.
   measures independent 16/32/64 KiB value/scale Zstd payloads without retaining
   the 51.370 GiB Q8 tier. The full model scan is intentionally not run beside a
   live service and still requires a later GPU-quantizer identity gate.
+
+### Fixed
+
+- Restrict router-logits capture to an active decode-diagnostics transaction so
+  prompt/prefill data remains outside the capture and rollback boundary.
+- Fail closed when an explicitly selected MZG1 store is absent, and validate
+  every MZG2 probability/LUT table before GPU decode.
+- Require explicit arguments for the layer-local MZG2 transcoder so a no-argument
+  invocation cannot create a large derived artifact in the source tree.
 
 ## [0.2.0-research-preview] - 2026-08-01
 

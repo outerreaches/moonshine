@@ -62,6 +62,26 @@ int main(int argc, char **argv) {
     const uint32_t experts =
         argc > 3 ? (uint32_t)strtoul(argv[3], NULL, 10) : 896u;
     char error[512];
+    const char *configured_store = getenv("MOONSHINE_EXPERT_STORE");
+    char *saved_store = configured_store ? strdup(configured_store) : NULL;
+    CHECK(!configured_store || saved_store,
+          "copy MZG store selection");
+    CHECK(setenv(
+              "MOONSHINE_EXPERT_STORE",
+              "/nonexistent/moonshine-mzg-store", 1) == 0,
+          "set missing MZG store selection");
+    k3_mzg_store *missing = NULL;
+    CHECK(!k3_mzg_store_open_optional(
+              &missing, root, layers, experts,
+              error, sizeof(error)) &&
+              !missing && error[0] != '\0',
+          "explicit missing MZG store did not fail closed");
+    CHECK(saved_store ?
+              setenv("MOONSHINE_EXPERT_STORE", saved_store, 1) == 0 :
+              unsetenv("MOONSHINE_EXPERT_STORE") == 0,
+          "restore MZG store selection");
+    free(saved_store);
+
     k3_mzg_store *store = NULL;
     CHECK(k3_mzg_store_open_optional(
               &store, root, layers, experts,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resumably transcode and independently verify the complete K3 MZG2 store."""
+"""Transcode and independently verify a resumable complete K3 MZG2 store."""
 
 from __future__ import annotations
 

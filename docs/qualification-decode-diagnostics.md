@@ -13,6 +13,11 @@ in [the observability contract](observability.md). These artifacts are
 qualification-only, sensitive derived workload data. They do not change the
 production path unless explicitly enabled.
 
+The later raw router-logits tap is **not** covered by this historical PASS. It
+uses the same private-file and transaction rollback machinery, but requires its
+own exactness, disclosure, file-shape, and overhead qualification before its
+captures can be treated as accepted evidence.
+
 ## Scope and fixed configuration
 
 - AMD Ryzen AI Max+ 395 / Radeon 8060S (`gfx1151`)

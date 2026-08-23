@@ -648,15 +648,21 @@ int main(int argc, char **argv) {
     if (argc == 4 && std::strcmp(argv[1], "--verify") == 0) {
         return verify_layer_store(argv[2], argv[3]);
     }
-    const char *model_root = argc > 1 ? argv[1]
-        : "/srv/modelstore/models/moonshotai__Kimi-K3";
-    const char *output_path = argc > 2 ? argv[2] : "layer-010.mzg2.partial";
-    const uint32_t layer = argc > 3
-        ? static_cast<uint32_t>(std::strtoul(argv[3], nullptr, 10)) : 10u;
-    const uint32_t expert_count = argc > 4
-        ? static_cast<uint32_t>(std::strtoul(argv[4], nullptr, 10)) : 896u;
-    const char *manifest_digest = argc > 5 ? argv[5]
-        : "476fa0ba64e3233cbb9ca0642327361a73f6807e751edb071c92fa2216b202a4";
+    if (argc != 6) {
+        std::fprintf(
+            stderr,
+            "usage: %s MODEL OUTPUT LAYER EXPERTS MANIFEST_SHA256\n"
+            "       %s --verify MODEL SIDECAR\n",
+            argv[0], argv[0]);
+        return 2;
+    }
+    const char *model_root = argv[1];
+    const char *output_path = argv[2];
+    const uint32_t layer =
+        static_cast<uint32_t>(std::strtoul(argv[3], nullptr, 10));
+    const uint32_t expert_count =
+        static_cast<uint32_t>(std::strtoul(argv[4], nullptr, 10));
+    const char *manifest_digest = argv[5];
     if (layer == 0u || layer > 92u || expert_count == 0u ||
         expert_count > 896u) {
         std::fprintf(stderr, "invalid layer/expert count\n");

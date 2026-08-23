@@ -114,6 +114,10 @@ int main(int argc, char **argv) {
                   engine, diagnostic_prefix,
                   error, sizeof(error)),
               error);
+        CHECK(k3_engine_configure_router_logits_tap(
+                  engine, diagnostic_prefix,
+                  error, sizeof(error)),
+              error);
     }
 
     /*

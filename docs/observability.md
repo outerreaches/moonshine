@@ -54,7 +54,9 @@ logging model output.
 ## Opt-in decode diagnostics
 
 `--decode-diagnostics PREFIX` creates three new regular files with mode `0600`
-and refuses to follow symlinks or overwrite an existing path:
+and refuses to follow symlinks or overwrite an existing path. The additional
+`--router-logits-tap` flag requires that diagnostics prefix and creates a fourth,
+more sensitive file:
 
 ```text
 PREFIX.cache.csv
@@ -65,6 +67,10 @@ capture,scope,layer,steps,accesses,hits,misses,read_requests,logical_expert_byte
 
 PREFIX.routes.csv
 capture,step,position,layer,observed_hit_mask,expert_0,...,expert_15
+
+PREFIX.router_logits.f32
+# moonshine-router-logits-v1 layers=92 experts=896 dtype=float32 order=step-major-layer-minor
+<896 native float32 values for each decode step and routed layer>
 ```
 
 Capture IDs start at 1 for each server process; aborted attempts can leave gaps
@@ -72,8 +78,8 @@ between committed IDs. Route steps start at 0, routed layers are 1 through 92, a
 is the oldest LRU resident; increasing ranks run to the newest resident. A
 header-only cache file is a valid empty pre-decode snapshot. A capture commits
 when the native chat decode and optional state fingerprint complete. Engine or
-chat-decode failures before that boundary roll all three streams back to their
-pre-request offsets. Later server tool-policy, response-format, allocation, or
+chat-decode failures before that boundary roll every enabled stream back to its
+pre-request offset. Later server tool-policy, response-format, allocation, or
 transport failures do not invalidate the completed engine trace and can leave a
 committed capture beside `request.failed`; those post-decode failures carry the
 capture ID so consumers can correlate them when HTTP success is part of the
@@ -98,7 +104,10 @@ well formed. Consequently `request.decode.io steps` and route step count equal
 length stop can, for example, produce 141 routed steps after 13 forced closure
 tokens. The route trace contains no token IDs, prompt text, generated text, or
 gate weights, but its selected experts and positions are content-derived and
-can fingerprint a workload.
+can fingerprint a workload. Router logits are raw model activations and carry a
+higher disclosure risk. They are written only while a decode-diagnostics
+transaction is active; prompt and prefill router values remain outside the file
+and rollback boundary.
 
 `--decode-state-digest` adds `request.state.digest` before the final
 `request.complete` event. It computes deterministic 64-bit FNV-1a comparison
@@ -109,9 +118,10 @@ proof of state equality. Digest computation is deliberately outside the decode
 timer and is too expensive for normal service. `request.decode.io` appears in
 the same pre-completion diagnostic block when CSV capture is active.
 
-Both options are experimental and off by default. Use a fresh single-request
-server for paired measurements: baseline with only `--decode-state-digest`,
-then an identical process with both flags. Keep the prefix outside the source
+All diagnostics are experimental and off by default. Use a fresh
+single-request server for paired measurements: baseline with only
+`--decode-state-digest`, then an identical process with decode diagnostics and
+only the additional taps required by the experiment. Keep the prefix outside the source
 tree and retain the `0600` modes. Raw routes and state fingerprints require an
 explicit disclosure review.
 
@@ -151,9 +161,11 @@ tokens. Each record is assembled in a bounded stack buffer and submitted with
 one best-effort host `write(2)` call.
 
 `--decode-diagnostics` is the explicit exception: it adds per-layer clocks and
-buffered CSV writes. Qualification must compare it with an identical baseline,
-require exact output/cache/state results, and bound measured decode overhead
-before using its timing fields.
+buffered CSV writes. The router-logits tap additionally copies and writes 896
+float32 values for every routed layer and decode step. Qualification must
+compare each enabled configuration with an identical baseline, require exact
+output/cache/state results, and bound measured decode overhead before using its
+artifacts.
 
 For systemd, keep standard error attached to the journal. For a manual run:
 

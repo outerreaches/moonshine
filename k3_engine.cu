@@ -1834,7 +1834,8 @@ static bool decode_routed_layer(
             physical_read_bytes += layouts[rank].read_bytes;
         }
     }
-    if (engine->decode_router_logits) {
+    if (engine->decode_diagnostics_active &&
+        engine->decode_router_logits) {
         float router_logits_snapshot[K3_ENGINE_EXPERTS];
         if (hipMemcpy(
                 router_logits_snapshot,

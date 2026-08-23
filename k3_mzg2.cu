@@ -80,6 +80,39 @@ __host__ __device__ uint32_t word_checksum(
     return rotated ^ (dword_index * UINT32_C(0x9e3779b9));
 }
 
+bool validate_model(const k3_mzg2_model &model, bool packed) {
+    const uint32_t count = model.symbol_count;
+    if (count == 0u || count > 15u) return false;
+    uint32_t total = 0u;
+    for (uint32_t symbol = 0u; symbol < count; ++symbol) {
+        const uint32_t frequency = model.frequency[symbol];
+        if (model.cumulative[symbol] != total || frequency == 0u ||
+            frequency > K3_MZG2_MODEL_TOTAL - total) {
+            return false;
+        }
+        const uint8_t value = model.values[symbol];
+        if (packed && (value > 15u || value == 8u)) return false;
+        for (uint32_t previous = 0u; previous < symbol; ++previous) {
+            if (model.values[previous] == value) return false;
+        }
+        total += frequency;
+    }
+    if (total != K3_MZG2_MODEL_TOTAL) return false;
+    for (uint32_t slot = 0u; slot < K3_MZG2_MODEL_TOTAL; ++slot) {
+        const uint32_t symbol = model.decode[slot];
+        if (symbol >= count || slot < model.cumulative[symbol] ||
+            slot >= model.cumulative[symbol] + model.frequency[symbol]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool validate_model_entry(const k3_mzg2_model_entry &entry) {
+    return validate_model(entry.model[K3_MZG2_MODEL_PACKED], true) &&
+           validate_model(entry.model[K3_MZG2_MODEL_SCALE], false);
+}
+
 __global__ void decode_tiles_kernel(
         const uint8_t *block,
         uint32_t block_bytes,
@@ -183,7 +216,7 @@ __global__ void decode_tiles_kernel(
         for (uint32_t round = 0u; round < rounds && valid; ++round) {
             const uint32_t slot = state & (K3_MZG2_MODEL_TOTAL - 1u);
             const uint32_t symbol = decode_lut[model][slot];
-            if (symbol >= symbol_count[model]) {
+            if (symbol >= 15u || symbol >= symbol_count[model]) {
                 valid = false;
                 break;
             }
@@ -512,6 +545,15 @@ extern "C" bool k3_mzg2_store_launch(
         header->payload_offset > block_bytes) {
         set_error(error, error_size,
                   "MZG2 block header mismatch layer %u expert %u",
+                  layer, expert);
+        return false;
+    }
+    const auto *host_models =
+        reinterpret_cast<const k3_mzg2_model_entry *>(
+            static_cast<const uint8_t *>(block_host) + header->model_offset);
+    if (!validate_model_entry(*host_models)) {
+        set_error(error, error_size,
+                  "MZG2 model table mismatch layer %u expert %u",
                   layer, expert);
         return false;
     }
