@@ -35,6 +35,44 @@ Semantic Versioning once its first research-preview tag is published.
   range cannot fit one cache-backed workspace loan. Each bounded range releases
   transient workspace before the next, reports whole-prompt progress, aggregates
   range telemetry, and publishes retained tokens only after complete success.
+- An opt-in MZG1 routed-expert store that preserves the official SafeTensors,
+  canonicalizes only E2M1 negative zero, reads 4 KiB-aligned per-expert blocks
+  through QD2 io_uring, and decodes twelve two-stripe Zstd frames with six
+  persistent workers into mapped staging before ordinary device-cache
+  admission. The resumable transcoder verifies blocks immediately and again
+  from storage before publication; the native reader fails closed on
+  incomplete stores, source-manifest mismatches, or frame corruption. Full
+  deterministic qualification passes, but end-to-end decode is slower. Its
+  on-host research store was removed after explicit approval; the reader and
+  transcoder remain for reproducibility.
+- A qualified full MZG2 store format and gfx1151 wave32 decoder. Static rANS
+  uses independently bounded 16 KiB tiles, per-tile checksums, mapped
+  compressed input, and direct cache-slot output without CPU decode or an
+  admission copy. The resumable 92-sidecar workflow immediately and
+  independently verifies all 82,432 experts, records sidecar SHA-256 values,
+  and atomically publishes 1,171.084 GiB at 13.0674105% reduction. Engine
+  hello improves about 10.6%, selected prefill 11.6%, and live 128K/30
+  11.7--12.8%, with exact outputs. MZG2 remains absolute-path opt-in while raw
+  SafeTensors remain the production default.
+- A model-free exact prefix checkpoint catalog core. It owns immutable token
+  sequences and state paths, filters on state format/context/model/static-tier
+  identity, chooses the longest byte-exact eligible prefix, preserves the
+  executor's two-token suffix invariant, rejects conflicting records, and
+  performs allocation-free lookup. State-file metadata now exposes configured
+  context for this identity check. Server activation remains separately gated.
+- A model-free one-pass selected-prefill route index. It validates token-major
+  top-k routes and per-token uniqueness, produces stable expert-local
+  token/output slices in `O(routes + experts)`, reuses allocations, preserves
+  the prior index after failed rebuilds, and performs allocation-free slice
+  lookup. Engine integration is deferred until the live client test completes.
+- A GPU-free static-Q8 compression-screen foundation. The production Q8
+  candidate classifier now lives in portable code shared by the engine and
+  offline tool; the CPU Q8/128 reference locks BF16 conversion,
+  round-to-nearest-even, scale, clamp, and entropy behavior. The streamed
+  `screen_static_q8` command validates the pinned 1,135-matrix byte ledger and
+  measures independent 16/32/64 KiB value/scale Zstd payloads without retaining
+  the 51.370 GiB Q8 tier. The full model scan is intentionally not run beside a
+  live service and still requires a later GPU-quantizer identity gate.
 
 ## [0.2.0-research-preview] - 2026-08-01
 

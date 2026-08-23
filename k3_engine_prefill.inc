@@ -1067,27 +1067,36 @@ static bool prefill_stream_routed_layer(
     for (uint32_t index = 0u; index < layout_count; index++) {
         const k3_engine_expert_layout *layout =
             &layouts[index].layout;
-        if (layout->aligned_start >
-            UINT64_MAX - layout->aligned_bytes) {
-            engine_error(error, error_size,
-                         "layer-%u selected request end overflow", layer);
-            return false;
+        uint64_t physical_bytes = layout->read_bytes;
+        if (layout->codec == K3_ENGINE_EXPERT_RAW) {
+            if (layout->aligned_start >
+                UINT64_MAX - layout->aligned_bytes) {
+                engine_error(
+                    error, error_size,
+                    "layer-%u selected request end overflow", layer);
+                return false;
+            }
+            const uint64_t request_end =
+                layout->aligned_start + layout->aligned_bytes;
+            const uint64_t physical_end =
+                request_end > engine->model.shards[layout->shard].file_bytes ?
+                    engine->model.shards[layout->shard].file_bytes :
+                    request_end;
+            if (physical_end < layout->aligned_start) {
+                engine_error(
+                    error, error_size,
+                    "layer-%u selected request bounds invalid", layer);
+                return false;
+            }
+            physical_bytes = physical_end - layout->aligned_start;
         }
-        const uint64_t request_end =
-            layout->aligned_start + layout->aligned_bytes;
-        const uint64_t physical_end =
-            request_end > engine->model.shards[layout->shard].file_bytes ?
-                engine->model.shards[layout->shard].file_bytes :
-                request_end;
-        if (physical_end < layout->aligned_start ||
-            expected_physical_bytes >
-                UINT64_MAX - (physical_end - layout->aligned_start)) {
+        if (expected_physical_bytes >
+            UINT64_MAX - physical_bytes) {
             engine_error(error, error_size,
                          "layer-%u selected-read ledger overflow", layer);
             return false;
         }
-        expected_physical_bytes +=
-            physical_end - layout->aligned_start;
+        expected_physical_bytes += physical_bytes;
     }
 
     uint32_t next = 0u;
@@ -1097,11 +1106,8 @@ static bool prefill_stream_routed_layer(
            initial < K3_ENGINE_STREAM_QD) {
         const k3_engine_expert_layout *layout =
             &layouts[next].layout;
-        requests[initial].fd =
-            engine->model.shards[layout->shard].direct_fd;
-        requests[initial].offset = layout->aligned_start;
-        requests[initial].bytes = layout->aligned_bytes;
-        requests[initial].buffer_index = initial;
+        requests[initial] =
+            make_expert_request(engine, initial, layout);
         requests[initial].user_data = next;
         next++;
         initial++;
@@ -1151,9 +1157,7 @@ static bool prefill_stream_routed_layer(
             const uint16_t buffer =
                 completions[completion].buffer_index;
             const uint64_t required =
-                selected->layout.physical_start -
-                selected->layout.aligned_start +
-                K3_ENGINE_EXPERT_BYTES;
+                expert_required_read_bytes(&selected->layout);
             if (buffer >= K3_ENGINE_STREAM_QD ||
                 completions[completion].result < 0 ||
                 (uint64_t)completions[completion].result <
@@ -1203,10 +1207,42 @@ static bool prefill_stream_routed_layer(
                 abort_prefill_io(engine);
                 return false;
             }
-            uint8_t *base =
-                (uint8_t *)engine->staging_device[buffer] +
-                (selected->layout.physical_start -
-                 selected->layout.aligned_start);
+            uint8_t *base = NULL;
+            if (selected->layout.codec == K3_ENGINE_EXPERT_MZG1) {
+                if (!decode_mzg_expert(
+                        engine, &selected->layout, layer,
+                        selected->expert, buffer,
+                        engine->staging_host[buffer],
+                        error, error_size)) {
+                    abort_prefill_io(engine);
+                    return false;
+                }
+                base = (uint8_t *)engine->staging_device[buffer];
+            } else if (
+                    selected->layout.codec ==
+                        K3_ENGINE_EXPERT_MZG2) {
+                if (!engine->mzg2_prefill_output[buffer] ||
+                    !k3_mzg2_store_launch(
+                        engine->mzg2_store, layer,
+                        selected->expert,
+                        engine->staging_host[buffer],
+                        engine->staging_device[buffer],
+                        selected->layout.read_bytes,
+                        engine->mzg2_prefill_output[buffer],
+                        engine->mzg2_errors_device + buffer,
+                        engine->expert_stream,
+                        error, error_size)) {
+                    abort_prefill_io(engine);
+                    return false;
+                }
+                base = (uint8_t *)
+                    engine->mzg2_prefill_output[buffer];
+            } else {
+                base =
+                    (uint8_t *)engine->staging_device[buffer] +
+                    (selected->layout.physical_start -
+                     selected->layout.aligned_start);
+            }
             clock_gettime(CLOCK_MONOTONIC, &subphase_start);
             if (!launch_prefill_expert(
                     engine, workspace, base,
@@ -1220,6 +1256,17 @@ static bool prefill_stream_routed_layer(
                 abort_prefill_io(engine);
                 return false;
             }
+            if (selected->layout.codec == K3_ENGINE_EXPERT_MZG2 &&
+                engine->mzg2_errors_host[buffer] != 0u) {
+                engine_error(
+                    error, error_size,
+                    "layer-%u MZG2 prefill expert %u "
+                    "integrity failure 0x%x",
+                    layer, selected->expert,
+                    engine->mzg2_errors_host[buffer]);
+                abort_prefill_io(engine);
+                return false;
+            }
             prefill_add_host_subphase(
                 &stats->routed_expert_pipeline_seconds,
                 subphase_start);
@@ -1228,14 +1275,8 @@ static bool prefill_stream_routed_layer(
             if (next < layout_count) {
                 const k3_engine_expert_layout *layout =
                     &layouts[next].layout;
-                refills[refill_count].fd =
-                    engine->model.shards[
-                        layout->shard].direct_fd;
-                refills[refill_count].offset =
-                    layout->aligned_start;
-                refills[refill_count].bytes =
-                    layout->aligned_bytes;
-                refills[refill_count].buffer_index = buffer;
+                refills[refill_count] =
+                    make_expert_request(engine, buffer, layout);
                 refills[refill_count].user_data = next;
                 next++;
                 refill_count++;

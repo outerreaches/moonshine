@@ -169,8 +169,11 @@ head produce a greedy token.
 ## Storage and residency
 
 The loader parses SafeTensors headers from all 96 shards into a sorted tensor
-directory without loading payloads. Every read is then explicit and
-role-aware.
+directory without loading payloads. Static tensors always come from this
+unchanged source tree. The qualified default also streams raw experts.
+`MOONSHINE_MZG2_EXPERIMENT` selects an absolute MZG2 sidecar or complete
+directory; `MOONSHINE_EXPERT_STORE` retains the legacy MZG1 selector. Both
+paths fail closed on invalid selection and cannot be enabled together.
 
 The accepted engine divides memory as follows:
 
@@ -181,8 +184,10 @@ The accepted engine divides memory as follows:
 | recurrent/cache/runtime state, 8K | 0.920 GiB |
 | recurrent/cache/runtime state, 16K | 1.135 GiB |
 | recurrent/cache/runtime state, 32K | 1.566 GiB |
-| 16 mapped expert staging slots | 0.262 GiB |
-| total before allocator/driver overhead | about 104.6 GiB |
+| 16 mapped expert I/O slots | 0.262 GiB |
+| 2 MZG2 selected-prefill output slots, when enabled | 0.033 GiB |
+| 16 additional legacy MZG1 input slots, when enabled | 0.262 GiB |
+| total before allocator/driver overhead | about 104.6 GiB raw / 104.63 GiB MZG2 / 104.9 GiB MZG1 |
 
 Eligible BF16 static projections are quantized one tensor at a time to the
 engine's Q8-128 format. Source buffers are released immediately, bounding peak
@@ -196,25 +201,47 @@ requires an additional guard and is intentionally not accepted on the tested
 
 ## Routed-expert I/O
 
-Each routed expert occupies one contiguous physical SafeTensors span containing
-six MXFP4 data/scale tensors. The engine:
+Each routed expert occupies one contiguous 17,547,264-byte SafeTensors span
+containing six MXFP4 data/scale tensors. The baseline engine opens buffered and
+`O_DIRECT` shard descriptors, keeps QD2 reads in flight, executes misses from
+HIP-mapped staging, and admits them to a device cache asynchronously.
 
-1. opens both buffered and `O_DIRECT` shard descriptors;
-2. registers caller-owned aligned buffers with raw Linux `io_uring`;
-3. keeps two direct reads in flight because the tested 990 PRO saturates at
-   QD2;
-4. reads into HIP-mapped host memory visible to the GPU;
-5. launches the expert without a post-read upload;
-6. refills the queue before consuming the completion;
-7. accumulates selected experts in completion order.
+MZG1 is an optional derived expert store beside—not instead of—the official
+SafeTensors. Each expert becomes one 4 KiB-aligned block with a 192-byte
+descriptor header and twelve Zstandard level-1 frames: two contiguous stripes
+for each of the six native tensors. Packed stripes canonicalize E2M1 negative
+zero to positive zero; every nonzero code and every scale byte is unchanged.
+Zstd content checksums protect every compressed stripe.
 
-The cache is a uniform 32-slot-per-layer online LRU. Admission is two-phase:
-planning preserves every hit needed by the current batch, and commit may
-replace slots only after GPU readers finish. Cache metadata is independent of
-HIP allocation ownership.
+The diagnostic MZG path:
 
-Two HIP streams separate routed-expert work from shared-expert work. Decode
-launches mapped cache hits first while selected misses are outstanding.
+1. issues one indexed `O_DIRECT` block read with raw Linux `io_uring`;
+2. keeps the next read outstanding at QD2;
+3. dispatches twelve stripes over six persistent CPU workers;
+4. decodes into HIP-mapped output staging;
+5. launches the miss and asynchronously admits it to the ordinary device LRU;
+6. publishes cache metadata only after the expert stream completes.
+
+The full store contains 82,432 experts in 1,170.374 GiB, 13.120% below source,
+and passes complete block/SHA-256 verification plus deterministic model
+qualification. It does **not** pass the engine performance gate. Against the
+same engine-hello fixture, MZG prompt wall is 67.210 vs 57.429 seconds and
+post-TTFT decode is 42.118 vs 33.766 seconds (0.404 vs 0.503 token/s).
+Selected two-token prefill is 8.830 vs 7.970 seconds. MZG1 therefore remains an
+opt-in research artifact; raw SafeTensors remain the production default.
+
+MZG2 is the qualified, opt-in GPU-decoder store. It divides the canonical
+expert layout into 1,071 independent 16 KiB output tiles, uses 32 interleaved
+static-rANS states per tile, reads each compressed block directly into mapped
+O_DIRECT staging, and decodes an admitted miss straight into its device-cache
+slot on the existing expert stream. Per-tile checksums, compressed-cursor
+bounds, fixed output offsets, and terminal-state checks fail before cache
+metadata commits. Ninety-two sidecars contain all 82,432 experts in
+1,171.084 GiB, 13.0674105% below source, after immediate and independent
+full-source verification. Engine hello improves about 10.6%, selected prefill
+11.6%, and live 128K/30 11.7--12.8%, with exact outputs. An absolute
+`MOONSHINE_MZG2_EXPERIMENT` directory selects it and is mutually exclusive
+with MZG1. Raw SafeTensors remain the production default.
 
 ## Attention and state
 

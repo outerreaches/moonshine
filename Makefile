@@ -10,8 +10,8 @@ CFLAGS ?= -O3 -ffast-math -g -fno-finite-math-only -march=native \
 HIPFLAGS ?= -O3 -ffast-math -g -fno-finite-math-only -march=native \
 	-pthread -D__HIP_PLATFORM_AMD__ -Wno-unused-command-line-argument \
 	-I$(ROCM_HOME)/include --offload-arch=$(ROCM_ARCH)
-LDLIBS ?= -lm -pthread
-ROCM_LDLIBS ?= -lm -pthread -lhipblas -lhipblaslt
+LDLIBS ?= -lm -pthread -lzstd
+ROCM_LDLIBS ?= -lm -pthread -lhipblas -lhipblaslt -lzstd
 ICU_LDLIBS ?= $(shell pkg-config --libs icu-i18n 2>/dev/null || \
 	echo -licui18n -licuuc -licudata)
 
@@ -35,11 +35,16 @@ K3_OBJS := \
 	k3_engine.o \
 	k3_prefill.o \
 	k3_static_store.o \
+	k3_static_layout.o \
 	k3_expert_cache.o \
 	k3_io_uring.o \
+	k3_mzg.o \
+	k3_mzg2.o \
 	k3_json.o \
 	k3_openai.o \
 	k3_prefix_reuse.o \
+	k3_prefix_catalog.o \
+	k3_prefill_route_index.o \
 	k3_rocm_ops.o \
 	k3_safetensors.o \
 	k3_tokenizer.o
@@ -47,12 +52,16 @@ K3_OBJS := \
 PORTABLE_CPU_TESTS := \
 	tests/test_k3_expert_cache \
 	tests/test_k3_prefix_reuse \
+	tests/test_k3_prefix_catalog \
+	tests/test_k3_prefill_route_index \
+	tests/test_k3_q8_codec \
 	tests/test_k3_json \
 	tests/test_k3_openai
 
 MODEL_CPU_TESTS := \
 	tests/test_k3_prefill_plan \
 	tests/test_k3_safetensors \
+	tests/test_k3_mzg_store \
 	tests/test_k3_io_qd
 
 CPU_TESTS := $(PORTABLE_CPU_TESTS) $(MODEL_CPU_TESTS)
@@ -101,7 +110,7 @@ ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS)
 	test-long-context-retrieval \
 	test-mla-batch-determinism test-mla-batch-kernels \
 	test-moe-tail-profile test-decode-cache-replay test-cache-analyzer \
-	test-reduction-qualification \
+	test-static-q8-screen test-mzg-transcoder test-reduction-qualification \
 	test-openai-sdk clean
 
 all: libmoonshine.a moonshine-chat moonshine-server
@@ -115,6 +124,8 @@ help:
 	@echo "  make test-cpu                Run portable tests without ROCm or weights"
 	@echo "  make test                    Run model-free CPU/ROCm tests"
 	@echo "  make test-openai-sdk         Run the optional official Python SDK SSE fixture"
+	@echo "  make test-mzg-transcoder     Run MZG format/transcoder tests (python-zstandard)"
+	@echo "  make test-static-q8-screen  Run model-free Q8 codec tests and build the offline screen"
 	@echo "  make test-model-layout MOONSHINE_MODEL=/path/to/Kimi-K3"
 	@echo "                               Validate the pinned 96-shard layout and plan"
 	@echo "  make test-model-components MOONSHINE_MODEL=/path/to/Kimi-K3"
@@ -170,17 +181,26 @@ tests: $(ALL_TESTS)
 
 k3_engine.o: k3_engine.cu k3_engine_state.inc k3_engine_prefill.inc k3_engine.h \
 	k3_prefill.h k3_static_store.h k3_expert_cache.h k3_io_uring.h \
-	k3_rocm_ops.h k3_safetensors.h
+	k3_mzg.h k3_mzg2.h k3_rocm_ops.h k3_safetensors.h
 k3_chat.o: k3_chat.c k3_chat.h k3_engine.h k3_tokenizer.h k3_prefix_reuse.h
+k3_prefix_catalog.o: k3_prefix_catalog.c k3_prefix_catalog.h \
+	k3_engine.h k3_prefix_reuse.h
+k3_prefill_route_index.o: k3_prefill_route_index.c \
+	k3_prefill_route_index.h
 k3_prefix_reuse.o: k3_prefix_reuse.c k3_prefix_reuse.h
-k3_chat_cli.o: k3_chat_cli.c k3_chat.h moonshine_version.h
+k3_chat_cli.o: k3_chat_cli.c k3_chat.h k3_engine.h moonshine_version.h
 k3_server.o: k3_server.c k3_chat.h k3_json.h k3_openai.h \
 	moonshine_version.h
 k3_prefill.o: k3_prefill.c k3_prefill.h k3_safetensors.h
 k3_static_store.o: k3_static_store.cu k3_static_store.h \
 	k3_rocm_ops.h k3_safetensors.h
+k3_static_layout.o: k3_static_layout.c k3_static_store.h k3_safetensors.h
+k3_q8_codec.o: k3_q8_codec.c k3_q8_codec.h
+k3_q8_codec.o: CFLAGS += -fno-fast-math -frounding-math
 k3_expert_cache.o: k3_expert_cache.c k3_expert_cache.h
 k3_io_uring.o: k3_io_uring.c k3_io_uring.h
+k3_mzg.o: k3_mzg.c k3_mzg.h
+k3_mzg2.o: k3_mzg2.cu k3_mzg2.h
 k3_json.o: k3_json.c k3_json.h
 k3_openai.o: k3_openai.c k3_openai.h k3_json.h k3_chat.h
 k3_rocm_ops.o: k3_rocm_ops.cu k3_rocm_ops.h
@@ -189,8 +209,25 @@ k3_tokenizer.o: k3_tokenizer.c k3_tokenizer.h
 tests/test_k3_chat_session.o: tests/test_k3_chat_session.c k3_chat.h
 tests/test_k3_long_context.o: tests/test_k3_long_context.c k3_chat.h
 tests/test_k3_openai.o: tests/test_k3_openai.c k3_openai.h k3_chat.h
+tests/test_k3_mzg_store.o: tests/test_k3_mzg_store.c k3_mzg.h k3_safetensors.h
 tests/test_k3_prefix_reuse.o: tests/test_k3_prefix_reuse.c k3_prefix_reuse.h
+tests/test_k3_prefix_catalog.o: tests/test_k3_prefix_catalog.c \
+	k3_prefix_catalog.h k3_engine.h
+tests/test_k3_state_checkpoint.o: tests/test_k3_state_checkpoint.cu k3_engine.h
+tests/test_k3_prefill_route_index.o: tests/test_k3_prefill_route_index.c \
+	k3_prefill_route_index.h
 tests/test_k3_tokenizer.o: tests/test_k3_tokenizer.c k3_tokenizer.h
+tools/transcode_mzg2_layer.o: tools/transcode_mzg2_layer.cu \
+	k3_mzg2.h k3_safetensors.h
+tools/screen_static_q8.o: tools/screen_static_q8.c \
+	k3_q8_codec.h k3_static_store.h k3_safetensors.h
+
+tools/transcode_mzg2_layer: tools/transcode_mzg2_layer.o k3_safetensors.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tools/screen_static_q8: tools/screen_static_q8.o k3_q8_codec.o \
+		k3_static_layout.o k3_safetensors.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
 
 tests/test_k3_expert_cache: tests/test_k3_expert_cache.o k3_expert_cache.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
@@ -200,6 +237,18 @@ tests/test_k3_json: tests/test_k3_json.o k3_json.o
 
 tests/test_k3_prefix_reuse: tests/test_k3_prefix_reuse.o k3_prefix_reuse.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+tests/test_k3_prefix_catalog: tests/test_k3_prefix_catalog.o \
+		k3_prefix_catalog.o k3_prefix_reuse.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+tests/test_k3_prefill_route_index: tests/test_k3_prefill_route_index.o \
+		k3_prefill_route_index.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_k3_q8_codec: tests/test_k3_q8_codec.o k3_q8_codec.o \
+		k3_static_layout.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
 
 tests/test_k3_openai: tests/test_k3_openai.o k3_openai.o k3_json.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
@@ -231,9 +280,20 @@ test-cache-analyzer:
 		$(PYTHON) -m unittest discover -s tests \
 		-p 'test_analyze_decode_cache.py' -v
 
+test-static-q8-screen: tests/test_k3_q8_codec tools/screen_static_q8
+	./tests/test_k3_q8_codec
+	./tools/screen_static_q8 --self-test
+
+test-mzg-transcoder:
+	PYTHONDONTWRITEBYTECODE=1 \
+		$(PYTHON) -m unittest -v tests/test_transcode_mzg.py
+
 test-cpu: $(PORTABLE_CPU_TESTS) test-cache-analyzer
 	./tests/test_k3_expert_cache
 	./tests/test_k3_prefix_reuse
+	./tests/test_k3_prefix_catalog
+	./tests/test_k3_prefill_route_index
+	./tests/test_k3_q8_codec
 	./tests/test_k3_json
 	./tests/test_k3_openai
 
@@ -390,5 +450,7 @@ test-reduction-qualification: check-model \
 
 clean:
 	rm -f libmoonshine.a moonshine-chat moonshine-server \
-		k3_chat_cli.o k3_server.o \
+		k3_chat_cli.o k3_server.o k3_q8_codec.o \
+		tools/transcode_mzg2_layer tools/transcode_mzg2_layer.o \
+		tools/screen_static_q8 tools/screen_static_q8.o \
 		$(K3_OBJS) tests/*.o $(ALL_TESTS)

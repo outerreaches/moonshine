@@ -63,6 +63,7 @@ typedef struct {
     bool        clear_expert_cache_per_request;
     const char *decode_diagnostics_prefix;
     bool        capture_state_digest;
+    bool        router_logits_tap;
 } server_config;
 
 typedef struct {
@@ -267,6 +268,9 @@ static void usage(FILE *stream, const char *program) {
         "                        Write sensitive decode cache/ledger/route CSVs\n"
         "  --decode-state-digest\n"
         "                        Log state-comparison fingerprints (expensive)\n"
+        "  --router-logits-tap\n"
+        "                        With --decode-diagnostics: also dump raw per-step\n"
+        "                        router logits (sensitive, qualification-only)\n"
         "  -h, --help            Show this help\n"
         "  --version             Show the Moonshine version\n"
         "\n"
@@ -310,6 +314,10 @@ static bool parse_args(int argc, char **argv, server_config *config) {
         }
         if (strcmp(argument, "--decode-state-digest") == 0) {
             config->capture_state_digest = true;
+            continue;
+        }
+        if (strcmp(argument, "--router-logits-tap") == 0) {
+            config->router_logits_tap = true;
             continue;
         }
         if (strcmp(argument, "--host") == 0 ||
@@ -1858,6 +1866,7 @@ int main(int argc, char **argv) {
         .decode_diagnostics_prefix =
             config.decode_diagnostics_prefix,
         .capture_state_digest = config.capture_state_digest,
+        .router_logits_tap = config.router_logits_tap,
     };
     if (!k3_chat_session_create(
             &session, &session_config, &stats,
@@ -1872,7 +1881,7 @@ int main(int argc, char **argv) {
         SERVER_LOG_INFO, "server.ready", NULL,
         "listen=http://%s:%u model=%s version=%s context=%u "
         "max_output=%u load=%.3fs static=%.3f_GiB cache=%.3f_GiB "
-        "state=%.3f_GiB slots=1 auth=%s range_backend=%s",
+        "state=%.3f_GiB slots=1 auth=%s range_backend=%s experts=%s",
         config.host, config.port, MOONSHINE_MODEL_ID,
         MOONSHINE_VERSION, config.context,
         effective_max_output_tokens(&config),
@@ -1883,7 +1892,9 @@ int main(int argc, char **argv) {
         (double)stats.state_bytes / (1024.0 * 1024.0 * 1024.0),
         config.api_key == NULL ? "off" : "on",
         config.range_backend == K3_PREFILL_PROJECTION_DEFAULT ?
-            "default" : "kda-blas");
+            "default" : "kda-blas",
+        stats.mzg2_experiment_store ? "mzg2-experiment" :
+            stats.mzg_expert_store ? "mzg1" : "safetensors");
 
     while (!stop_requested) {
         struct sockaddr_storage peer_address;

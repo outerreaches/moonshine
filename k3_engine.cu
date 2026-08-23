@@ -2,6 +2,8 @@
 
 #include "k3_expert_cache.h"
 #include "k3_io_uring.h"
+#include "k3_mzg.h"
+#include "k3_mzg2.h"
 #include "k3_prefill.h"
 #include "k3_rocm_ops.h"
 #include "k3_safetensors.h"
@@ -50,6 +52,12 @@ enum {
     K3_ENGINE_MLA_CACHE_DIM = 576,
     K3_ENGINE_MLA_SCRATCH_COUNT = 8,
     K3_ENGINE_VOCAB = 163840,
+};
+
+enum {
+    K3_ENGINE_EXPERT_RAW = 0,
+    K3_ENGINE_EXPERT_MZG1 = 1,
+    K3_ENGINE_EXPERT_MZG2 = 2,
 };
 
 enum {
@@ -106,8 +114,12 @@ typedef struct {
     uint64_t relative[K3_ENGINE_EXPERT_TENSOR_COUNT];
     uint64_t physical_start;
     uint64_t aligned_start;
+    uint64_t read_offset;
     uint32_t aligned_bytes;
+    uint32_t read_bytes;
+    int read_fd;
     uint16_t shard;
+    uint8_t codec;
 } k3_engine_expert_layout;
 
 static const uint64_t K3_ENGINE_EXPERT_BYTES =
@@ -128,11 +140,17 @@ static const uint64_t K3_ENGINE_BF16_EXTRA_GUARD_BYTES =
 struct k3_engine {
     k3_st_model model;
     bool model_open;
+    k3_mzg_store *mzg_store;
+    k3_mzg2_store *mzg2_store;
     k3_static_store *static_store;
     k3_expert_cache *cache_policy;
     k3_io_uring *staging_ring;
     void **staging_host;
     void **staging_device;
+    void **mzg_staging_host;
+    uint32_t *mzg2_errors_host;
+    uint32_t *mzg2_errors_device;
+    void *mzg2_prefill_output[K3_ENGINE_STREAM_QD];
     struct iovec *staging_iov;
     uint16_t staging_slots;
     uint16_t experts_per_layer;
@@ -171,11 +189,14 @@ struct k3_engine {
     FILE *decode_ledger;
     FILE *decode_routes;
     FILE *decode_cache;
+    /* Content-free per-step router-logits capture (qualification tap). */
+    FILE *decode_router_logits;
     k3_engine_decode_stats decode_stats;
     uint64_t decode_capture;
     off_t decode_ledger_offset;
     off_t decode_routes_offset;
     off_t decode_cache_offset;
+    off_t decode_router_logits_offset;
     bool decode_diagnostics_active;
 };
 
@@ -267,6 +288,7 @@ static bool context_memory_bytes(
 static bool residency_preflight(
         const k3_st_model *model,
         bool q8_projections,
+        uint64_t extra_staging_bytes,
         uint64_t cache_bytes,
         uint64_t mla_cache_bytes,
         uint64_t workspace_bytes,
@@ -293,8 +315,15 @@ static bool residency_preflight(
         mla_cache_bytes +
         K3_ENGINE_MLA_PACKED_BYTES +
         workspace_bytes;
-    const uint64_t staging_bytes =
+    const uint64_t mapped_staging_bytes =
         (uint64_t)staging_slots * K3_ENGINE_STAGING_BYTES;
+    if (mapped_staging_bytes > UINT64_MAX - extra_staging_bytes) {
+        engine_error(error, error_size,
+                     "K3 staging residency overflow");
+        return false;
+    }
+    const uint64_t staging_bytes =
+        mapped_staging_bytes + extra_staging_bytes;
     const uint64_t guard_bytes =
         K3_ENGINE_HOST_GUARD_BYTES +
         (q8_projections ?
@@ -380,11 +409,22 @@ extern "C" void k3_engine_destroy(k3_engine *engine) {
     if (engine->decode_ledger) {
         (void)fclose(engine->decode_ledger);
     }
+    if (engine->decode_router_logits) {
+        (void)fclose(engine->decode_router_logits);
+    }
     if (engine->expert_stream) {
         (void)hipStreamDestroy(engine->expert_stream);
     }
     if (engine->shared_stream) {
         (void)hipStreamDestroy(engine->shared_stream);
+    }
+    if (engine->mzg2_errors_host) {
+        (void)hipHostFree(engine->mzg2_errors_host);
+    }
+    for (uint32_t i = 0u; i < K3_ENGINE_STREAM_QD; i++) {
+        if (engine->mzg2_prefill_output[i]) {
+            (void)hipFree(engine->mzg2_prefill_output[i]);
+        }
     }
     if (engine->route_weights_host) {
         (void)hipHostFree(engine->route_weights_host);
@@ -408,8 +448,11 @@ extern "C" void k3_engine_destroy(k3_engine *engine) {
             if (engine->staging_host[i]) {
                 (void)hipHostFree(engine->staging_host[i]);
             }
+            free(engine->mzg_staging_host ?
+                 engine->mzg_staging_host[i] : NULL);
         }
     }
+    free(engine->mzg_staging_host);
     free(engine->staging_iov);
     free(engine->staging_device);
     free(engine->staging_host);
@@ -442,6 +485,8 @@ extern "C" void k3_engine_destroy(k3_engine *engine) {
     if (engine->kda_conv) (void)hipFree(engine->kda_conv);
     if (engine->kda_state) (void)hipFree(engine->kda_state);
     if (engine->cache) (void)hipFree(engine->cache);
+    k3_mzg_store_destroy(engine->mzg_store);
+    k3_mzg2_store_destroy(engine->mzg2_store);
     k3_expert_cache_destroy(engine->cache_policy);
     k3_static_store_destroy(engine->static_store);
     if (engine->model_open) k3_st_model_close(&engine->model);
@@ -735,6 +780,38 @@ extern "C" bool k3_engine_create(
     engine->model_open = true;
     engine->model_layout_crc64 =
         engine_model_layout_crc64(&engine->model);
+    if (!k3_mzg_store_open_optional(
+            &engine->mzg_store, model_root,
+            K3_ENGINE_MOE_LAYERS, K3_ENGINE_EXPERTS,
+            error, error_size) ||
+        !k3_mzg2_store_open_optional(
+            &engine->mzg2_store, error, error_size)) {
+        k3_engine_destroy(engine);
+        return false;
+    }
+    if (engine->mzg_store && engine->mzg2_store) {
+        engine_error(error, error_size,
+                     "MZG1 and MZG2 stores are mutually exclusive");
+        k3_engine_destroy(engine);
+        return false;
+    }
+    if ((engine->mzg_store &&
+         k3_mzg_store_max_block_bytes(engine->mzg_store) >
+             K3_ENGINE_STAGING_BYTES) ||
+        (engine->mzg2_store &&
+         k3_mzg2_store_max_block_bytes(engine->mzg2_store) >
+             K3_ENGINE_STAGING_BYTES)) {
+        engine_error(error, error_size,
+                     "compressed expert block exceeds K3 staging capacity");
+        k3_engine_destroy(engine);
+        return false;
+    }
+    if (engine->mzg2_store && experts_per_layer < K3_ENGINE_TOP_K) {
+        engine_error(error, error_size,
+                     "MZG2 experiment requires at least top-k cache slots");
+        k3_engine_destroy(engine);
+        return false;
+    }
 
     const uint64_t cache_slots =
         (uint64_t)K3_ENGINE_MOE_LAYERS *
@@ -750,6 +827,13 @@ extern "C" bool k3_engine_create(
         cache_slots * K3_ENGINE_EXPERT_BYTES;
     if (!residency_preflight(
             &engine->model, q8_projections,
+            engine->mzg_store ?
+                (uint64_t)staging_slots *
+                    K3_ENGINE_STAGING_BYTES :
+                engine->mzg2_store ?
+                    (uint64_t)K3_ENGINE_STREAM_QD *
+                        K3_ENGINE_EXPERT_BYTES :
+                    0u,
             engine->cache_bytes, engine->mla_cache_bytes,
             engine->workspace_bytes, staging_slots,
             error, error_size)) {
@@ -809,15 +893,56 @@ extern "C" bool k3_engine_create(
         staging_slots, sizeof(*engine->staging_host));
     engine->staging_device = (void **)calloc(
         staging_slots, sizeof(*engine->staging_device));
+    engine->mzg_staging_host = engine->mzg_store ?
+        (void **)calloc(
+            staging_slots, sizeof(*engine->mzg_staging_host)) :
+        NULL;
     engine->staging_iov = (struct iovec *)calloc(
         staging_slots, sizeof(*engine->staging_iov));
     if (!engine->staging_host ||
         !engine->staging_device ||
+        (engine->mzg_store && !engine->mzg_staging_host) ||
         !engine->staging_iov) {
         engine_error(error, error_size,
                      "K3 staging table allocation failed");
         k3_engine_destroy(engine);
         return false;
+    }
+    if (engine->mzg2_store) {
+        status = hipHostMalloc(
+            (void **)&engine->mzg2_errors_host,
+            (size_t)staging_slots * sizeof(*engine->mzg2_errors_host),
+            hipHostMallocMapped);
+        if (status == hipSuccess) {
+            status = hipHostGetDevicePointer(
+                (void **)&engine->mzg2_errors_device,
+                engine->mzg2_errors_host, 0);
+        }
+        if (status != hipSuccess) {
+            engine_error(error, error_size,
+                         "MZG2 error flags failed: %s",
+                         hipGetErrorString(status));
+            k3_engine_destroy(engine);
+            return false;
+        }
+        memset(
+            engine->mzg2_errors_host, 0,
+            (size_t)staging_slots *
+                sizeof(*engine->mzg2_errors_host));
+        for (uint32_t buffer = 0u;
+             buffer < K3_ENGINE_STREAM_QD; buffer++) {
+            status = hipMalloc(
+                &engine->mzg2_prefill_output[buffer],
+                K3_ENGINE_EXPERT_BYTES);
+            if (status != hipSuccess) {
+                engine_error(
+                    error, error_size,
+                    "MZG2 prefill output %u failed: %s",
+                    buffer, hipGetErrorString(status));
+                k3_engine_destroy(engine);
+                return false;
+            }
+        }
     }
     for (uint16_t slot = 0; slot < staging_slots; slot++) {
         status = hipHostMalloc(
@@ -837,8 +962,23 @@ extern "C" bool k3_engine_create(
             k3_engine_destroy(engine);
             return false;
         }
+        if (engine->mzg_store) {
+            const int allocation_status = posix_memalign(
+                &engine->mzg_staging_host[slot], 4096u,
+                K3_ENGINE_STAGING_BYTES);
+            if (allocation_status != 0) {
+                engine_error(
+                    error, error_size,
+                    "K3 MZG input slot %u failed: %s",
+                    slot, strerror(allocation_status));
+                k3_engine_destroy(engine);
+                return false;
+            }
+        }
         engine->staging_iov[slot].iov_base =
-            engine->staging_host[slot];
+            engine->mzg_store ?
+                engine->mzg_staging_host[slot] :
+                engine->staging_host[slot];
         engine->staging_iov[slot].iov_len =
             K3_ENGINE_STAGING_BYTES;
     }
@@ -871,8 +1011,14 @@ extern "C" bool k3_engine_create(
         engine->workspace_bytes;
     measured.staging_slots = staging_slots;
     measured.staging_bytes =
-        (uint64_t)staging_slots *
-        K3_ENGINE_STAGING_BYTES;
+        (uint64_t)staging_slots * K3_ENGINE_STAGING_BYTES *
+            (engine->mzg_store ? 2u : 1u) +
+        (engine->mzg2_store ?
+            (uint64_t)K3_ENGINE_STREAM_QD *
+                K3_ENGINE_EXPERT_BYTES :
+            0u);
+    measured.mzg_expert_store = engine->mzg_store != NULL;
+    measured.mzg2_experiment_store = engine->mzg2_store != NULL;
     measured.startup_seconds =
         elapsed_seconds(startup_start, startup_end);
     engine->causal_state_valid = true;
@@ -1014,6 +1160,42 @@ static bool find_expert_layout(
     layout->aligned_bytes =
         (uint32_t)(aligned_end - layout->aligned_start);
     layout->shard = tensor[0]->shard;
+    layout->read_fd =
+        engine->model.shards[layout->shard].direct_fd;
+    layout->read_offset = layout->aligned_start;
+    layout->read_bytes = layout->aligned_bytes;
+    if (engine->mzg2_store) {
+        k3_mzg2_span span;
+        if (k3_mzg2_store_span(
+                engine->mzg2_store, layer, expert, &span)) {
+            if (span.bytes > K3_ENGINE_STAGING_BYTES) {
+                engine_error(
+                    error, error_size,
+                    "oversized MZG2 layer-%u expert-%u",
+                    layer, expert);
+                return false;
+            }
+            layout->codec = K3_ENGINE_EXPERT_MZG2;
+            layout->read_fd = span.direct_fd;
+            layout->read_offset = span.offset;
+            layout->read_bytes = span.bytes;
+        }
+    } else if (engine->mzg_store) {
+        k3_mzg_span span;
+        if (!k3_mzg_store_span(
+                engine->mzg_store, layer, expert, &span) ||
+            span.bytes > K3_ENGINE_STAGING_BYTES) {
+            engine_error(
+                error, error_size,
+                "missing/oversized MZG layer-%u expert-%u",
+                layer, expert);
+            return false;
+        }
+        layout->codec = K3_ENGINE_EXPERT_MZG1;
+        layout->read_fd = span.direct_fd;
+        layout->read_offset = span.offset;
+        layout->read_bytes = span.bytes;
+    }
     for (uint32_t i = 0;
          i < K3_ENGINE_EXPERT_TENSOR_COUNT; i++) {
         if (tensor[i]->physical_offset < start ||
@@ -1069,13 +1251,46 @@ static k3_io_request make_expert_request(
         const k3_engine *engine,
         uint32_t rank,
         const k3_engine_expert_layout *layout) {
+    (void)engine;
     k3_io_request request;
-    request.fd = engine->model.shards[layout->shard].direct_fd;
-    request.offset = layout->aligned_start;
-    request.bytes = layout->aligned_bytes;
+    request.fd = layout->read_fd;
+    request.offset = layout->read_offset;
+    request.bytes = layout->read_bytes;
     request.buffer_index = (uint16_t)rank;
     request.user_data = rank;
     return request;
+}
+
+static uint64_t expert_required_read_bytes(
+        const k3_engine_expert_layout *layout) {
+    return layout->codec != K3_ENGINE_EXPERT_RAW ?
+        layout->read_bytes :
+        layout->physical_start - layout->aligned_start +
+            K3_ENGINE_EXPERT_BYTES;
+}
+
+static bool decode_mzg_expert(
+        k3_engine *engine,
+        const k3_engine_expert_layout *layout,
+        uint32_t layer,
+        uint32_t expert,
+        uint16_t buffer,
+        void *destination,
+        char *error,
+        size_t error_size) {
+    if (layout->codec != K3_ENGINE_EXPERT_MZG1) return true;
+    if (!engine->mzg_store || !engine->mzg_staging_host ||
+        buffer >= engine->staging_slots ||
+        !destination) {
+        engine_error(error, error_size,
+                     "invalid MZG decode destination");
+        return false;
+    }
+    return k3_mzg_store_decode(
+        engine->mzg_store, layer, expert,
+        engine->mzg_staging_host[buffer],
+        layout->read_bytes, destination,
+        error, error_size);
 }
 
 static void abort_layer_moe(k3_engine *engine, uint16_t cache_layer) {
@@ -1616,7 +1831,24 @@ static bool decode_routed_layer(
         if (accesses[rank].hit) {
             hit_mask |= UINT32_C(1) << rank;
         } else {
-            physical_read_bytes += layouts[rank].aligned_bytes;
+            physical_read_bytes += layouts[rank].read_bytes;
+        }
+    }
+    if (engine->decode_router_logits) {
+        float router_logits_snapshot[K3_ENGINE_EXPERTS];
+        if (hipMemcpy(
+                router_logits_snapshot,
+                engine->moe_scratch[M_LOGITS],
+                sizeof(router_logits_snapshot),
+                hipMemcpyDeviceToHost) != hipSuccess ||
+            fwrite(router_logits_snapshot,
+                   sizeof(float), K3_ENGINE_EXPERTS,
+                   engine->decode_router_logits)
+                != K3_ENGINE_EXPERTS) {
+            engine_error(error, error_size,
+                         "layer-%u router logits capture failed", layer);
+            abort_layer_moe(engine, cache_layer);
+            return false;
         }
     }
     if (diagnostics) {
@@ -1764,10 +1996,8 @@ static bool decode_routed_layer(
                 (uint32_t)completions[i].user_data;
             const uint64_t required_bytes =
                 rank < K3_ENGINE_TOP_K ?
-                layouts[rank].physical_start -
-                    layouts[rank].aligned_start +
-                    K3_ENGINE_EXPERT_BYTES :
-                UINT64_MAX;
+                    expert_required_read_bytes(&layouts[rank]) :
+                    UINT64_MAX;
             if (rank >= K3_ENGINE_TOP_K ||
                 completions[i].buffer_index != rank ||
                 completions[i].result < 0 ||
@@ -1781,14 +2011,54 @@ static bool decode_routed_layer(
                              completions[i].result,
                              (unsigned long long)required_bytes,
                              rank < K3_ENGINE_TOP_K ?
-                                 layouts[rank].aligned_bytes : 0u);
+                                 layouts[rank].read_bytes : 0u);
                 abort_layer_moe(engine, cache_layer);
                 return false;
             }
-            uint8_t *base =
-                (uint8_t *)engine->staging_device[rank] +
-                (layouts[rank].physical_start -
-                 layouts[rank].aligned_start);
+
+            void *cache_destination = accesses[rank].admit ?
+                k3_engine_cache_slot(
+                    engine, accesses[rank].destination_slot) :
+                NULL;
+            uint8_t *base = NULL;
+            if (layouts[rank].codec == K3_ENGINE_EXPERT_MZG1) {
+                if (!decode_mzg_expert(
+                        engine, &layouts[rank], layer,
+                        expert_ids[rank], (uint16_t)rank,
+                        engine->staging_host[rank],
+                        error, error_size)) {
+                    abort_layer_moe(engine, cache_layer);
+                    return false;
+                }
+                base = (uint8_t *)engine->staging_device[rank];
+            } else if (layouts[rank].codec == K3_ENGINE_EXPERT_MZG2) {
+                if (!accesses[rank].admit || !cache_destination ||
+                    !engine->mzg2_errors_device ||
+                    !k3_mzg2_store_launch(
+                        engine->mzg2_store, layer,
+                        expert_ids[rank],
+                        engine->staging_host[rank],
+                        engine->staging_device[rank],
+                        layouts[rank].read_bytes,
+                        cache_destination,
+                        engine->mzg2_errors_device + rank,
+                        engine->expert_stream,
+                        error, error_size)) {
+                    if (!error || !error[0]) {
+                        engine_error(
+                            error, error_size,
+                            "layer-%u MZG2 expert %u cannot be admitted",
+                            layer, expert_ids[rank]);
+                    }
+                    abort_layer_moe(engine, cache_layer);
+                    return false;
+                }
+                base = (uint8_t *)cache_destination;
+            } else {
+                base = (uint8_t *)engine->staging_device[rank] +
+                    (layouts[rank].physical_start -
+                     layouts[rank].aligned_start);
+            }
             if (!launch_expert(
                     engine, rank, base, &layouts[rank])) {
                 engine_error(error, error_size,
@@ -1798,12 +2068,11 @@ static bool decode_routed_layer(
                 abort_layer_moe(engine, cache_layer);
                 return false;
             }
-            if (accesses[rank].admit) {
-                void *destination = k3_engine_cache_slot(
-                    engine, accesses[rank].destination_slot);
-                status = destination ?
+            if (accesses[rank].admit &&
+                layouts[rank].codec != K3_ENGINE_EXPERT_MZG2) {
+                status = cache_destination ?
                     hipMemcpyAsync(
-                        destination, base, K3_ENGINE_EXPERT_BYTES,
+                        cache_destination, base, K3_ENGINE_EXPERT_BYTES,
                         hipMemcpyDeviceToDevice,
                         engine->expert_stream) :
                     hipErrorInvalidValue;
@@ -1846,6 +2115,20 @@ static bool decode_routed_layer(
                      hipGetErrorString(status));
         abort_layer_moe(engine, cache_layer);
         return false;
+    }
+    if (engine->mzg2_store) {
+        for (uint32_t rank = 0u; rank < K3_ENGINE_TOP_K; rank++) {
+            if (layouts[rank].codec == K3_ENGINE_EXPERT_MZG2 &&
+                engine->mzg2_errors_host[rank] != 0u) {
+                engine_error(
+                    error, error_size,
+                    "layer-%u MZG2 expert %u integrity failure 0x%x",
+                    layer, expert_ids[rank],
+                    engine->mzg2_errors_host[rank]);
+                abort_layer_moe(engine, cache_layer);
+                return false;
+            }
+        }
     }
 
     if (!k3_rocm_weighted_sum_bf16(
@@ -2135,7 +2418,9 @@ static bool capture_decode_diagnostics_offsets(
         size_t error_size) {
     if (fflush(engine->decode_ledger) != 0 ||
         fflush(engine->decode_routes) != 0 ||
-        fflush(engine->decode_cache) != 0) {
+        fflush(engine->decode_cache) != 0 ||
+        (engine->decode_router_logits &&
+         fflush(engine->decode_router_logits) != 0)) {
         engine_error(error, error_size,
                      "flushing decode diagnostics before capture failed: %s",
                      strerror(errno));
@@ -2144,12 +2429,17 @@ static bool capture_decode_diagnostics_offsets(
     engine->decode_ledger_offset = ftello(engine->decode_ledger);
     engine->decode_routes_offset = ftello(engine->decode_routes);
     engine->decode_cache_offset = ftello(engine->decode_cache);
+    if (engine->decode_router_logits) {
+        engine->decode_router_logits_offset =
+            ftello(engine->decode_router_logits);
+    }
     if (engine->decode_ledger_offset < 0 ||
         engine->decode_routes_offset < 0 ||
-        engine->decode_cache_offset < 0) {
+        engine->decode_cache_offset < 0 ||
+        (engine->decode_router_logits &&
+         engine->decode_router_logits_offset < 0)) {
         engine_error(error, error_size,
-                     "recording decode diagnostics offsets failed: %s",
-                     strerror(errno));
+                     "recording decode diagnostics offsets failed");
         return false;
     }
     return true;
@@ -2174,7 +2464,11 @@ static bool rollback_decode_diagnostics_capture(k3_engine *engine) {
         engine->decode_routes, engine->decode_routes_offset);
     const bool cache_ok = rollback_decode_diagnostics_stream(
         engine->decode_cache, engine->decode_cache_offset);
-    return ledger_ok && routes_ok && cache_ok;
+    const bool logits_ok = !engine->decode_router_logits ||
+        rollback_decode_diagnostics_stream(
+            engine->decode_router_logits,
+            engine->decode_router_logits_offset);
+    return ledger_ok && routes_ok && cache_ok && logits_ok;
 }
 
 extern "C" bool k3_engine_configure_decode_diagnostics(
@@ -2265,6 +2559,50 @@ extern "C" bool k3_engine_configure_decode_diagnostics(
     engine->decode_ledger = ledger;
     engine->decode_routes = routes;
     engine->decode_cache = cache;
+    return true;
+}
+
+extern "C" bool k3_engine_configure_router_logits_tap(
+        k3_engine *engine,
+        const char *prefix,
+        char *error,
+        size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (!engine || !prefix || prefix[0] == '\0' ||
+        !engine->decode_ledger ||
+        engine->decode_router_logits) {
+        engine_error(error, error_size,
+                     "invalid router logits tap configuration");
+        return false;
+    }
+    char logits_path[4096];
+    int logits_length = snprintf(
+        logits_path, sizeof(logits_path), "%s.router_logits.f32", prefix);
+    if (logits_length < 0 ||
+        (size_t)logits_length >= sizeof(logits_path)) {
+        engine_error(error, error_size,
+                     "router logits prefix is too long");
+        return false;
+    }
+    FILE *logits = open_private_decode_diagnostics_file(logits_path);
+    if (!logits) {
+        engine_error(error, error_size,
+                     "opening router logits %s failed: %s",
+                     logits_path, strerror(errno));
+        return false;
+    }
+    if (fprintf(
+            logits,
+            "# moonshine-router-logits-v1 layers=92 experts=896 "
+            "dtype=float32 order=step-major-layer-minor\n") < 0 ||
+        fflush(logits) != 0) {
+        engine_error(error, error_size,
+                     "writing router logits header failed");
+        (void)fclose(logits);
+        (void)unlink(logits_path);
+        return false;
+    }
+    engine->decode_router_logits = logits;
     return true;
 }
 
@@ -2428,7 +2766,9 @@ extern "C" bool k3_engine_end_decode_diagnostics(
     if (!write_decode_ledger(engine, error, error_size) ||
         fflush(engine->decode_ledger) != 0 ||
         fflush(engine->decode_routes) != 0 ||
-        fflush(engine->decode_cache) != 0) {
+        fflush(engine->decode_cache) != 0 ||
+        (engine->decode_router_logits &&
+         fflush(engine->decode_router_logits) != 0)) {
         if (!error || error_size == 0u || error[0] == '\0') {
             engine_error(error, error_size,
                          "flushing decode diagnostics failed: %s",

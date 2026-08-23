@@ -21,6 +21,8 @@ typedef struct {
     uint64_t staging_bytes;
     uint32_t cache_slots;
     uint32_t staging_slots;
+    bool     mzg_expert_store;
+    bool     mzg2_experiment_store;
     double   startup_seconds;
     double   mla_pack_seconds;
 } k3_engine_stats;
@@ -108,6 +110,7 @@ typedef struct {
 
 typedef struct {
     uint32_t format_version;
+    uint32_t context;
     uint32_t token_position;
     uint64_t model_layout_crc64;
     uint64_t payload_bytes;
@@ -130,7 +133,8 @@ typedef enum {
  * positions; filled-context latency and quality are separate qualifications.
  *   - source-precision or streamed/Q8 permanent static weights;
  *   - device-resident per-layer expert cache;
- *   - mapped fixed-registered O_DIRECT staging slots;
+ *   - mapped fixed-registered O_DIRECT output staging slots;
+ *   - optional separate MZG input slots and six-worker CPU decode;
  *   - KDA recurrence/conv state and MLA cache/packed-key state.
  *
  * Before payload allocation, Linux hosts must pass a CMA-aware load/runtime
@@ -219,6 +223,19 @@ void k3_engine_get_cache_stats(
  * An aborted capture is rolled back to its pre-request file offsets.
  */
 bool k3_engine_configure_decode_diagnostics(
+    k3_engine *engine,
+    const char *prefix,
+    char *error,
+    size_t error_size);
+
+/*
+ * Optional content-free companion capture for decode diagnostics: appends
+ * the raw 896 router logits (float32) of every routed layer at every decode
+ * step to PREFIX.router_logits.f32, step-major and layer-minor. Requires
+ * k3_engine_configure_decode_diagnostics with the same PREFIX. Scores only;
+ * no token IDs, text, or weights. Aborted captures roll back identically.
+ */
+bool k3_engine_configure_router_logits_tap(
     k3_engine *engine,
     const char *prefix,
     char *error,

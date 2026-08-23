@@ -5,6 +5,8 @@ core
 core.*
 /moonshine-chat
 /moonshine-server
+/tools/screen_static_q8
+/tools/transcode_mzg2_layer
 tests/test_k3_*
 !tests/test_k3_*.c
 !tests/test_k3_*.cu

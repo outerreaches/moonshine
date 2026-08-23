@@ -32,12 +32,6 @@ static double elapsed_seconds(struct timespec start,
            (double)(end.tv_nsec - start.tv_nsec) / 1e9;
 }
 
-static bool is_static_text_tensor(const k3_st_tensor *tensor) {
-    return tensor && tensor->name &&
-           strncmp(tensor->name, "language_model.", 15u) == 0 &&
-           strstr(tensor->name, ".block_sparse_moe.experts.") == NULL &&
-           strstr(tensor->name, "embed_tokens.weight") == NULL;
-}
 
 static bool q8_layout(const k3_st_tensor *tensor,
                       uint64_t *data_bytes,
@@ -55,24 +49,6 @@ static bool q8_layout(const k3_st_tensor *tensor,
     return true;
 }
 
-extern "C" bool k3_static_weight_is_q8_candidate(
-        const k3_st_tensor *tensor) {
-    if (!tensor || tensor->dtype != K3_ST_DTYPE_BF16 ||
-        tensor->ndim != 2u || tensor->shape[1] % 128u != 0u ||
-        strstr(tensor->name, ".block_sparse_moe.experts.") ||
-        strstr(tensor->name, "embed_tokens.weight") ||
-        strstr(tensor->name, "lm_head.weight") ||
-        strstr(tensor->name, ".block_sparse_moe.gate.") ||
-        strstr(tensor->name, "_res_proj.weight") ||
-        strstr(tensor->name, "output_attn_res_proj.weight")) {
-        return false;
-    }
-    const size_t length = strlen(tensor->name);
-    static const char suffix[] = ".self_attn.kv_b_proj.weight";
-    const size_t suffix_length = sizeof(suffix) - 1u;
-    return length < suffix_length ||
-           strcmp(tensor->name + length - suffix_length, suffix) != 0;
-}
 
 extern "C" bool k3_static_store_plan(
         const k3_st_model      *model,
@@ -92,7 +68,7 @@ extern "C" bool k3_static_store_plan(
     memset(&planned, 0, sizeof(planned));
     for (size_t i = 0; i < model->tensor_count; i++) {
         const k3_st_tensor *tensor = &model->tensors[i];
-        if (!is_static_text_tensor(tensor)) continue;
+        if (!k3_static_weight_is_text_tensor(tensor)) continue;
         planned.source_bytes += tensor->byte_length;
         planned.weight_count++;
 
@@ -190,7 +166,7 @@ extern "C" bool k3_static_store_load(
     for (size_t tensor_index = 0;
          tensor_index < model->tensor_count; tensor_index++) {
         const k3_st_tensor *tensor = &model->tensors[tensor_index];
-        if (!is_static_text_tensor(tensor)) continue;
+        if (!k3_static_weight_is_text_tensor(tensor)) continue;
         k3_static_weight *weight =
             &store->weights[store->count];
         weight->tensor = tensor;

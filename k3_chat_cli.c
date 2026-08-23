@@ -357,14 +357,16 @@ int main(int argc, char **argv) {
     fprintf(
         stderr,
         "engine ready in %.3fs; static=%.3f GiB cache=%.3f GiB "
-        "state=%.3f GiB\n",
+        "state=%.3f GiB experts=%s\n",
         engine_stats.startup_seconds,
         (double)engine_stats.static_store.resident_bytes /
             (1024.0 * 1024.0 * 1024.0),
         (double)engine_stats.cache_bytes /
             (1024.0 * 1024.0 * 1024.0),
         (double)engine_stats.state_bytes /
-            (1024.0 * 1024.0 * 1024.0));
+            (1024.0 * 1024.0 * 1024.0),
+        engine_stats.mzg2_experiment_store ? "mzg2-experiment" :
+            engine_stats.mzg_expert_store ? "mzg1" : "safetensors");
 
     int result = 0;
     if (options.load_path != NULL &&

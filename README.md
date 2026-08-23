@@ -17,17 +17,19 @@ deliberately narrow:
 
 - Linux and ROCm only;
 - tested on `gfx1151` with ROCm 7.2;
-- the pinned official 96-shard Kimi K3 SafeTensors layout only;
+- the pinned official 96-shard Kimi K3 SafeTensors layout, optionally paired
+  with its qualified Moonshine MZG2 derived expert store;
 - dynamically allocated context, capacity-qualified through 128K;
 - greedy next-token inference;
 - one large model process at a time.
 
 The accepted Q8/32 configuration uses about 55.27 GiB for resident static
 weights and 48.11 GiB for the online routed-expert cache. Runtime state is
-0.920 GiB at 8K, 1.566 GiB at 32K, or 4.150 GiB at 128K, plus 0.262 GiB of
-mapped staging. The 128K configuration accounts for about 107.793 GiB before
-allocator/driver overhead. Fully resident BF16 is intentionally rejected on
-the tested 128 GB machine.
+0.920 GiB at 8K, 1.566 GiB at 32K, or 4.150 GiB at 128K. Raw SafeTensors use
+0.262 GiB of mapped staging. MZG2 reuses that input window and adds two
+device-output slots, for 0.294 GiB total staging. The 128K profile remains
+subject to its CMA-aware residency preflight.
+Fully resident BF16 is intentionally rejected on the tested 128 GB machine.
 
 ## How the engine works
 
@@ -45,8 +47,9 @@ official 96-shard SafeTensors checkpoint
              |
              `-- routed MXFP4 experts -> NVMe
                     |
+                    +-- raw SafeTensors by default; opt-in MZG2 sidecars
                     +-- O_DIRECT + raw io_uring, QD2
-                    +-- HIP-mapped fixed staging buffers
+                    +-- bounded wave32 rANS decode direct to cache slots
                     `-- 32-slot/layer online LRU cache (~48.11 GiB)
 ```
 
@@ -168,6 +171,7 @@ The complete 128K capacity evidence and its limits are recorded in
 - x86-64 Linux with a recent kernel supporting `io_uring` and `O_DIRECT`;
 - an AMD ROCm device with enough shared/device-addressable memory;
 - ROCm 7.2 with HIP, hipBLAS, and hipBLASLt development files;
+- Zstandard 1.5 development files (`libzstd-dev` on Ubuntu);
 - about 128 GB of system/unified memory for the accepted Q8/32 engine;
 - about 1.6 TB of local SSD capacity for the official checkpoint;
 - a local filesystem that supports aligned direct I/O (the tested setup uses
@@ -564,8 +568,18 @@ hf download moonshotai/Kimi-K3 \
   --local-dir /path/to/moonshotai__Kimi-K3
 ```
 
-The engine expects all 96 `model-*.safetensors` shards and the original tensor
-names/layout. Validate the directory without allocating the full engine:
+The engine always expects all 96 `model-*.safetensors` shards and the original
+tensor names/layout. `MOONSHINE_EXPERT_STORE=auto` explicitly selects a
+complete `expert-store-mzg1` for routed experts; unset/`off` keeps the
+qualified raw path. Source SafeTensors remain authoritative for static tensors
+and model identity. Validate the directory without allocating the full engine:
+
+`MOONSHINE_MZG2_EXPERIMENT=/absolute/expert-store-mzg2` selects the qualified
+GPU-rANS store. Its 92 sidecars contain all 82,432 experts in 1,171.084 GiB,
+13.0674105% below source. Engine hello, selected prefill, and live 128K/30
+improve by roughly 10.6%, 11.6%, and 11.7--12.8% with exact outputs. It is
+mutually exclusive with MZG1 and remains opt-in; raw SafeTensors are the
+production default.
 
 ```sh
 make test-model-layout MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3

@@ -58,11 +58,13 @@ Also install:
 - GNU Make;
 - binutils (`ar`);
 - ICU development files (`libicu-dev` on Ubuntu);
+- Zstandard development files (`libzstd-dev` on Ubuntu);
 - Git;
 - the Hugging Face CLI if the model is not already present.
 
 No Python, Transformers, or external tensor framework is required to build or
-execute the engine and tokenizer.
+execute the engine and tokenizer. The optional MZG transcoder requires Python
+and the `zstandard` package.
 
 ## 3. Download the pinned checkpoint
 
@@ -77,6 +79,95 @@ hf download moonshotai/Kimi-K3 \
 The tested tree contains 96 SafeTensors shards and totals about 1.454 TiB.
 Interrupted downloads should be resumed into the same directory rather than
 restarted into a second model-sized tree.
+
+### Optional: transcode routed experts to MZG1
+
+MZG1 keeps every official SafeTensor intact and adds an opt-in
+`expert-store-mzg1` containing only routed experts. Budget about 1.2 TiB beside
+the 1.454 TiB source tree. The verified full store is a research artifact:
+despite 13.120% fewer bytes and exact outputs, CPU decode makes end-to-end
+decode slower, so production remains on raw SafeTensors.
+
+```sh
+python3 -m pip install zstandard
+make test-mzg-transcoder
+./tools/transcode_mzg.py \
+  --model /path/to/moonshotai__Kimi-K3 \
+  --out /path/to/moonshotai__Kimi-K3/expert-store-mzg1 \
+  --jobs 6 --shard-jobs 2
+```
+
+The transcoder writes only to `expert-store-mzg1.partial`, verifies each block
+immediately, performs a second full storage pass, writes SHA-256 sidecar
+identities, and renames the root only after all 82,432 experts pass. An
+interrupted run is resumable: rerun the same command and finalized sidecars in
+the partial root are revalidated before remaining shards continue.
+
+After completion, validate the native reader:
+
+```sh
+make tests/test_k3_mzg_store
+MOONSHINE_EXPERT_STORE=auto \
+  ./tests/test_k3_mzg_store /path/to/moonshotai__Kimi-K3
+```
+
+Unset or `MOONSHINE_EXPERT_STORE=off` is the qualified raw default.
+`MOONSHINE_EXPERT_STORE=auto` selects the standard subdirectory; an absolute
+value selects a nondefault store. Startup reports `experts=mzg1` when selected.
+A selected incomplete/corrupt store fails closed.
+
+### Optional: MZG2 full GPU decoder
+
+MZG2 keeps the official SafeTensors authoritative and adds a fully verified
+derived expert store. The qualified store reduces routed bytes by 13.0674105%
+and improves engine hello, selected prefill, and live 128K/30 by approximately
+10.6%, 11.6%, and 11.7--12.8% with exact outputs. Budget about 1.18 TiB.
+
+```sh
+make tools/transcode_mzg2_layer
+./tools/transcode_mzg2_full.py \
+  --model /path/to/moonshotai__Kimi-K3 \
+  --out /path/to/moonshotai__Kimi-K3/expert-store-mzg2 \
+  --jobs 24
+
+MOONSHINE_EXPERT_STORE=off \
+MOONSHINE_MZG2_EXPERIMENT=/path/to/moonshotai__Kimi-K3/expert-store-mzg2 \
+  make test-engine-hello MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3
+```
+
+The orchestrator writes only to `expert-store-mzg2.partial`, atomically
+publishes verified per-layer sidecars, records SHA-256 identities for
+resumption, independently decodes every stored expert against canonicalized
+SafeTensors, and renames the root only after all 82,432 experts pass.
+Interrupted runs rehash completed sidecars before continuing. Startup reports
+`experts=mzg2-experiment`. The selector must be `off`, unset, or an absolute
+sidecar/directory path; MZG1 and MZG2 selection together fails closed. Raw
+SafeTensors remain the production launch default.
+
+### Offline static-Q8 compression screen
+
+The model-free codec tests and CLI self-test do not open weights or use ROCm:
+
+```sh
+make test-static-q8-screen
+```
+
+The complete screen quantizes the pinned 1,135 eligible matrices with the CPU
+Q8/128 reference, validates the exact 51.370 GiB ledger, and measures
+independent 16/32/64 KiB value/scale Zstd payloads:
+
+```sh
+make tools/screen_static_q8
+./tools/screen_static_q8 \
+  /path/to/moonshotai__Kimi-K3 \
+  /path/to/static-q8-screen.json
+```
+
+This reads approximately 100 GiB from the model. Run it only in a maintenance
+window with no latency-sensitive model or competing modelstore traffic. It
+does not create a resident store, change the source checkpoint, or use the
+GPU. CPU-generated Q8 bytes remain a screening input until a later
+full-corpus GPU-quantizer identity gate passes.
 
 ## 4. Build
 

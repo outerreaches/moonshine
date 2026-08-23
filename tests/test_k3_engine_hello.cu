@@ -107,6 +107,14 @@ int main(int argc, char **argv) {
               q8_projections,
               &stats, error, sizeof(error)),
           error);
+    const char *diagnostic_prefix =
+        getenv("MOONSHINE_TEST_DECODE_DIAGNOSTICS");
+    if (diagnostic_prefix && diagnostic_prefix[0]) {
+        CHECK(k3_engine_configure_decode_diagnostics(
+                  engine, diagnostic_prefix,
+                  error, sizeof(error)),
+              error);
+    }
 
     /*
      * Official non-thinking XTML rendering for:
@@ -143,6 +151,13 @@ int main(int argc, char **argv) {
     uint32_t generated[MAX_GENERATED];
     float values[MAX_GENERATED];
     uint32_t generated_count = 0u;
+    k3_engine_decode_stats decode_stats;
+    memset(&decode_stats, 0, sizeof(decode_stats));
+    if (diagnostic_prefix && diagnostic_prefix[0]) {
+        CHECK(k3_engine_begin_decode_diagnostics(
+                  engine, error, sizeof(error)),
+              error);
+    }
     struct timespec decode_start;
     struct timespec decode_end;
     clock_gettime(CLOCK_MONOTONIC, &decode_start);
@@ -184,6 +199,12 @@ int main(int argc, char **argv) {
         elapsed_seconds(prompt_start, prompt_end);
     const double decode_seconds =
         elapsed_seconds(decode_start, decode_end);
+    if (diagnostic_prefix && diagnostic_prefix[0]) {
+        CHECK(k3_engine_end_decode_diagnostics(
+                  engine, decode_seconds, &decode_stats,
+                  error, sizeof(error)),
+              error);
+    }
     printf("  configured context: %u; prompt tokens: %u\n",
            context, prompt_count);
     printf("  static mode: %s; experts/layer: %u; "
@@ -212,6 +233,21 @@ int main(int argc, char **argv) {
            "(%.3f tok/s)\n",
            decode_seconds, decode_steps,
            decode_steps / decode_seconds);
+    if (diagnostic_prefix && diagnostic_prefix[0]) {
+        const k3_engine_decode_layer_stats *layer10 =
+            &decode_stats.layer[9];
+        printf(
+            "  layer-10 pipeline %.6f s; io-wait %.6f s; "
+            "expert-sync %.6f s; physical %.6f GiB; "
+            "hits %llu/%llu\n",
+            layer10->expert_pipeline_seconds,
+            layer10->io_wait_seconds,
+            layer10->expert_sync_seconds,
+            (double)layer10->physical_read_bytes /
+                (1024.0 * 1024.0 * 1024.0),
+            (unsigned long long)layer10->hits,
+            (unsigned long long)layer10->accesses);
+    }
     printf("  cumulative expert-cache hits: %llu/%llu (%.2f%%)\n",
            (unsigned long long)cache.hits,
            (unsigned long long)cache.accesses,

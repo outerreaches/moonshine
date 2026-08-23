@@ -81,6 +81,7 @@ bool k3_static_weight_gemm_bf16(const k3_static_weight *weight,
                                 uint32_t                vector_count,
                                 void                   *stream);
 
+bool k3_static_weight_is_text_tensor(const k3_st_tensor *tensor);
 bool k3_static_weight_is_q8_candidate(const k3_st_tensor *tensor);
 
 void k3_static_store_destroy(k3_static_store *store);

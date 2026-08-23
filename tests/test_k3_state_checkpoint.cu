@@ -197,6 +197,7 @@ int main(int argc, char **argv) {
         UINT64_C(8) * UINT64_C(7168) *
             sizeof(uint16_t);
     CHECK(exported.format_version == 1u &&
+              exported.context == 8192u &&
               exported.token_position == 2u &&
               exported.q8_projections &&
               exported.payload_bytes ==
@@ -363,6 +364,8 @@ int main(int argc, char **argv) {
           "valid state import");
     CHECK(imported.format_version ==
               exported.format_version &&
+              imported.context ==
+                  exported.context &&
               imported.token_position ==
                   exported.token_position &&
               imported.model_layout_crc64 ==

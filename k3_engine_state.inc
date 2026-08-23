@@ -292,6 +292,7 @@ static void state_info_set(
     if (!info) return;
     memset(info, 0, sizeof(*info));
     info->format_version = K3_STATE_FORMAT_VERSION;
+    info->context = metadata->context;
     info->token_position = metadata->token_position;
     info->model_layout_crc64 =
         metadata->model_layout_crc64;

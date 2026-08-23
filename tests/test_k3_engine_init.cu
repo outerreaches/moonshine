@@ -36,6 +36,8 @@ static const uint64_t K3_CONTEXT_STATE_BYTES_PER_TOKEN =
     UINT64_C(28224);
 static const uint64_t K3_EXPECTED_STAGING_BYTES =
     UINT64_C(280821760);
+static const uint64_t K3_EXPECTED_MZG2_OUTPUT_BYTES =
+    UINT64_C(35094528);
 
 static uint32_t rng_state = UINT32_C(0x4b334530);
 
@@ -118,9 +120,15 @@ int main(int argc, char **argv) {
         (uint64_t)context * K3_CONTEXT_STATE_BYTES_PER_TOKEN;
     CHECK(stats.state_bytes == expected_state_bytes,
           "engine attention-state byte ledger");
-    CHECK(stats.staging_bytes == K3_EXPECTED_STAGING_BYTES &&
+    CHECK(stats.staging_bytes ==
+              K3_EXPECTED_STAGING_BYTES *
+                  (stats.mzg_expert_store ? 2u : 1u) +
+              (stats.mzg2_experiment_store ?
+                  K3_EXPECTED_MZG2_OUTPUT_BYTES : 0u) &&
               stats.staging_slots == 16u,
           "engine staging byte ledger");
+    CHECK(!(stats.mzg_expert_store && stats.mzg2_experiment_store),
+          "compressed expert stores are mutually exclusive");
     CHECK(k3_engine_find_weight(
               engine,
               "language_model.model.layers.0."
