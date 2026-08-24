@@ -38,6 +38,9 @@ disable terminal color explicitly.
 | `request.reject` / `request.failed` | Admission or inference failure with an HTTP/inference stage and bounded diagnostic; post-decode failures include the diagnostic capture ID. A busy completion is rejected with status 503 and `reason=busy`. |
 | `request.client_disconnect` | The client disappeared before the initial SSE event could be established. |
 | `request.cancelled` | A started request stopped at a safe token/layer boundary because the peer disconnected or the server began shutdown. Includes reason, phase, generated-token count, and wall time; semantic state is reset before the slot releases. |
+| `request.prefix.checkpoint.hit` | Durable exact-prefix state was imported; records cached tokens, suffix tokens, and import wall time. |
+| `checkpoint.publish` | A post-response durable state/metadata/manifest publication completed; records token count, state GiB, entry count, and export time. |
+| `checkpoint.failed` | Import/export/publication failed with a bounded stage and diagnostic; never logs checkpoint paths or token content. |
 
 The `request.prefill.start` event is intentionally emitted before a divergent
 request can reset retained causal state. Operators can therefore distinguish a

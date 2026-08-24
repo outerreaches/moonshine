@@ -552,6 +552,78 @@ static bool state_reader_device(
     return true;
 }
 
+extern "C" bool k3_engine_get_state_identity(
+        const k3_engine *engine,
+        k3_engine_state_file_info *info,
+        char *error,
+        size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (info) memset(info, 0, sizeof(*info));
+    if (!engine || !info) {
+        engine_error(error, error_size,
+                     "invalid K3 state-identity request");
+        return false;
+    }
+    k3_state_metadata metadata;
+    state_metadata_build(engine, &metadata);
+    state_info_set(info, &metadata);
+    return true;
+}
+
+extern "C" bool k3_engine_inspect_state_file(
+        const k3_engine *engine,
+        const char *path,
+        k3_engine_state_file_info *info,
+        char *error,
+        size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (info) memset(info, 0, sizeof(*info));
+    if (!engine || !path || path[0] == '\0' || !info) {
+        engine_error(error, error_size,
+                     "invalid K3 state-inspection request");
+        return false;
+    }
+    const int fd = open(
+        path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        engine_error(error, error_size,
+                     "open K3 state file: %s", strerror(errno));
+        return false;
+    }
+    struct stat status;
+    uint8_t header[K3_STATE_HEADER_BYTES];
+    k3_state_metadata metadata;
+    const bool read_ok =
+        fstat(fd, &status) == 0 &&
+        S_ISREG(status.st_mode) &&
+        status.st_size >= (off_t)sizeof(header) &&
+        state_pread_full(fd, header, sizeof(header), 0u);
+    (void)close(fd);
+    if (!read_ok ||
+        !state_header_decode(
+            header,
+            read_ok ? (uint64_t)status.st_size : 0u,
+            &metadata, error, error_size)) {
+        if (read_ok || (error && error_size && error[0] != '\0')) {
+            return false;
+        }
+        engine_error(error, error_size,
+                     "K3 state file is truncated or invalid");
+        return false;
+    }
+    const bool file_q8 =
+        (metadata.flags & K3_STATE_FLAG_Q8_PROJECTIONS) != 0u;
+    if (metadata.context != engine->context ||
+        metadata.model_layout_crc64 != engine->model_layout_crc64 ||
+        file_q8 != engine->q8_projections) {
+        engine_error(error, error_size,
+                     "K3 state model/static identity mismatch");
+        return false;
+    }
+    state_info_set(info, &metadata);
+    return true;
+}
+
 extern "C" bool k3_engine_export_state(
         const k3_engine *engine,
         const char *path,
@@ -738,7 +810,7 @@ extern "C" bool k3_engine_import_state(
     struct timespec operation_end;
     clock_gettime(
         CLOCK_MONOTONIC, &operation_start);
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) {
         engine_error(
             error, error_size,
@@ -908,4 +980,20 @@ done:
     free(host);
     (void)close(fd);
     return ok;
+}
+
+extern "C" k3_engine_state_import_result
+k3_engine_import_state_checked(
+        k3_engine *engine,
+        const char *path,
+        k3_engine_state_file_info *info,
+        char *error,
+        size_t error_size) {
+    if (k3_engine_import_state(
+            engine, path, info, error, error_size)) {
+        return K3_STATE_IMPORT_OK;
+    }
+    return engine != NULL && engine->causal_state_valid ?
+        K3_STATE_IMPORT_REJECTED_UNCHANGED :
+        K3_STATE_IMPORT_FAILED_INVALID_STATE;
 }

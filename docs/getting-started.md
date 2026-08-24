@@ -604,6 +604,31 @@ should be treated as private conversation state: they contain no model
 weights, but they encode the processed token history. CRC64 detects accidental
 corruption and is not an authentication mechanism.
 
+The promoted durable exact-prefix server fixture is:
+
+```sh
+make test-prefix-checkpoint \
+  MOONSHINE_MODEL=\"$MOONSHINE_MODEL\"
+```
+
+It creates a private temporary checkpoint root, publishes a completed turn,
+proves ordinary live reuse remains first priority, displaces the session with
+an unrelated request, restores the exact checkpoint, restarts the session, and
+requires identical response bytes and all four state digests. The fixture
+passed. Prefix restoration improved 65.77× (63.008 s inferred evaluation
+versus 0.958 s import), clearing the proposed 5× gate; total prompt wall
+improved 2.87× (95.174 → 33.124 s). The path is promoted as opt-in.
+
+For manual server qualification, use an absolute private root plus explicit
+limits:
+
+```sh
+./moonshine-server \"$MOONSHINE_MODEL\" \
+  --prefix-checkpoint-root /private/moonshine-checkpoints \
+  --prefix-checkpoint-entries 4 \
+  --prefix-checkpoint-bytes 21474836480
+```
+
 ## Troubleshooting
 
 ### Residency preflight rejects the run

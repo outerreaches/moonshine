@@ -322,26 +322,33 @@ tokens. Export took 1.043 seconds on the qualified host. CRC64 protects
 against accidental corruption; the file is not cryptographically
 authenticated.
 
-The exact-anchor policy screen corrects the scope of future catalog activation.
-An imported recurrent state can represent only the exact tokens that produced
-it; no checkpoint can restore deeper than the candidate's full exact common
-prefix. Even ideal anchors therefore recover only 8/29,630 tokens (0.027%) for
-the recorded deep-compaction shape and 86/158 (54.43%) for the observability
-edit, failing the proposed 60% universal edit gate. Reasoning omission
-(3,849/3,905, 98.57%) and exact structured displacement (237/354, 66.95%) do
-clear it.
+Recurrent-state reuse remains exact: no checkpoint can restore deeper than the
+candidate's full exact common prefix. Source inspection clarifies that
+FreeToken's “semantic” cache does not relax this invariant. It uses an exact
+token radix tree, places recurrent snapshots at ×64 and semantic boundaries,
+and restores the deepest matched node with a live snapshot. SGLang's
+MambaRadixCache has the same point-attached snapshot rule; vLLM block prefix
+caching also hashes exact tokens plus the parent prefix.
 
-The remaining activation target is deliberately narrower: preserve an exact
-checkpoint when another request or restart displaces the live session, then
-restore it only when its complete token sequence is an identity-compatible
-prefix of the new rendered request. Deep rewritten histories still prefill
-from their true exact common prefix; no semantic or fuzzy admission is allowed.
+The 8/29,630 compaction result is therefore a client-prefix stability failure,
+not a failure of boundary placement: no exact engine can reuse a later state
+when request rendering diverges after eight tokens. Eligible late-block edits
+remain attractive—reasoning omission preserves 3,849/3,905 tokens and
+structured displacement 237/354.
+
+The durable displacement/restart tier below is now qualified. A separate hot
+current-session tier is the resolution for edit recovery: keep a small
+in-device KDA/conv/AttnRes snapshot pool at decode-start, tool-opener, and
+completed-turn boundaries; retain exact MLA prefix rows in the existing flat
+allocation and overwrite only the edited suffix. The client must keep system,
+tool, and protected-head rendering byte/token identical through compaction.
+Semantic boundaries select candidates; full-token comparison authorizes reuse.
 
 ### Durable exact-prefix activation contract
 
-The retained implementation target is opt-in and bounded, not a semantic
-cache. A private checkpoint root will bind one manifest to state format,
-configured context, model-layout CRC, and static precision. Each entry owns:
+The promoted feature is opt-in and bounded, not a semantic cache. A private
+checkpoint root binds one manifest to state format, configured context,
+model-layout CRC, and static precision. Each entry owns:
 
 - one existing versioned state file;
 - the complete exact retained-token ledger;
@@ -373,11 +380,14 @@ reset to position zero before full-prefill fallback and fail the request if
 that reset cannot restore a healthy engine. Checkpoint failure never clears the
 immutable expert cache and never weakens exact admission.
 
-The first server implementation should export synchronously only after the
-response has been delivered but before releasing the one request slot. This
-adds slot occupancy rather than response latency and avoids a worker touching
-mutable causal state. Export failure is a bounded warning: it does not fail the
-already completed response or publish a partial entry.
+The server exports synchronously only after the response has been delivered but
+before releasing the one request slot. This adds slot occupancy rather than
+response latency and avoids a worker touching mutable causal state.
+Model-backed displacement/restart recovery passed exact response bytes,
+cached-token accounting, and all four state digests. Prefix restoration
+improved **65.77×** (63.008 s inferred evaluation versus 0.958 s import),
+clearing the 5× gate; total prompt wall improved **2.87×**
+(95.174 → 33.124 s). The feature is promoted as an opt-in path.
 
 ## Decode schedule
 

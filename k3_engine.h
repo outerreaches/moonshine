@@ -408,6 +408,34 @@ bool k3_engine_get_state_digest(
         char                    *error,
         size_t                   error_size);
 
+bool k3_engine_get_state_identity(
+        const k3_engine          *engine,
+        k3_engine_state_file_info *info,
+        char                     *error,
+        size_t                    error_size);
+
+/* Header/file/identity inspection only; never mutates device state. */
+bool k3_engine_inspect_state_file(
+        const k3_engine          *engine,
+        const char               *path,
+        k3_engine_state_file_info *info,
+        char                     *error,
+        size_t                    error_size);
+
+typedef enum {
+    K3_STATE_IMPORT_OK = 0,
+    K3_STATE_IMPORT_REJECTED_UNCHANGED = 1,
+    K3_STATE_IMPORT_FAILED_INVALID_STATE = 2,
+} k3_engine_state_import_result;
+
+/* Classify whether a failed import left the destination unchanged or invalid. */
+k3_engine_state_import_result k3_engine_import_state_checked(
+        k3_engine                *engine,
+        const char               *path,
+        k3_engine_state_file_info *info,
+        char                     *error,
+        size_t                    error_size);
+
 /*
  * Atomically export only semantic continuation state: KDA recurrence and
  * convolution, occupied MLA rows, AttnRes blocks, and token position.

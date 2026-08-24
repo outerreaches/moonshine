@@ -37,6 +37,7 @@ enum {
     K3_SERVER_LOG_PROGRESS_SECONDS = 60,
     K3_SERVER_SOCKET_IO_TIMEOUT_SECONDS = 30,
     K3_SERVER_LISTEN_BACKLOG = 16,
+    K3_SERVER_DEFAULT_CHECKPOINT_ENTRIES = 4,
 };
 
 typedef enum {
@@ -70,6 +71,9 @@ typedef struct {
     const char *prefill_diagnostics_prefix;
     bool        capture_state_digest;
     bool        router_logits_tap;
+    const char *prefix_checkpoint_root;
+    uint32_t    prefix_checkpoint_entries;
+    uint64_t    prefix_checkpoint_bytes;
 } server_config;
 
 typedef struct {
@@ -124,6 +128,9 @@ static volatile sig_atomic_t active_listener = -1;
 static unsigned long long completion_counter = 0u;
 static bool interactive_log = false;
 
+static const uint64_t K3_SERVER_DEFAULT_CHECKPOINT_BYTES =
+    UINT64_C(20) * UINT64_C(1024) * UINT64_C(1024) *
+    UINT64_C(1024);
 static void stop_handler(int signum) {
     (void)signum;
     stop_requested = 1;
@@ -268,6 +275,21 @@ static bool parse_u32(const char *text, uint32_t min_value,
     return true;
 }
 
+
+static bool parse_u64(const char *text, uint64_t min_value,
+                      uint64_t max_value, uint64_t *value) {
+    if (text == NULL || text[0] == '\0') return false;
+    errno = 0;
+    char *end = NULL;
+    const unsigned long long parsed =
+        strtoull(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' ||
+        parsed < min_value || parsed > max_value) {
+        return false;
+    }
+    *value = (uint64_t)parsed;
+    return true;
+}
 static void usage(FILE *stream, const char *program) {
     fprintf(
         stream,
@@ -293,6 +315,12 @@ static void usage(FILE *stream, const char *program) {
         "                        Write sensitive decode cache/ledger/route CSVs\n"
         "  --prefill-diagnostics PREFIX\n"
         "                        Write private content-free routed-prefill CSV\n"
+        "  --prefix-checkpoint-root PATH\n"
+        "                        Durable exact-prefix checkpoint directory\n"
+        "  --prefix-checkpoint-entries N\n"
+        "                        Maximum durable entries (default 4)\n"
+        "  --prefix-checkpoint-bytes N\n"
+        "                        Maximum durable bytes (default 21474836480)\n"
         "  --decode-state-digest\n"
         "                        Log state-comparison fingerprints (expensive)\n"
         "  --router-logits-tap\n"
@@ -358,12 +386,16 @@ static bool parse_args(int argc, char **argv, server_config *config) {
             strcmp(argument, "--range-backend") == 0 ||
             strcmp(argument, "--decode-diagnostics") == 0 ||
             strcmp(argument, "--prefill-diagnostics") == 0 ||
+            strcmp(argument, "--prefix-checkpoint-root") == 0 ||
+            strcmp(argument, "--prefix-checkpoint-entries") == 0 ||
+            strcmp(argument, "--prefix-checkpoint-bytes") == 0 ||
             strcmp(argument, "--max-body") == 0) {
             if (++i >= argc) {
                 return reject_config("%s needs a value", argument);
             }
             const char *value = argv[i];
             uint32_t parsed = 0u;
+            uint64_t parsed64 = 0u;
             if (strcmp(argument, "--host") == 0) {
                 config->host = value;
             } else if (strcmp(argument, "--api-key") == 0) {
@@ -431,6 +463,34 @@ static bool parse_args(int argc, char **argv, server_config *config) {
                         "prefill diagnostics prefix is empty");
                 }
                 config->prefill_diagnostics_prefix = value;
+            } else if (strcmp(
+                           argument,
+                           "--prefix-checkpoint-root") == 0) {
+                if (value[0] != '/') {
+                    return reject_config(
+                        "checkpoint root must be absolute");
+                }
+                config->prefix_checkpoint_root = value;
+            } else if (strcmp(
+                           argument,
+                           "--prefix-checkpoint-entries") == 0) {
+                if (!parse_u32(value, 1u, 64u, &parsed)) {
+                    return reject_config(
+                        "invalid checkpoint entry limit %s",
+                        value);
+                }
+                config->prefix_checkpoint_entries = parsed;
+            } else if (strcmp(
+                           argument,
+                           "--prefix-checkpoint-bytes") == 0) {
+                if (!parse_u64(
+                        value, UINT64_C(1048576),
+                        UINT64_MAX, &parsed64)) {
+                    return reject_config(
+                        "invalid checkpoint byte limit %s",
+                        value);
+                }
+                config->prefix_checkpoint_bytes = parsed64;
             } else {
                 if (!parse_u32(value, 1024u, UINT32_MAX, &parsed)) {
                     return reject_config(
@@ -454,6 +514,12 @@ static bool parse_args(int argc, char **argv, server_config *config) {
     }
     if (config->api_key != NULL && config->api_key[0] == '\0') {
         config->api_key = NULL;
+    }
+    if (config->prefix_checkpoint_root == NULL &&
+        (config->prefix_checkpoint_entries != 0u ||
+         config->prefix_checkpoint_bytes != 0u)) {
+        return reject_config(
+            "checkpoint limits require --prefix-checkpoint-root");
     }
     return true;
 }
@@ -1397,9 +1463,11 @@ static void observe_lifecycle(
     if (event == K3_CHAT_LIFECYCLE_PREFILL_START) {
         observer->prefill_start = now;
         observer->last_prefill_log = now;
-        const char *reuse = result->prompt_reused_tokens != 0u ? "hit" :
-            (result->prompt_reuse_declined ? "miss" :
-             (observer->clear_expert_cache ? "disabled" : "cold"));
+        const char *reuse = result->prompt_reused_checkpoint ?
+            "checkpoint" :
+            (result->prompt_reused_tokens != 0u ? "hit" :
+             (result->prompt_reuse_declined ? "miss" :
+              (observer->clear_expert_cache ? "disabled" : "cold")));
         server_log(
             result->prompt_reuse_declined ?
                 SERVER_LOG_WARN : SERVER_LOG_INFO,
@@ -1421,6 +1489,16 @@ static void observe_lifecycle(
                 result->prompt_reuse_retained_tokens,
                 result->prompt_reuse_matched_tokens,
                 result->prompt_reuse_candidate_tokens);
+        }
+        if (result->prompt_reused_checkpoint) {
+            server_log(
+                SERVER_LOG_INFO,
+                "request.prefix.checkpoint.hit",
+                observer->completion_id,
+                "tokens=%u suffix=%u import=%.3fs",
+                result->prompt_reused_tokens,
+                result->prompt_evaluated_tokens,
+                result->checkpoint_import_seconds);
         }
         return;
     }
@@ -1790,6 +1868,7 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
     k3_chat_turn_result result;
     memset(&result, 0, sizeof(result));
     bool ok;
+    bool response_delivered = false;
     if (request.stream) {
         stream_state stream = {
             .fd = fd,
@@ -1848,6 +1927,7 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
         if (ok) {
             stream_end(&stream, &result);
             log_result(&observer, &result, true, !stream.failed);
+            response_delivered = !stream.failed;
         } else if (result.cancelled) {
             log_cancellation(&observer, &result);
             free(stream.pending);
@@ -1940,8 +2020,34 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
                     fd, 200, "application/json",
                     json, json_size, metrics);
                 log_result(&observer, &result, false, client_ok);
+                response_delivered = client_ok;
                 free(json);
             }
+        }
+    }
+    if (response_delivered && !stop_requested &&
+        k3_chat_session_checkpoint_enabled(session)) {
+        k3_chat_checkpoint_result checkpoint;
+        char checkpoint_error[512];
+        if (!k3_chat_session_publish_checkpoint(
+                session, &checkpoint,
+                checkpoint_error, sizeof(checkpoint_error))) {
+            server_log(
+                SERVER_LOG_WARN, "checkpoint.failed",
+                completion_id,
+                "stage=publish error=\"%s\"",
+                checkpoint_error);
+        } else if (checkpoint.published) {
+            server_log(
+                SERVER_LOG_INFO, "checkpoint.publish",
+                completion_id,
+                "tokens=%u state=%.3f_GiB entries=%zu "
+                "seconds=%.3f",
+                checkpoint.token_count,
+                (double)checkpoint.state_bytes /
+                    (1024.0 * 1024.0 * 1024.0),
+                checkpoint.entry_count,
+                checkpoint.export_seconds);
         }
     }
     k3_chat_turn_result_free(&result);
@@ -1963,7 +2069,17 @@ static void send_health_response(int fd, server_runtime *runtime) {
     (void)pthread_mutex_lock(&runtime->mutex);
     const bool busy = runtime->busy;
     (void)pthread_mutex_unlock(&runtime->mutex);
-    char body[640];
+    char body[768];
+    const bool checkpoints =
+        runtime->config->prefix_checkpoint_root != NULL;
+    const uint32_t checkpoint_entries = checkpoints ?
+        (runtime->config->prefix_checkpoint_entries == 0u ?
+            K3_SERVER_DEFAULT_CHECKPOINT_ENTRIES :
+            runtime->config->prefix_checkpoint_entries) : 0u;
+    const uint64_t checkpoint_bytes = checkpoints ?
+        (runtime->config->prefix_checkpoint_bytes == 0u ?
+            K3_SERVER_DEFAULT_CHECKPOINT_BYTES :
+            runtime->config->prefix_checkpoint_bytes) : 0u;
     const int body_size = snprintf(
         body, sizeof(body),
         "{\"status\":\"ok\",\"ready\":true,"
@@ -1973,10 +2089,15 @@ static void send_health_response(int fd, server_runtime *runtime) {
         "\"version\":\"" MOONSHINE_VERSION "\","
         "\"expert_cache\":\"persistent\","
         "\"prefix_reuse\":\"automatic_exact_prefix\","
+        "\"prefix_checkpoints\":{\"enabled\":%s,"
+        "\"entry_limit\":%u,\"byte_limit\":%llu},"
         "\"context_length\":%u,"
         "\"max_output_tokens\":%u,"
         "\"slots\":1,\"available_slots\":%u}",
         busy ? "true" : "false",
+        checkpoints ? "true" : "false",
+        checkpoint_entries,
+        (unsigned long long)checkpoint_bytes,
         runtime->config->context,
         effective_max_output_tokens(runtime->config),
         busy ? 0u : 1u);
@@ -2194,6 +2315,12 @@ int main(int argc, char **argv) {
             config.decode_diagnostics_prefix,
         .prefill_diagnostics_prefix =
             config.prefill_diagnostics_prefix,
+        .prefix_checkpoint_root =
+            config.prefix_checkpoint_root,
+        .prefix_checkpoint_entries =
+            config.prefix_checkpoint_entries,
+        .prefix_checkpoint_bytes =
+            config.prefix_checkpoint_bytes,
         .capture_state_digest = config.capture_state_digest,
         .router_logits_tap = config.router_logits_tap,
     };
@@ -2271,7 +2398,8 @@ int main(int argc, char **argv) {
         SERVER_LOG_INFO, "server.ready", NULL,
         "listen=http://%s:%u model=%s version=%s context=%u "
         "max_output=%u load=%.3fs static=%.3f_GiB cache=%.3f_GiB "
-        "state=%.3f_GiB slots=1 auth=%s range_backend=%s experts=%s",
+        "state=%.3f_GiB slots=1 auth=%s range_backend=%s experts=%s "
+        "checkpoints=%s checkpoint_entries=%zu",
         config.host, config.port, MOONSHINE_MODEL_ID,
         MOONSHINE_VERSION, config.context,
         effective_max_output_tokens(&config),
@@ -2284,7 +2412,9 @@ int main(int argc, char **argv) {
         config.range_backend == K3_PREFILL_PROJECTION_DEFAULT ?
             "default" : "kda-blas",
         stats.mzg2_store ? "mzg2" :
-            stats.mzg_expert_store ? "mzg1" : "safetensors");
+            stats.mzg_expert_store ? "mzg1" : "safetensors",
+        k3_chat_session_checkpoint_enabled(session) ? "on" : "off",
+        k3_chat_session_checkpoint_count(session));
 
     for (;;) {
         (void)pthread_mutex_lock(&runtime.mutex);

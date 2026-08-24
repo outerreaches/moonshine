@@ -16,6 +16,16 @@ quantization layouts, kernels, and tests. llama.cpp, vLLM, SGLang, and the
 official Kimi code supplied validation references; none is a Moonshine runtime
 dependency.
 
+The durable exact-prefix checkpoint work was inspired by
+[FreeToken](https://github.com/FlashML-org/FreeToken)'s hybrid radix cache and
+semantic anchor placement, alongside
+[SGLang](https://github.com/sgl-project/sglang)'s Mamba radix cache and
+[vLLM](https://docs.vllm.ai/en/latest/design/prefix_caching/)'s exact prefix
+caching design. These systems clarified the key invariant: reuse remains
+token-exact, while semantic boundaries determine useful snapshot placement.
+Moonshine's implementation is independent, uses bounded durable disk bundles
+rather than their hot cache structures, and copies no source from them.
+
 This project was developed with strong AI coding and review assistance, with
 the human maintainer directing architecture, experiments, validation, and
 release decisions. Exact source lineage, pinned revisions, design influences,
@@ -277,6 +287,24 @@ make test-state-checkpoint \
   MOONSHINE_STATE_DIR=/tmp
 ```
 
+The promoted opt-in server feature can preserve bounded exact session
+checkpoints after delivering a response:
+
+```sh
+./moonshine-server /path/to/moonshotai__Kimi-K3 \
+  --prefix-checkpoint-root /private/moonshine-checkpoints \
+  --prefix-checkpoint-entries 4 \
+  --prefix-checkpoint-bytes 21474836480
+```
+
+The root is `0700`; state, metadata, and manifest files are `0600`. Admission
+remains full-token and identity exact. Model-backed displacement/restart
+response bytes, cached-token accounting, and all four state digests passed.
+The measured restored-prefix cost fell from an inferred 63.008 s of evaluation
+to 0.958 s import (**65.77×**); total prompt wall fell 95.174 → 33.124 s
+(**2.87×**, 65.20% lower). The opt-in feature passes its ≥5× prefix-restoration
+gate; production enablement remains an explicit deployment choice.
+
 ### Diagnostics and offline cache analysis
 
 `--decode-diagnostics PREFIX` writes private cache snapshots, route traces, and
@@ -471,6 +499,14 @@ MZG2 is promoted for the qualified K3 deployment. Decisive screens closed
 scan-resistant admission and compressed-resident cache slots. The route-index
 engine integration is also closed by its 0.148% direct wall-time ceiling.
 
+The exact durable checkpoint path is promoted as an opt-in feature:
+displaced-session and post-restart response bytes, cached-token accounting, and
+all four state digests matched. Server publication and restart loading passed.
+Prefix restoration improved **65.77×** (63.008 s inferred evaluation versus
+0.958 s import), while total prompt wall improved **2.87×** (95.174 → 33.124 s).
+The production launch profile remains unchanged until an operator supplies a
+private checkpoint root.
+
 The opt-in routed-prefill harness is functionally qualified: exact output and
 I/O, private 92-layer captures, deterministic commands, and QD2 occupancy all
 passed. Four consecutive 512-position arms had 4.766% expert-pipeline spread,
@@ -478,11 +514,24 @@ so the former 5% event-scheduler gate is unresolvable under the required
 three-times-noise rule and no ABBA was run. QD2 was fully empty for only 0.216%
 of routed-stream wall. Event scheduling is parked rather than promoted.
 
-Current open work:
+Checkpoint next steps:
 
-- engine/server activation of durable exact-prefix checkpoints for displaced
-  or restarted sessions; semantic-anchor recovery across deep history rewrites
-  is closed by the 8/29,630 exact-common-prefix upper bound;
+1. Roll out the promoted durable feature with a private checkpoint root, then
+   verify enabled health metadata, bounded publication, displacement recovery,
+   and a restart hit on the production profile.
+2. Capture one private Prime-Agent request immediately before and after natural
+   compaction, tokenize both with the production K3 renderer, retain only
+   content-free segment hashes/counts, and delete the raw payloads.
+3. If Prime's summary-first context breaks before a useful boundary, prototype
+   a project-local `context` extension that preserves one immutable complete
+   turn before the summary, then repeat the exact-token and output-equivalence
+   gates.
+4. Add hot in-memory recurrent anchors only after that client gate identifies
+   useful boundaries; keep low-match edits on the ordinary exact/full-prefill
+   fallback.
+
+Other open work:
+
 - derived static-Q8 startup acceleration;
 - dual-device expert streaming after sufficient second-device capacity exists;
 - broader quality qualification for the diagnostic KDA backend;

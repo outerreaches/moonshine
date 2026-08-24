@@ -35,6 +35,10 @@ typedef struct {
     const char *prefill_diagnostics_prefix;
     /* With decode_diagnostics_prefix: also capture raw router logits. */
     bool        router_logits_tap;
+    /* Optional durable exact-prefix checkpoint root; NULL disables it. */
+    const char *prefix_checkpoint_root;
+    uint32_t    prefix_checkpoint_entries;
+    uint64_t    prefix_checkpoint_bytes;
     /* Expensive non-cryptographic state fingerprints for qualification. */
     bool        capture_state_digest;
 } k3_chat_session_config;
@@ -69,6 +73,8 @@ typedef struct {
     uint32_t                 prompt_reuse_matched_tokens;
     uint32_t                 prompt_reuse_candidate_tokens;
     bool                     prompt_reuse_declined;
+    bool                     prompt_reused_checkpoint;
+    double                   checkpoint_import_seconds;
     uint32_t                 generated_tokens;
     uint32_t                 forced_trailer_tokens;
     uint32_t                 position;
@@ -84,6 +90,15 @@ typedef struct {
     bool                     state_digest_valid;
     k3_engine_state_digest   state_digest;
 } k3_chat_turn_result;
+
+typedef struct {
+    bool     enabled;
+    bool     published;
+    uint32_t token_count;
+    uint64_t state_bytes;
+    size_t   entry_count;
+    double   export_seconds;
+} k3_chat_checkpoint_result;
 
 /*
  * Called with raw token-piece bytes as response content becomes available.
@@ -254,6 +269,15 @@ bool k3_chat_session_import_state(
     k3_engine_state_file_info  *info,
     char                       *error,
     size_t                      error_size);
+
+bool k3_chat_session_publish_checkpoint(
+    k3_chat_session             *session,
+    k3_chat_checkpoint_result   *result,
+    char                        *error,
+    size_t                       error_size);
+
+bool k3_chat_session_checkpoint_enabled(const k3_chat_session *session);
+size_t k3_chat_session_checkpoint_count(const k3_chat_session *session);
 
 #ifdef __cplusplus
 }

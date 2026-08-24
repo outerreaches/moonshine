@@ -44,6 +44,7 @@ K3_OBJS := \
 	k3_openai.o \
 	k3_prefix_reuse.o \
 	k3_prefix_catalog.o \
+	k3_prefix_bundle.o \
 	k3_prefill_route_index.o \
 	k3_rocm_ops.o \
 	k3_safetensors.o \
@@ -52,6 +53,7 @@ K3_OBJS := \
 PORTABLE_CPU_TESTS := \
 	tests/test_k3_expert_cache \
 	tests/test_k3_prefix_reuse \
+	tests/test_k3_prefix_bundle \
 	tests/test_k3_prefix_catalog \
 	tests/test_k3_prefill_route_index \
 	tests/test_k3_prefill_timeline \
@@ -99,6 +101,7 @@ ROCM_TESTS := \
 
 CHAT_TESTS := \
 	tests/test_k3_chat_session \
+	tests/test_k3_prefix_checkpoint \
 	tests/test_k3_long_context
 
 ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS)
@@ -109,6 +112,7 @@ ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS)
 	test-prefill-2 test-prefill-scale test-prefill-kda-blas \
 	test-prefill-crossover test-prefill-gemm-shapes \
 	test-long-context-retrieval \
+	test-prefix-checkpoint \
 	test-mla-batch-determinism test-mla-batch-kernels \
 	test-moe-tail-profile test-decode-cache-replay test-cache-analyzer \
 	test-prefill-screen-analyzer test-anchor-recovery-analyzer \
@@ -184,7 +188,10 @@ tests: $(ALL_TESTS)
 k3_engine.o: k3_engine.cu k3_engine_state.inc k3_engine_prefill.inc k3_engine.h \
 	k3_prefill.h k3_static_store.h k3_expert_cache.h k3_io_uring.h \
 	k3_mzg.h k3_mzg2.h k3_rocm_ops.h k3_safetensors.h
-k3_chat.o: k3_chat.c k3_chat.h k3_engine.h k3_tokenizer.h k3_prefix_reuse.h
+k3_prefix_bundle.o: k3_prefix_bundle.c k3_prefix_bundle.h \
+	k3_engine.h k3_tokenizer.h
+k3_chat.o: k3_chat.c k3_chat.h k3_engine.h k3_tokenizer.h \
+	k3_prefix_reuse.h k3_prefix_bundle.h
 k3_prefix_catalog.o: k3_prefix_catalog.c k3_prefix_catalog.h \
 	k3_engine.h k3_prefix_reuse.h
 k3_prefill_route_index.o: k3_prefill_route_index.c \
@@ -211,10 +218,13 @@ k3_tokenizer.o: k3_tokenizer.c k3_tokenizer.h
 tests/test_k3_chat_session.o: tests/test_k3_chat_session.c k3_chat.h
 tests/test_k3_long_context.o: tests/test_k3_long_context.c k3_chat.h
 tests/test_k3_openai.o: tests/test_k3_openai.c k3_openai.h k3_chat.h
+tests/test_k3_prefix_checkpoint.o: tests/test_k3_prefix_checkpoint.c k3_chat.h
 tests/test_k3_mzg_store.o: tests/test_k3_mzg_store.c k3_mzg.h k3_safetensors.h
 tests/test_k3_prefix_reuse.o: tests/test_k3_prefix_reuse.c k3_prefix_reuse.h
 tests/test_k3_prefix_catalog.o: tests/test_k3_prefix_catalog.c \
 	k3_prefix_catalog.h k3_engine.h
+tests/test_k3_prefix_bundle.o: tests/test_k3_prefix_bundle.c \
+	k3_prefix_bundle.h
 tests/test_k3_state_checkpoint.o: tests/test_k3_state_checkpoint.cu k3_engine.h
 tests/test_k3_prefill_route_index.o: tests/test_k3_prefill_route_index.c \
 	k3_prefill_route_index.h
@@ -242,6 +252,9 @@ tests/test_k3_json: tests/test_k3_json.o k3_json.o
 tests/test_k3_prefix_reuse: tests/test_k3_prefix_reuse.o k3_prefix_reuse.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
+tests/test_k3_prefix_bundle: tests/test_k3_prefix_bundle.o \
+		k3_prefix_bundle.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 tests/test_k3_prefix_catalog: tests/test_k3_prefix_catalog.o \
 		k3_prefix_catalog.o k3_prefix_reuse.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
@@ -307,6 +320,7 @@ test-mzg-transcoder:
 test-cpu: $(PORTABLE_CPU_TESTS) test-cache-analyzer \
 	test-prefill-screen-analyzer test-anchor-recovery-analyzer
 	./tests/test_k3_expert_cache
+	./tests/test_k3_prefix_bundle
 	./tests/test_k3_prefix_reuse
 	./tests/test_k3_prefix_catalog
 	./tests/test_k3_prefill_route_index
@@ -399,6 +413,9 @@ test-model-components: check-model \
 	./tests/test_k3_dense_mlp "$(MOONSHINE_MODEL)"
 	./tests/test_k3_expert_smoke "$(MOONSHINE_MODEL)"
 	./tests/test_k3_moe_smoke "$(MOONSHINE_MODEL)"
+
+test-prefix-checkpoint: check-model tests/test_k3_prefix_checkpoint
+	./tests/test_k3_prefix_checkpoint "$(MOONSHINE_MODEL)"
 
 test-engine-init: check-model tests/test_k3_engine_init
 	./tests/test_k3_engine_init "$(MOONSHINE_MODEL)" "$(MOONSHINE_CONTEXT)"

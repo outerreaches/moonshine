@@ -84,19 +84,26 @@ Semantic Versioning once its first research-preview tag is published.
   hello improves about 10.6%, selected prefill 11.6%, and live 128K/30
   11.7--12.8%, with exact outputs. The qualified K3 deployment now selects it
   through `MOONSHINE_MZG2_STORE`; raw SafeTensors remain the rollback path.
-- A model-free exact prefix checkpoint catalog core. It owns immutable token
-  sequences and state paths, filters on state format/context/model/static-tier
-  identity, chooses the longest byte-exact eligible prefix, preserves the
-  executor's two-token suffix invariant, rejects conflicting records, and
-  performs allocation-free lookup. State-file metadata now exposes configured
-  context for this identity check. Server activation remains separately gated.
+- An opt-in durable exact-prefix checkpoint path for displaced or restarted
+  sessions. Model-backed response bytes, cached-token accounting, all four
+  causal-state digests, manifest reload, and server publication/restart
+  recovery passed. Prefix restoration improved **65.77×** (63.008 s inferred
+  evaluation versus 0.958 s import), clearing the 5× gate; total prompt wall
+  improved **2.87×** (95.174 → 33.124 s, 65.20% lower). Deployment remains
+  explicit through a private checkpoint root.
 - A model-free exact-anchor recovery analyzer. The recorded 60% universal edit
-  gate is a **NO-GO even under ideal anchor placement**: deep Hermes
+  gate is a **NO-GO even under ideal anchor placement**: historical deep Hermes
   compaction preserved only 8/29,630 tokens (0.027%), and the observability
   edit preserved at most 86/158 (54.43%). Reasoning omission can recover
   3,849/3,905 (98.57%) and exact structured displacement 237/354 (66.95%).
   Activation is therefore narrowed to durable exact-prefix
   displacement/restart recovery, not semantic recovery across deep rewrites.
+- A Prime-Agent 0.8.0 source and live-session structure review. Its
+  `buildSessionContext()` emits a mutable `compactionSummary` as the first
+  conversation message, followed by retained recent messages. Prime
+  compaction therefore has no guaranteed exact conversation anchor until a
+  production-renderer pre/post-compaction gate proves the stable head or a
+  client extension preserves one.
 - A model-free one-pass selected-prefill route index. It validates token-major
   top-k routes and per-token uniqueness, produces stable expert-local
   token/output slices in `O(routes + experts)`, reuses allocations, preserves

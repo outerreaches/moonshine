@@ -59,6 +59,16 @@ identity, gate on the mechanism's subphase, and use aggregate phase wall only
 as a no-regression guard. Record NVMe temperature/throttle state externally
 for every arm.
 
+For durable exact-prefix checkpoints, first run
+`make test-prefix-checkpoint`. Then qualify the server with a fresh private
+root: publish one turn, record an uninterrupted exact continuation, displace
+the live session, restore the same continuation, restart the server, and
+restore it again. Require identical response bytes and all four state digests,
+standard cached-token accounting, ≥5× prefix restoration versus full prefix
+evaluation, response delivery before export completion, mode `0700`/`0600`,
+and fail-closed corrupt metadata/state behavior. The disabled profile must keep
+health metadata `enabled:false` and perform no checkpoint I/O.
+
 For a persistent 128K service on the qualified 128 GB host, use
 `--experts 30` and complete at least two independent prefills in the same
 process. The Q8/32 128K configured-capacity fixture covers one cold request;

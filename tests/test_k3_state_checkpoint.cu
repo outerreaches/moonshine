@@ -207,6 +207,24 @@ int main(int argc, char **argv) {
               exported.model_layout_crc64 != 0u &&
               exported.payload_crc64 != 0u,
           "state export ledger");
+    k3_engine_state_file_info inspected;
+    k3_engine_state_file_info identity;
+    CHECK(k3_engine_get_state_identity(
+              source, &identity, error, sizeof(error)) &&
+              k3_engine_inspect_state_file(
+                  source, state_path, &inspected,
+                  error, sizeof(error)),
+          "state identity/inspection");
+    CHECK(inspected.format_version == exported.format_version &&
+              inspected.context == exported.context &&
+              inspected.token_position == exported.token_position &&
+              inspected.model_layout_crc64 ==
+                  exported.model_layout_crc64 &&
+              inspected.payload_crc64 == exported.payload_crc64 &&
+              identity.context == exported.context &&
+              identity.model_layout_crc64 ==
+                  exported.model_layout_crc64,
+          "state inspection metadata");
     struct stat state_stat;
     CHECK(stat(state_path, &state_stat) == 0 &&
               (uint64_t)state_stat.st_size ==
@@ -312,11 +330,12 @@ int main(int argc, char **argv) {
     CHECK(flip_file_byte(state_path, payload_probe),
           "payload corruption write");
     error[0] = '\0';
-    CHECK(!k3_engine_import_state(
+    CHECK(k3_engine_import_state_checked(
               restored, state_path, NULL,
-              error, sizeof(error)) &&
+              error, sizeof(error)) ==
+                  K3_STATE_IMPORT_REJECTED_UNCHANGED &&
               strstr(error, "payload CRC64") != NULL,
-          "corrupt payload was not rejected");
+          "corrupt payload was not rejected unchanged");
     CHECK(flip_file_byte(state_path, payload_probe),
           "payload corruption restore");
 
@@ -358,9 +377,9 @@ int main(int argc, char **argv) {
 
     k3_engine_state_file_info imported;
     error[0] = '\0';
-    CHECK(k3_engine_import_state(
+    CHECK(k3_engine_import_state_checked(
               restored, state_path, &imported,
-              error, sizeof(error)),
+              error, sizeof(error)) == K3_STATE_IMPORT_OK,
           "valid state import");
     CHECK(imported.format_version ==
               exported.format_version &&

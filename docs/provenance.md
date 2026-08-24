@@ -96,6 +96,23 @@ Those are scheduling and systems-design lessons. The K3 SafeTensors loader,
 cache policy, engine composition, and layer-major implementation in this
 repository are K3-specific code.
 
+## Exact-prefix checkpoint influence
+
+The durable exact-prefix checkpoint design was informed by
+[FreeToken](https://github.com/FlashML-org/FreeToken) at
+`bd372b630a028e3faa51f4ab0ef6a98c2f2de501`, particularly its exact token radix
+matching and recurrent-state snapshots at semantic boundaries. SGLang's
+[Mamba radix cache](https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/mem_cache/mamba_radix_cache.py)
+and vLLM's
+[automatic prefix caching](https://docs.vllm.ai/en/latest/design/prefix_caching/)
+provided corroborating exact-prefix designs.
+
+Moonshine applies the invariant independently: token identity authorizes reuse,
+while boundaries only choose checkpoint placement. Its implementation is a
+bounded durable disk bundle for KDA, convolution, MLA, AttnRes, token, and
+directive state. It does not vendor or copy FreeToken, SGLang, or vLLM cache
+source and does not depend on those projects at runtime.
+
 ## GPU entropy-code influence
 
 MZG2 uses standard static rANS and a wave-coalesced renormalization structure

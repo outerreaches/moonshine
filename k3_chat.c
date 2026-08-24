@@ -1,19 +1,26 @@
 #include "k3_chat.h"
 
 #include "k3_prefix_reuse.h"
+#include "k3_prefix_bundle.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-
+#include <unistd.h>
 enum {
     K3_CHAT_DEFAULT_CONTEXT = 8192,
     K3_CHAT_DEFAULT_EXPERTS_PER_LAYER = 32,
     K3_CHAT_DEFAULT_STAGING_SLOTS = 16,
+    K3_CHAT_DEFAULT_CHECKPOINT_ENTRIES = 4,
 };
+
+static const uint64_t K3_CHAT_DEFAULT_CHECKPOINT_BYTES =
+    UINT64_C(20) * UINT64_C(1024) * UINT64_C(1024) *
+    UINT64_C(1024);
 
 static const uint32_t K3_RESPONSE_TRAILER[] = {
     K3_TOKEN_CLOSE, 12092u, K3_TOKEN_SEP,
@@ -40,9 +47,182 @@ struct k3_chat_session {
     k3_response_format_marker *historical_response_formats;
     size_t historical_response_format_count;
     size_t historical_response_format_capacity;
+    k3_prefix_bundle *prefix_bundle;
     bool          started;
     bool          healthy;
 };
+static void set_error(
+    char *error, size_t error_size, const char *fmt, ...);
+static void clear_request_directive_history(k3_chat_session *session);
+
+
+typedef struct {
+    k3_token_buffer tokens;
+    k3_tool_choice_marker *tool_choices;
+    size_t tool_choice_count;
+    k3_single_tool_call_marker *single_tool_calls;
+    size_t single_tool_call_count;
+    k3_response_format_marker *response_formats;
+    size_t response_format_count;
+} k3_checkpoint_host_state;
+
+static void checkpoint_host_state_free(k3_checkpoint_host_state *state) {
+    if (state == NULL) return;
+    for (size_t index = 0u;
+         index < state->response_format_count; index++) {
+        free((char *)state->response_formats[index]
+            .response_schema_json);
+    }
+    free(state->response_formats);
+    free(state->single_tool_calls);
+    free(state->tool_choices);
+    k3_token_buffer_free(&state->tokens);
+    memset(state, 0, sizeof(*state));
+}
+
+static bool checkpoint_host_state_clone(
+        const k3_prefix_bundle_entry *entry,
+        k3_checkpoint_host_state *state,
+        char *error,
+        size_t error_size) {
+    memset(state, 0, sizeof(*state));
+    if (entry == NULL || entry->tokens == NULL ||
+        entry->token_count == 0u) {
+        set_error(error, error_size,
+                  "checkpoint host state is invalid");
+        return false;
+    }
+    state->tokens.data = (uint32_t *)malloc(
+        entry->token_count * sizeof(*state->tokens.data));
+    state->tool_choices = entry->tool_choice_count == 0u ? NULL :
+        (k3_tool_choice_marker *)malloc(
+            entry->tool_choice_count *
+                sizeof(*state->tool_choices));
+    state->single_tool_calls =
+        entry->single_tool_call_count == 0u ? NULL :
+        (k3_single_tool_call_marker *)malloc(
+            entry->single_tool_call_count *
+                sizeof(*state->single_tool_calls));
+    state->response_formats =
+        entry->response_format_count == 0u ? NULL :
+        (k3_response_format_marker *)calloc(
+            entry->response_format_count,
+            sizeof(*state->response_formats));
+    if (state->tokens.data == NULL ||
+        (entry->tool_choice_count != 0u &&
+         state->tool_choices == NULL) ||
+        (entry->single_tool_call_count != 0u &&
+         state->single_tool_calls == NULL) ||
+        (entry->response_format_count != 0u &&
+         state->response_formats == NULL)) {
+        set_error(error, error_size,
+                  "allocating checkpoint host state failed");
+        checkpoint_host_state_free(state);
+        return false;
+    }
+    memcpy(state->tokens.data, entry->tokens,
+           entry->token_count * sizeof(*state->tokens.data));
+    if (entry->tool_choice_count != 0u) {
+        memcpy(state->tool_choices, entry->tool_choices,
+               entry->tool_choice_count *
+                   sizeof(*state->tool_choices));
+    }
+    if (entry->single_tool_call_count != 0u) {
+        memcpy(state->single_tool_calls,
+               entry->single_tool_calls,
+               entry->single_tool_call_count *
+                   sizeof(*state->single_tool_calls));
+    }
+    for (size_t index = 0u;
+         index < entry->response_format_count; index++) {
+        state->response_formats[index] =
+            entry->response_formats[index];
+        const char *schema =
+            entry->response_formats[index].response_schema_json;
+        if (schema != NULL) {
+            state->response_formats[index].response_schema_json =
+                strdup(schema);
+            if (state->response_formats[index]
+                    .response_schema_json == NULL) {
+                set_error(error, error_size,
+                          "copying checkpoint schema failed");
+                checkpoint_host_state_free(state);
+                return false;
+            }
+        }
+    }
+    state->tokens.count = entry->token_count;
+    state->tokens.capacity = entry->token_count;
+    state->tool_choice_count = entry->tool_choice_count;
+    state->single_tool_call_count =
+        entry->single_tool_call_count;
+    state->response_format_count =
+        entry->response_format_count;
+    return true;
+}
+
+static void checkpoint_host_state_swap(
+        k3_chat_session *session,
+        k3_checkpoint_host_state *state) {
+    k3_token_buffer_free(&session->retained_tokens);
+    clear_request_directive_history(session);
+    free(session->historical_tool_choices);
+    free(session->historical_single_tool_calls);
+    free(session->historical_response_formats);
+    session->retained_tokens = state->tokens;
+    session->historical_tool_choices = state->tool_choices;
+    session->historical_tool_choice_count =
+        state->tool_choice_count;
+    session->historical_tool_choice_capacity =
+        state->tool_choice_count;
+    session->historical_single_tool_calls =
+        state->single_tool_calls;
+    session->historical_single_tool_call_count =
+        state->single_tool_call_count;
+    session->historical_single_tool_call_capacity =
+        state->single_tool_call_count;
+    session->historical_response_formats =
+        state->response_formats;
+    session->historical_response_format_count =
+        state->response_format_count;
+    session->historical_response_format_capacity =
+        state->response_format_count;
+    memset(state, 0, sizeof(*state));
+}
+
+static bool checkpoint_marker_boundaries_valid(
+        const k3_prefix_bundle_entry *entry,
+        size_t message_count) {
+    for (size_t index = 0u;
+         index < entry->tool_choice_count; index++) {
+        if (entry->tool_choices[index].after_message_count >
+            message_count) return false;
+    }
+    for (size_t index = 0u;
+         index < entry->single_tool_call_count; index++) {
+        if (entry->single_tool_calls[index]
+                .after_message_count > message_count) return false;
+    }
+    for (size_t index = 0u;
+         index < entry->response_format_count; index++) {
+        if (entry->response_formats[index]
+                .after_message_count > message_count) return false;
+    }
+    return true;
+}
+
+static bool checkpoint_state_info_equal(
+        const k3_engine_state_file_info *left,
+        const k3_engine_state_file_info *right) {
+    return left->format_version == right->format_version &&
+        left->context == right->context &&
+        left->token_position == right->token_position &&
+        left->model_layout_crc64 == right->model_layout_crc64 &&
+        left->payload_bytes == right->payload_bytes &&
+        left->file_bytes == right->file_bytes &&
+        left->payload_crc64 == right->payload_crc64 &&
+        left->q8_projections == right->q8_projections;
+}
 
 static void set_error(char *error, size_t error_size, const char *fmt, ...) {
     if (error == NULL || error_size == 0u) {
@@ -528,6 +708,66 @@ bool k3_chat_session_create(
         return false;
     }
 
+    if (config->prefix_checkpoint_root != NULL &&
+        config->prefix_checkpoint_root[0] != '\0') {
+        k3_engine_state_file_info identity_info;
+        if (!k3_engine_get_state_identity(
+                session->engine, &identity_info,
+                error, error_size)) {
+            k3_chat_session_destroy(session);
+            return false;
+        }
+        const k3_prefix_bundle_identity identity = {
+            .format_version = identity_info.format_version,
+            .context = identity_info.context,
+            .model_layout_crc64 =
+                identity_info.model_layout_crc64,
+            .q8_projections = identity_info.q8_projections,
+        };
+        const uint32_t entry_limit =
+            config->prefix_checkpoint_entries == 0u ?
+                K3_CHAT_DEFAULT_CHECKPOINT_ENTRIES :
+                config->prefix_checkpoint_entries;
+        const uint64_t byte_limit =
+            config->prefix_checkpoint_bytes == 0u ?
+                K3_CHAT_DEFAULT_CHECKPOINT_BYTES :
+                config->prefix_checkpoint_bytes;
+        if (!k3_prefix_bundle_open(
+                &session->prefix_bundle,
+                config->prefix_checkpoint_root,
+                &identity, entry_limit, byte_limit,
+                error, error_size)) {
+            k3_chat_session_destroy(session);
+            return false;
+        }
+        for (size_t index = 0u;
+             index < k3_prefix_bundle_count(
+                 session->prefix_bundle);
+             index++) {
+            k3_prefix_bundle_entry entry;
+            k3_engine_state_file_info inspected;
+            if (!k3_prefix_bundle_entry_at(
+                    session->prefix_bundle, index, &entry) ||
+                !k3_engine_inspect_state_file(
+                    session->engine, entry.state_path,
+                    &inspected, error, error_size) ||
+                !checkpoint_state_info_equal(
+                    entry.state_info, &inspected)) {
+                if (error && error_size && error[0] == '\0') {
+                    set_error(error, error_size,
+                              "checkpoint state metadata mismatch");
+                }
+                k3_chat_session_destroy(session);
+                return false;
+            }
+        }
+    } else if (config->prefix_checkpoint_entries != 0u ||
+               config->prefix_checkpoint_bytes != 0u) {
+        set_error(error, error_size,
+                  "checkpoint limits require a checkpoint root");
+        k3_chat_session_destroy(session);
+        return false;
+    }
     *out = session;
     return true;
 }
@@ -539,6 +779,7 @@ void k3_chat_session_destroy(k3_chat_session *session) {
     k3_engine_destroy(session->engine);
     k3_tokenizer_destroy(session->tokenizer);
     k3_token_buffer_free(&session->retained_tokens);
+    k3_prefix_bundle_destroy(session->prefix_bundle);
     clear_request_directive_history(session);
     free(session->historical_tool_choices);
     free(session->historical_single_tool_calls);
@@ -1493,6 +1734,9 @@ bool k3_chat_session_complete_messages_with_options(
     };
     k3_token_buffer canonical_prompt = { 0 };
     k3_token_buffer augmented_prompt = { 0 };
+    k3_token_buffer checkpoint_prompt = { 0 };
+    k3_checkpoint_host_state checkpoint_host = { 0 };
+    size_t checkpoint_index = SIZE_MAX;
     bool ok = k3_tokenizer_encode_chat(
         session->tokenizer, messages, message_count,
         &render_options, &canonical_prompt, error, error_size);
@@ -1593,6 +1837,108 @@ bool k3_chat_session_complete_messages_with_options(
                 canonical_prompt.data,
                 canonical_prompt.count)) {
             reused = session->retained_tokens.count;
+        }
+    }
+    if (ok && reused == 0u && options != NULL &&
+        options->reuse_prefix && !clear_expert_cache &&
+        session->prefix_bundle != NULL) {
+        size_t best_tokens = 0u;
+        for (size_t index = 0u;
+             index < k3_prefix_bundle_count(
+                 session->prefix_bundle);
+             index++) {
+            k3_prefix_bundle_entry entry;
+            if (!k3_prefix_bundle_entry_at(
+                    session->prefix_bundle, index, &entry) ||
+                !checkpoint_marker_boundaries_valid(
+                    &entry, message_count)) {
+                continue;
+            }
+            k3_chat_options checkpoint_options = render_options;
+            checkpoint_options.historical_tool_choices =
+                entry.tool_choices;
+            checkpoint_options.historical_tool_choice_count =
+                entry.tool_choice_count;
+            checkpoint_options.historical_single_tool_calls =
+                entry.single_tool_calls;
+            checkpoint_options.historical_single_tool_call_count =
+                entry.single_tool_call_count;
+            checkpoint_options.historical_response_formats =
+                entry.response_formats;
+            checkpoint_options.historical_response_format_count =
+                entry.response_format_count;
+            k3_token_buffer candidate = { 0 };
+            char ignored_error[256] = { 0 };
+            if (k3_tokenizer_encode_chat(
+                    session->tokenizer, messages, message_count,
+                    &checkpoint_options, &candidate,
+                    ignored_error, sizeof(ignored_error)) &&
+                entry.token_count > best_tokens &&
+                k3_prefix_reuse_admits(
+                    entry.tokens, entry.token_count,
+                    candidate.data, candidate.count)) {
+                k3_token_buffer_free(&checkpoint_prompt);
+                checkpoint_prompt = candidate;
+                memset(&candidate, 0, sizeof(candidate));
+                checkpoint_index = index;
+                best_tokens = entry.token_count;
+            }
+            k3_token_buffer_free(&candidate);
+        }
+        if (checkpoint_index != SIZE_MAX) {
+            k3_prefix_bundle_entry entry;
+            k3_engine_state_file_info imported;
+            if (!k3_prefix_bundle_entry_at(
+                    session->prefix_bundle,
+                    checkpoint_index, &entry) ||
+                !checkpoint_host_state_clone(
+                    &entry, &checkpoint_host,
+                    error, error_size)) {
+                ok = false;
+            } else {
+                k3_engine_state_import_result import_result =
+                    k3_engine_import_state_checked(
+                        session->engine, entry.state_path,
+                        &imported, error, error_size);
+                if (import_result == K3_STATE_IMPORT_OK &&
+                    !checkpoint_state_info_equal(
+                        entry.state_info, &imported)) {
+                    set_error(error, error_size,
+                              "imported checkpoint metadata changed");
+                    import_result =
+                        K3_STATE_IMPORT_FAILED_INVALID_STATE;
+                }
+                if (import_result == K3_STATE_IMPORT_OK) {
+                    checkpoint_host_state_swap(
+                        session, &checkpoint_host);
+                    session->position = imported.token_position;
+                    session->started = session->position != 0u;
+                    session->healthy = true;
+                    prompt = &checkpoint_prompt;
+                    reused = imported.token_position;
+                    result->prompt_reused_checkpoint = true;
+                    result->checkpoint_import_seconds =
+                        imported.wall_seconds;
+                } else {
+                    checkpoint_host_state_free(&checkpoint_host);
+                    char remove_error[256] = { 0 };
+                    (void)k3_prefix_bundle_remove(
+                        session->prefix_bundle,
+                        checkpoint_index,
+                        remove_error, sizeof(remove_error));
+                    checkpoint_index = SIZE_MAX;
+                    k3_token_buffer_free(&checkpoint_prompt);
+                    if (import_result ==
+                            K3_STATE_IMPORT_FAILED_INVALID_STATE &&
+                        !k3_chat_session_reset(
+                            session, false,
+                            error, error_size)) {
+                        ok = false;
+                    } else if (error && error_size) {
+                        error[0] = '\0';
+                    }
+                }
+            }
         }
     }
     if (reuse_eligible && reused == 0u &&
@@ -1698,6 +2044,8 @@ bool k3_chat_session_complete_messages_with_options(
             options->response_format,
             options->response_schema_json);
     }
+    checkpoint_host_state_free(&checkpoint_host);
+    k3_token_buffer_free(&checkpoint_prompt);
     k3_token_buffer_free(&augmented_prompt);
     k3_token_buffer_free(&canonical_prompt);
     return ok;
@@ -1744,4 +2092,92 @@ bool k3_chat_session_import_state(
         *info = imported;
     }
     return true;
+}
+
+bool k3_chat_session_publish_checkpoint(
+        k3_chat_session *session,
+        k3_chat_checkpoint_result *result,
+        char *error,
+        size_t error_size) {
+    if (result != NULL) memset(result, 0, sizeof(*result));
+    if (session == NULL || result == NULL) {
+        set_error(error, error_size,
+                  "checkpoint publication needs session and result");
+        return false;
+    }
+    result->enabled = session->prefix_bundle != NULL;
+    if (session->prefix_bundle == NULL) return true;
+    if (!session->healthy ||
+        session->position == 0u ||
+        session->retained_tokens.count != session->position) {
+        set_error(error, error_size,
+                  "session is not checkpoint-publishable");
+        return false;
+    }
+    size_t existing = SIZE_MAX;
+    if (k3_prefix_bundle_find_exact(
+            session->prefix_bundle,
+            session->retained_tokens.data,
+            session->retained_tokens.count,
+            &existing)) {
+        result->token_count = session->position;
+        result->entry_count =
+            k3_prefix_bundle_count(session->prefix_bundle);
+        return true;
+    }
+    char id[33];
+    char state_path[PATH_MAX];
+    if (!k3_prefix_bundle_allocate_state_path(
+            session->prefix_bundle,
+            id, sizeof(id),
+            state_path, sizeof(state_path),
+            error, error_size)) {
+        return false;
+    }
+    k3_engine_state_file_info state_info;
+    if (!k3_engine_export_state(
+            session->engine, state_path, &state_info,
+            error, error_size)) {
+        return false;
+    }
+    const k3_prefix_bundle_snapshot snapshot = {
+        .tokens = session->retained_tokens.data,
+        .token_count = session->retained_tokens.count,
+        .tool_choices = session->historical_tool_choices,
+        .tool_choice_count =
+            session->historical_tool_choice_count,
+        .single_tool_calls =
+            session->historical_single_tool_calls,
+        .single_tool_call_count =
+            session->historical_single_tool_call_count,
+        .response_formats =
+            session->historical_response_formats,
+        .response_format_count =
+            session->historical_response_format_count,
+    };
+    if (!k3_prefix_bundle_publish(
+            session->prefix_bundle, id, state_path,
+            &snapshot, &state_info,
+            error, error_size)) {
+        (void)unlink(state_path);
+        return false;
+    }
+    result->published = true;
+    result->token_count = session->position;
+    result->state_bytes = state_info.file_bytes;
+    result->entry_count =
+        k3_prefix_bundle_count(session->prefix_bundle);
+    result->export_seconds = state_info.wall_seconds;
+    return true;
+}
+
+bool k3_chat_session_checkpoint_enabled(
+        const k3_chat_session *session) {
+    return session != NULL && session->prefix_bundle != NULL;
+}
+
+size_t k3_chat_session_checkpoint_count(
+        const k3_chat_session *session) {
+    return session == NULL || session->prefix_bundle == NULL ?
+        0u : k3_prefix_bundle_count(session->prefix_bundle);
 }
