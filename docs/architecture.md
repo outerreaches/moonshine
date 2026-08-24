@@ -74,13 +74,16 @@ paths.
 
 The initial server is a deliberately bounded HTTP/1.1 implementation:
 
-- one persistent engine and one blocking request slot;
+- one persistent engine and one inference slot, owned only by the main thread;
+- an independent HTTP control thread that continuously accepts requests,
+  serves health/model discovery, and rejects competing completions with 503;
 - loopback binding by default, with a bearer key required for non-loopback;
 - `GET /health`, `GET /v1/models`, and
   `POST /v1/chat/completions`;
-- strict native JSON parsing with an 8 MiB default body limit;
+- strict native JSON parsing with an 8 MiB default body limit and bounded
+  request/send deadlines;
 - ordinary JSON completion responses and incremental SSE chunks;
-- SSE comment keepalives with token/layer prefill progress;
+- SSE comment keepalives during both prefill and decode;
 - bounded server-side lifecycle logs covering reuse admission, prefill,
   reasoning/response-or-tool decode phases, completion, and failures without
   recording prompt or generated content;
@@ -107,13 +110,14 @@ For `parallel_tool_calls: false`, a Moonshine-specific hidden directive steers
 K3 toward one call and the parsed set is rejected if its count exceeds one.
 Policy validation precedes emission of those complete call chunks.
 
-The transport observes coarse chat-session lifecycle events. Prefix accounting
-is reported before a guarded replacement can reset state; prefill progress is
-limited to one terminal record per minute; decode progress is reported every
-64 generated tokens. Thinking-to-response transition logging labels the latter
-region `response_or_tool` because tool structure is known only after the full
-generated XTML parses. These callbacks do not participate in engine scheduling
-or numerical execution.
+The transport observes coarse lifecycle events plus a control checkpoint after
+each complete sequential-prefill token, layer-major prefill layer, generated
+token, and forced-trailer token. Prefix accounting is reported before a guarded
+replacement can reset state; prefill progress is limited to one terminal record
+per minute; operator decode progress is reported every 64 generated tokens.
+The control checkpoint probes peer state, emits time-bounded SSE comments, and
+can stop before the next model unit without changing kernel arithmetic or
+scheduling.
 
 Thinking SSE is token-live. The session tracks the native `<think>` close and
 `<response>` open sequence exactly, sends pre-transition text only as
@@ -143,9 +147,12 @@ retained token. The canonical full replay remains the fallback; serialized
 checkpoints, approximate prefix matching, and state rewinds are not part of
 this path.
 
-There is no scheduler or hidden concurrency. A disconnected streaming client
-does not interrupt model execution mid-turn; the engine completes its semantic
-trailer so its internal state is never left at a partial token boundary.
+There is no inference scheduler or hidden model concurrency. The control thread
+continues serving discovery while the one inference slot is busy. A peer
+disconnect or termination signal cancels after the current complete token/layer,
+drains its work, and resets causal state to position zero while retaining
+immutable expert-cache mappings. Cancellation never interrupts a HIP kernel,
+reuses partial semantic state, or emits a forced trailer for an abandoned peer.
 
 ## Model graph
 

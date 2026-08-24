@@ -35,11 +35,11 @@ typedef struct {
     struct timespec start;
 } scale_progress;
 
-static void report_progress(uint32_t completed,
+static bool report_progress(uint32_t completed,
                             uint32_t total,
                             void *user_data) {
     if (completed != 1u && completed != total && completed % 8u != 0u) {
-        return;
+        return true;
     }
     const scale_progress *progress = (const scale_progress *)user_data;
     struct timespec now;
@@ -50,6 +50,7 @@ static void report_progress(uint32_t completed,
     printf("  progress: layer %u/%u, elapsed %.1f s\n",
            completed, total, elapsed);
     fflush(stdout);
+    return true;
 }
 
 int main(int argc, char **argv) {

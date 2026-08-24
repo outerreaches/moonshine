@@ -5,7 +5,10 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <limits.h>
 #include <netdb.h>
+#include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -32,6 +35,8 @@ enum {
     K3_SERVER_DEFAULT_MAX_BODY = 8 * 1024 * 1024,
     K3_SERVER_KEEPALIVE_SECONDS = 10,
     K3_SERVER_LOG_PROGRESS_SECONDS = 60,
+    K3_SERVER_SOCKET_IO_TIMEOUT_SECONDS = 30,
+    K3_SERVER_LISTEN_BACKLOG = 16,
 };
 
 typedef enum {
@@ -82,6 +87,9 @@ typedef struct {
 
 typedef struct {
     const char     *completion_id;
+    const char     *peer;
+    const char     *cancel_reason;
+    int             fd;
     stream_state   *stream;
     struct timespec request_start;
     struct timespec prefill_start;
@@ -93,6 +101,23 @@ typedef struct {
     bool            clear_expert_cache;
 } request_observer;
 
+typedef struct {
+    pthread_mutex_t mutex;
+    pthread_cond_t  pending_ready;
+    pthread_t       control_thread;
+    const server_config *config;
+    int             listener;
+    int             pending_fd;
+    http_request    pending_request;
+    char            pending_peer[NI_MAXHOST];
+    bool            busy;
+    bool            pending;
+    bool            stopping;
+    bool            control_started;
+    bool            mutex_initialized;
+    bool            condition_initialized;
+} server_runtime;
+
 static volatile sig_atomic_t stop_requested = 0;
 static volatile sig_atomic_t active_listener = -1;
 static unsigned long long completion_counter = 0u;
@@ -102,8 +127,7 @@ static void stop_handler(int signum) {
     (void)signum;
     stop_requested = 1;
     if (active_listener >= 0) {
-        close((int)active_listener);
-        active_listener = -1;
+        (void)shutdown((int)active_listener, SHUT_RDWR);
     }
 }
 
@@ -438,8 +462,8 @@ static uint32_t effective_max_output_tokens(
         config->max_output_tokens : config->context;
 }
 
-static int create_listener(const server_config *config,
-                           char *error, size_t error_size) {
+static int create_bound_socket(const server_config *config,
+                               char *error, size_t error_size) {
     char service[16];
     snprintf(service, sizeof(service), "%u", config->port);
     const struct addrinfo hints = {
@@ -471,8 +495,7 @@ static int create_listener(const server_config *config,
             listener, SOL_SOCKET, SO_REUSEADDR,
             &enabled, sizeof(enabled));
         if (bind(listener, address->ai_addr,
-                 address->ai_addrlen) == 0 &&
-            listen(listener, 16) == 0) {
+                 address->ai_addrlen) == 0) {
             break;
         }
         saved_errno = errno;
@@ -488,14 +511,103 @@ static int create_listener(const server_config *config,
     return listener;
 }
 
+static bool start_listener(int listener,
+                           char *error, size_t error_size) {
+    if (listen(listener, K3_SERVER_LISTEN_BACKLOG) == 0) {
+        return true;
+    }
+    set_error(error, error_size, "starting HTTP listener failed: %s",
+              strerror(errno));
+    return false;
+}
+
+static struct timespec socket_deadline(void) {
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += K3_SERVER_SOCKET_IO_TIMEOUT_SECONDS;
+    return deadline;
+}
+
+static int deadline_timeout_ms(struct timespec deadline) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    int64_t nanoseconds =
+        (int64_t)(deadline.tv_sec - now.tv_sec) * INT64_C(1000000000) +
+        (int64_t)(deadline.tv_nsec - now.tv_nsec);
+    if (nanoseconds <= 0) {
+        return 0;
+    }
+    int64_t milliseconds =
+        (nanoseconds + INT64_C(999999)) / INT64_C(1000000);
+    return milliseconds > INT_MAX ? INT_MAX : (int)milliseconds;
+}
+
+static bool wait_socket(int fd, short events,
+                        struct timespec deadline) {
+    for (;;) {
+        if (stop_requested) {
+            errno = ECANCELED;
+            return false;
+        }
+        const int remaining = deadline_timeout_ms(deadline);
+        if (remaining == 0) {
+            errno = ETIMEDOUT;
+            return false;
+        }
+        const int timeout = remaining > 100 ? 100 : remaining;
+        struct pollfd descriptor = {
+            .fd = fd,
+            .events = events,
+        };
+        const int status = poll(&descriptor, 1u, timeout);
+        if (status > 0) {
+            if ((descriptor.revents & events) != 0) {
+                return true;
+            }
+            errno = ECONNRESET;
+            return false;
+        }
+        if (status == 0) {
+            if (timeout < remaining) {
+                continue;
+            }
+            errno = ETIMEDOUT;
+            return false;
+        }
+        if (errno != EINTR) {
+            return false;
+        }
+    }
+}
+
+static ssize_t receive_some(int fd, void *data, size_t size,
+                            struct timespec deadline) {
+    for (;;) {
+        const ssize_t amount = recv(fd, data, size, MSG_DONTWAIT);
+        if (amount >= 0) {
+            return amount;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            return -1;
+        }
+        if (!wait_socket(fd, POLLIN, deadline)) {
+            return -1;
+        }
+    }
+}
+
 static bool send_all(int fd, const void *data, size_t size) {
     const char *bytes = (const char *)data;
+    const struct timespec deadline = socket_deadline();
     while (size != 0u) {
+        int flags = MSG_DONTWAIT;
 #ifdef MSG_NOSIGNAL
-        const ssize_t sent = send(fd, bytes, size, MSG_NOSIGNAL);
-#else
-        const ssize_t sent = send(fd, bytes, size, 0);
+        flags |= MSG_NOSIGNAL;
 #endif
+        const ssize_t sent = send(fd, bytes, size, flags);
         if (sent > 0) {
             bytes += (size_t)sent;
             size -= (size_t)sent;
@@ -504,10 +616,16 @@ static bool send_all(int fd, const void *data, size_t size) {
         if (sent < 0 && errno == EINTR) {
             continue;
         }
+        if (sent < 0 &&
+            (errno == EAGAIN || errno == EWOULDBLOCK) &&
+            wait_socket(fd, POLLOUT, deadline)) {
+            continue;
+        }
         return false;
     }
     return true;
 }
+
 
 static const char *status_text(int status) {
     switch (status) {
@@ -520,6 +638,7 @@ static const char *status_text(int status) {
     case 413: return "Content Too Large";
     case 500: return "Internal Server Error";
     case 501: return "Not Implemented";
+    case 503: return "Service Unavailable";
     default: return "Error";
     }
 }
@@ -615,6 +734,7 @@ static bool receive_request(int fd, size_t max_body,
                             char *error, size_t error_size) {
     memset(request, 0, sizeof(*request));
     *http_status = 400;
+    const struct timespec deadline = socket_deadline();
     char *headers = (char *)malloc(K3_SERVER_MAX_HEADERS + 1u);
     if (headers == NULL) {
         *http_status = 500;
@@ -624,9 +744,9 @@ static bool receive_request(int fd, size_t max_body,
     size_t received = 0u;
     char *terminator = NULL;
     while (received < K3_SERVER_MAX_HEADERS) {
-        const ssize_t amount = recv(
+        const ssize_t amount = receive_some(
             fd, headers + received,
-            K3_SERVER_MAX_HEADERS - received, 0);
+            K3_SERVER_MAX_HEADERS - received, deadline);
         if (amount > 0) {
             received += (size_t)amount;
             headers[received] = '\0';
@@ -780,9 +900,9 @@ static bool receive_request(int fd, size_t max_body,
         return false;
     }
     while (body_received < content_length) {
-        const ssize_t amount = recv(
+        const ssize_t amount = receive_some(
             fd, request->body + body_received,
-            content_length - body_received, 0);
+            content_length - body_received, deadline);
         if (amount > 0) {
             body_received += (size_t)amount;
             continue;
@@ -835,6 +955,10 @@ static bool stream_send_event(stream_state *stream,
         !send_all(stream->fd, "data: ", 6u) ||
         !send_all(stream->fd, event, event_size) ||
         !send_all(stream->fd, "\n\n", 2u);
+    if (!stream->failed) {
+        clock_gettime(
+            CLOCK_MONOTONIC, &stream->last_progress);
+    }
     return !stream->failed;
 }
 
@@ -1171,6 +1295,86 @@ static void observe_prefill_progress(
     observer->last_prefill_log = now;
 }
 
+static bool peer_disconnected(int fd) {
+    struct pollfd descriptor = {
+        .fd = fd,
+        .events = POLLIN,
+    };
+#ifdef POLLRDHUP
+    descriptor.events |= POLLRDHUP;
+#endif
+    const int status = poll(&descriptor, 1u, 0);
+    if (status < 0) {
+        return errno != EINTR;
+    }
+    if (status == 0) {
+        return false;
+    }
+    short closed = POLLERR | POLLHUP | POLLNVAL;
+#ifdef POLLRDHUP
+    closed |= POLLRDHUP;
+#endif
+    if ((descriptor.revents & closed) != 0) {
+        return true;
+    }
+    if ((descriptor.revents & POLLIN) != 0) {
+        char byte;
+        const ssize_t amount = recv(
+            fd, &byte, 1u, MSG_PEEK | MSG_DONTWAIT);
+        if (amount == 0) {
+            return true;
+        }
+        if (amount < 0 && errno != EINTR &&
+            errno != EAGAIN && errno != EWOULDBLOCK) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool observe_request_control(
+        k3_chat_checkpoint checkpoint,
+        uint32_t completed,
+        void *user_data) {
+    request_observer *observer = (request_observer *)user_data;
+    if (stop_requested) {
+        observer->cancel_reason = "server_shutdown";
+        return false;
+    }
+    if ((observer->stream != NULL && observer->stream->failed) ||
+        peer_disconnected(observer->fd)) {
+        observer->cancel_reason = "client_disconnect";
+        return false;
+    }
+    if (checkpoint != K3_CHAT_CHECKPOINT_DECODE ||
+        observer->stream == NULL) {
+        return true;
+    }
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (elapsed_seconds(
+            observer->stream->last_progress, now) <
+        K3_SERVER_KEEPALIVE_SECONDS) {
+        return true;
+    }
+    char comment[192];
+    const int size = snprintf(
+        comment, sizeof(comment),
+        ": moonshine decode phase=%s generated=%u\r\n\r\n",
+        observer->decode_phase == NULL ? "unknown" :
+            observer->decode_phase,
+        completed);
+    if (size <= 0 || (size_t)size >= sizeof(comment) ||
+        !send_all(
+            observer->stream->fd, comment, (size_t)size)) {
+        observer->stream->failed = true;
+        observer->cancel_reason = "client_disconnect";
+        return false;
+    }
+    observer->stream->last_progress = now;
+    return true;
+}
+
 static void observe_lifecycle(
         k3_chat_lifecycle_event event,
         const k3_chat_turn_result *result,
@@ -1498,6 +1702,24 @@ static void log_result(const request_observer *observer,
         (unsigned long long)result->cache_after.accesses);
 }
 
+static void log_cancellation(
+        const request_observer *observer,
+        const k3_chat_turn_result *result) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    server_log(
+        SERVER_LOG_WARN, "request.cancelled",
+        observer->completion_id,
+        "peer=%s reason=%s phase=%s generated=%u total=%.3fs",
+        observer->peer,
+        observer->cancel_reason == NULL ?
+            "control" : observer->cancel_reason,
+        observer->decode_phase == NULL ?
+            "prefill" : observer->decode_phase,
+        result->generated_tokens,
+        elapsed_seconds(observer->request_start, now));
+}
+
 static void handle_chat_completion(int fd, k3_chat_session *session,
                                    const http_request *http,
                                    const server_config *config,
@@ -1508,6 +1730,8 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
     make_completion_id(completion_id, sizeof(completion_id), created);
     request_observer observer = {
         .completion_id = completion_id,
+        .peer = peer,
+        .fd = fd,
         .clear_expert_cache =
             config->clear_expert_cache_per_request,
     };
@@ -1578,6 +1802,8 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
                 config->clear_expert_cache_per_request,
             .progress_callback = observe_prefill_progress,
             .progress_data = &observer,
+            .control_callback = observe_request_control,
+            .control_data = &observer,
             .lifecycle_callback = observe_lifecycle,
             .lifecycle_data = &observer,
             .thinking = request.thinking,
@@ -1610,6 +1836,10 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
         if (ok) {
             stream_end(&stream, &result);
             log_result(&observer, &result, true, !stream.failed);
+        } else if (result.cancelled) {
+            log_cancellation(&observer, &result);
+            free(stream.pending);
+            stream.pending = NULL;
         } else {
             server_log(
                 SERVER_LOG_ERROR, "request.failed", completion_id,
@@ -1625,6 +1855,8 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
                 config->clear_expert_cache_per_request,
             .progress_callback = observe_prefill_progress,
             .progress_data = &observer,
+            .control_callback = observe_request_control,
+            .control_data = &observer,
             .lifecycle_callback = observe_lifecycle,
             .lifecycle_data = &observer,
             .thinking = request.thinking,
@@ -1652,12 +1884,16 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
                 &request, &result, error, sizeof(error));
         }
         if (!ok) {
-            server_log(
-                SERVER_LOG_ERROR, "request.failed", completion_id,
-                "capture=%llu peer=%s stage=inference error=\"%s\"",
-                (unsigned long long)result.decode_stats.capture,
-                peer, error);
-            (void)send_json_error(fd, 500, error);
+            if (result.cancelled) {
+                log_cancellation(&observer, &result);
+            } else {
+                server_log(
+                    SERVER_LOG_ERROR, "request.failed", completion_id,
+                    "capture=%llu peer=%s stage=inference error=\"%s\"",
+                    (unsigned long long)result.decode_stats.capture,
+                    peer, error);
+                (void)send_json_error(fd, 500, error);
+            }
         } else {
             char *json = NULL;
             size_t json_size = 0u;
@@ -1700,14 +1936,75 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
     k3_openai_chat_request_free(&request);
 }
 
-static void handle_request(int fd, k3_chat_session *session,
-                           const server_config *config,
-                           const char *peer) {
+static bool send_busy_response(int fd) {
+    static const char body[] =
+        "{\"error\":{\"message\":\"inference slot is busy\","
+        "\"type\":\"server_error\",\"param\":null,"
+        "\"code\":\"server_busy\"}}";
+    return send_response(
+        fd, 503, "application/json",
+        body, sizeof(body) - 1u,
+        "Retry-After: 1\r\n");
+}
+
+static void send_health_response(int fd, server_runtime *runtime) {
+    (void)pthread_mutex_lock(&runtime->mutex);
+    const bool busy = runtime->busy;
+    (void)pthread_mutex_unlock(&runtime->mutex);
+    char body[640];
+    const int body_size = snprintf(
+        body, sizeof(body),
+        "{\"status\":\"ok\",\"ready\":true,"
+        "\"busy\":%s,"
+        "\"model\":\"" MOONSHINE_MODEL_ID "\","
+        "\"engine\":\"" MOONSHINE_NAME "\","
+        "\"version\":\"" MOONSHINE_VERSION "\","
+        "\"expert_cache\":\"persistent\","
+        "\"prefix_reuse\":\"automatic_exact_prefix\","
+        "\"context_length\":%u,"
+        "\"max_output_tokens\":%u,"
+        "\"slots\":1,\"available_slots\":%u}",
+        busy ? "true" : "false",
+        runtime->config->context,
+        effective_max_output_tokens(runtime->config),
+        busy ? 0u : 1u);
+    if (body_size < 0 || (size_t)body_size >= sizeof(body)) {
+        (void)send_json_error(fd, 500, "health metadata overflow");
+        return;
+    }
+    (void)send_response(
+        fd, 200, "application/json",
+        body, (size_t)body_size, NULL);
+}
+
+static void send_models_response(int fd, const server_config *config) {
+    char body[512];
+    const int body_size = snprintf(
+        body, sizeof(body),
+        "{\"object\":\"list\",\"data\":[{"
+        "\"id\":\"" MOONSHINE_MODEL_ID "\","
+        "\"object\":\"model\",\"created\":0,"
+        "\"owned_by\":\"local\","
+        "\"context_length\":%u,"
+        "\"max_output_tokens\":%u}]}",
+        config->context,
+        effective_max_output_tokens(config));
+    if (body_size < 0 || (size_t)body_size >= sizeof(body)) {
+        (void)send_json_error(fd, 500, "model metadata overflow");
+        return;
+    }
+    (void)send_response(
+        fd, 200, "application/json",
+        body, (size_t)body_size, NULL);
+}
+
+static bool handle_control_request(server_runtime *runtime,
+                                   int fd, const char *peer) {
     http_request request;
     int status = 400;
     char error[1024];
     if (!receive_request(
-            fd, config->max_body, &request, &status,
+            fd, runtime->config->max_body, &request, &status,
             error, sizeof(error))) {
         server_log(
             SERVER_LOG_WARN, "http.reject", NULL,
@@ -1715,7 +2012,7 @@ static void handle_request(int fd, k3_chat_session *session,
             peer, status, error);
         (void)send_json_error(fd, status, error);
         http_request_free(&request);
-        return;
+        return false;
     }
     if (strcmp(request.path, "/health") == 0) {
         if (strcmp(request.method, "GET") != 0) {
@@ -1725,40 +2022,18 @@ static void handle_request(int fd, k3_chat_session *session,
                 peer, request.method, request.path);
             (void)send_json_error(fd, 405, "method not allowed");
         } else {
-            char body[512];
-            const int body_size = snprintf(
-                body, sizeof(body),
-                "{\"status\":\"ok\",\"ready\":true,"
-                "\"model\":\"" MOONSHINE_MODEL_ID "\","
-                "\"engine\":\"" MOONSHINE_NAME "\","
-                "\"version\":\"" MOONSHINE_VERSION "\","
-                "\"expert_cache\":\"persistent\","
-                "\"prefix_reuse\":\"automatic_exact_prefix\","
-                "\"context_length\":%u,"
-                "\"max_output_tokens\":%u,"
-                "\"slots\":1}",
-                config->context,
-                effective_max_output_tokens(config));
-            if (body_size < 0 ||
-                (size_t)body_size >= sizeof(body)) {
-                (void)send_json_error(
-                    fd, 500, "health metadata overflow");
-            } else {
-                (void)send_response(
-                    fd, 200, "application/json",
-                    body, (size_t)body_size, NULL);
-            }
+            send_health_response(fd, runtime);
         }
         http_request_free(&request);
-        return;
+        return false;
     }
-    if (!authorized(&request, config->api_key)) {
+    if (!authorized(&request, runtime->config->api_key)) {
         server_log(
             SERVER_LOG_WARN, "http.unauthorized", NULL,
             "peer=%s path=%s", peer, request.path);
         (void)send_json_error(fd, 401, "invalid or missing API key");
         http_request_free(&request);
-        return;
+        return false;
     }
     if (strcmp(request.path, "/v1/models") == 0) {
         if (strcmp(request.method, "GET") != 0) {
@@ -1768,48 +2043,88 @@ static void handle_request(int fd, k3_chat_session *session,
                 peer, request.method, request.path);
             (void)send_json_error(fd, 405, "method not allowed");
         } else {
-            char body[512];
-            const int body_size = snprintf(
-                body, sizeof(body),
-                "{\"object\":\"list\",\"data\":[{"
-                "\"id\":\"" MOONSHINE_MODEL_ID "\","
-                "\"object\":\"model\",\"created\":0,"
-                "\"owned_by\":\"local\","
-                "\"context_length\":%u,"
-                "\"max_output_tokens\":%u}]}",
-                config->context,
-                effective_max_output_tokens(config));
-            if (body_size < 0 ||
-                (size_t)body_size >= sizeof(body)) {
-                (void)send_json_error(
-                    fd, 500, "model metadata overflow");
-            } else {
-                (void)send_response(
-                    fd, 200, "application/json",
-                    body, (size_t)body_size, NULL);
-            }
+            send_models_response(fd, runtime->config);
         }
-    } else if (strcmp(
-                   request.path,
-                   "/v1/chat/completions") == 0) {
-        if (strcmp(request.method, "POST") != 0) {
-            server_log(
-                SERVER_LOG_WARN, "http.reject", NULL,
-                "peer=%s status=405 method=%s path=%s",
-                peer, request.method, request.path);
-            (void)send_json_error(fd, 405, "method not allowed");
-        } else {
-            handle_chat_completion(
-                fd, session, &request, config, peer);
-        }
-    } else {
+        http_request_free(&request);
+        return false;
+    }
+    if (strcmp(request.path, "/v1/chat/completions") != 0) {
         server_log(
             SERVER_LOG_WARN, "http.reject", NULL,
             "peer=%s status=404 method=%s path=%s",
             peer, request.method, request.path);
         (void)send_json_error(fd, 404, "endpoint not found");
+        http_request_free(&request);
+        return false;
     }
-    http_request_free(&request);
+    if (strcmp(request.method, "POST") != 0) {
+        server_log(
+            SERVER_LOG_WARN, "http.reject", NULL,
+            "peer=%s status=405 method=%s path=%s",
+            peer, request.method, request.path);
+        (void)send_json_error(fd, 405, "method not allowed");
+        http_request_free(&request);
+        return false;
+    }
+
+    (void)pthread_mutex_lock(&runtime->mutex);
+    if (runtime->busy || runtime->stopping) {
+        (void)pthread_mutex_unlock(&runtime->mutex);
+        server_log(
+            SERVER_LOG_WARN, "request.reject", NULL,
+            "peer=%s status=503 reason=busy", peer);
+        (void)send_busy_response(fd);
+        http_request_free(&request);
+        return false;
+    }
+    runtime->busy = true;
+    runtime->pending = true;
+    runtime->pending_fd = fd;
+    runtime->pending_request = request;
+    memset(&request, 0, sizeof(request));
+    snprintf(
+        runtime->pending_peer, sizeof(runtime->pending_peer),
+        "%s", peer);
+    (void)pthread_cond_signal(&runtime->pending_ready);
+    (void)pthread_mutex_unlock(&runtime->mutex);
+    return true;
+}
+
+static void *server_control_main(void *user_data) {
+    server_runtime *runtime = (server_runtime *)user_data;
+    while (!stop_requested) {
+        struct sockaddr_storage peer_address;
+        socklen_t peer_size = sizeof(peer_address);
+        const int client = accept(
+            runtime->listener,
+            (struct sockaddr *)&peer_address, &peer_size);
+        if (client < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (!stop_requested) {
+                server_log(
+                    SERVER_LOG_ERROR, "server.accept.failed", NULL,
+                    "error=\"%s\"", strerror(errno));
+                stop_requested = 1;
+            }
+            break;
+        }
+        char peer[NI_MAXHOST] = "unknown";
+        (void)getnameinfo(
+            (struct sockaddr *)&peer_address, peer_size,
+            peer, sizeof(peer), NULL, 0, NI_NUMERICHOST);
+        const bool transferred =
+            handle_control_request(runtime, client, peer);
+        if (!transferred) {
+            close(client);
+        }
+    }
+    (void)pthread_mutex_lock(&runtime->mutex);
+    runtime->stopping = true;
+    (void)pthread_cond_broadcast(&runtime->pending_ready);
+    (void)pthread_mutex_unlock(&runtime->mutex);
+    return NULL;
 }
 
 int main(int argc, char **argv) {
@@ -1836,7 +2151,7 @@ int main(int argc, char **argv) {
 
     char error[1024];
     const int listener =
-        create_listener(&config, error, sizeof(error));
+        create_bound_socket(&config, error, sizeof(error));
     if (listener < 0) {
         server_log(
             SERVER_LOG_ERROR, "server.listen.failed", NULL,
@@ -1874,9 +2189,70 @@ int main(int argc, char **argv) {
         server_log(
             SERVER_LOG_ERROR, "server.load.failed", NULL,
             "error=\"%s\"", error);
-        close(listener);
+        if (active_listener >= 0) {
+            close(listener);
+            active_listener = -1;
+        }
         return 1;
     }
+    if (stop_requested) {
+        k3_chat_session_destroy(session);
+        close(listener);
+        active_listener = -1;
+        return 0;
+    }
+
+    server_runtime runtime = {
+        .config = &config,
+        .listener = listener,
+        .pending_fd = -1,
+    };
+    if (pthread_mutex_init(&runtime.mutex, NULL) != 0) {
+        server_log(
+            SERVER_LOG_ERROR, "server.control.failed", NULL,
+            "error=\"initializing control mutex failed\"");
+        k3_chat_session_destroy(session);
+        close(listener);
+        active_listener = -1;
+        return 1;
+    }
+    runtime.mutex_initialized = true;
+    if (pthread_cond_init(&runtime.pending_ready, NULL) != 0) {
+        server_log(
+            SERVER_LOG_ERROR, "server.control.failed", NULL,
+            "error=\"initializing request condition failed\"");
+        (void)pthread_mutex_destroy(&runtime.mutex);
+        k3_chat_session_destroy(session);
+        close(listener);
+        active_listener = -1;
+        return 1;
+    }
+    runtime.condition_initialized = true;
+    if (!start_listener(listener, error, sizeof(error))) {
+        server_log(
+            SERVER_LOG_ERROR, "server.listen.failed", NULL,
+            "error=\"%s\"", error);
+        (void)pthread_cond_destroy(&runtime.pending_ready);
+        (void)pthread_mutex_destroy(&runtime.mutex);
+        k3_chat_session_destroy(session);
+        close(listener);
+        active_listener = -1;
+        return 1;
+    }
+    if (pthread_create(
+            &runtime.control_thread, NULL,
+            server_control_main, &runtime) != 0) {
+        server_log(
+            SERVER_LOG_ERROR, "server.control.failed", NULL,
+            "error=\"starting control thread failed\"");
+        (void)pthread_cond_destroy(&runtime.pending_ready);
+        (void)pthread_mutex_destroy(&runtime.mutex);
+        k3_chat_session_destroy(session);
+        close(listener);
+        active_listener = -1;
+        return 1;
+    }
+    runtime.control_started = true;
     server_log(
         SERVER_LOG_INFO, "server.ready", NULL,
         "listen=http://%s:%u model=%s version=%s context=%u "
@@ -1896,35 +2272,67 @@ int main(int argc, char **argv) {
         stats.mzg2_store ? "mzg2" :
             stats.mzg_expert_store ? "mzg1" : "safetensors");
 
-    while (!stop_requested) {
-        struct sockaddr_storage peer_address;
-        socklen_t peer_size = sizeof(peer_address);
-        const int client = accept(
-            listener, (struct sockaddr *)&peer_address, &peer_size);
-        if (client < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            if (!stop_requested) {
-                server_log(
-                    SERVER_LOG_ERROR, "server.accept.failed", NULL,
-                    "error=\"%s\"", strerror(errno));
-            }
+    for (;;) {
+        (void)pthread_mutex_lock(&runtime.mutex);
+        while (!runtime.pending && !runtime.stopping) {
+            (void)pthread_cond_wait(
+                &runtime.pending_ready, &runtime.mutex);
+        }
+        if (!runtime.pending) {
+            (void)pthread_mutex_unlock(&runtime.mutex);
             break;
         }
-        char peer[NI_MAXHOST] = "unknown";
-        (void)getnameinfo(
-            (struct sockaddr *)&peer_address, peer_size,
-            peer, sizeof(peer), NULL, 0, NI_NUMERICHOST);
-        handle_request(client, session, &config, peer);
+        const int client = runtime.pending_fd;
+        runtime.pending_fd = -1;
+        http_request request = runtime.pending_request;
+        memset(&runtime.pending_request, 0,
+               sizeof(runtime.pending_request));
+        char peer[NI_MAXHOST];
+        snprintf(peer, sizeof(peer), "%s", runtime.pending_peer);
+        runtime.pending = false;
+        const bool discard = runtime.stopping || stop_requested;
+        (void)pthread_mutex_unlock(&runtime.mutex);
+
+        if (!discard) {
+            handle_chat_completion(
+                client, session, &request, &config, peer);
+        }
+        http_request_free(&request);
         close(client);
+
+        (void)pthread_mutex_lock(&runtime.mutex);
+        runtime.busy = false;
+        (void)pthread_mutex_unlock(&runtime.mutex);
+        if (discard || stop_requested) {
+            break;
+        }
+    }
+
+    (void)pthread_mutex_lock(&runtime.mutex);
+    runtime.stopping = true;
+    (void)pthread_cond_broadcast(&runtime.pending_ready);
+    (void)pthread_mutex_unlock(&runtime.mutex);
+    if (active_listener >= 0) {
+        close(listener);
+        active_listener = -1;
+    }
+    if (runtime.control_started) {
+        (void)pthread_join(runtime.control_thread, NULL);
+    }
+    if (runtime.pending) {
+        http_request_free(&runtime.pending_request);
+        if (runtime.pending_fd >= 0) {
+            close(runtime.pending_fd);
+        }
     }
     server_log(SERVER_LOG_INFO, "server.stop", NULL,
                "reason=signal_or_listener_close");
     k3_chat_session_destroy(session);
-    if (active_listener >= 0) {
-        close(listener);
-        active_listener = -1;
+    if (runtime.condition_initialized) {
+        (void)pthread_cond_destroy(&runtime.pending_ready);
+    }
+    if (runtime.mutex_initialized) {
+        (void)pthread_mutex_destroy(&runtime.mutex);
     }
     return 0;
 }

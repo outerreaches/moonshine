@@ -11,6 +11,24 @@
         } \
     } while (0)
 
+typedef struct {
+    uint32_t completed_prefill_checkpoints;
+} cancellation_probe;
+
+static bool cancel_after_first_prefill(
+        k3_chat_checkpoint checkpoint,
+        uint32_t completed,
+        void *user_data) {
+    cancellation_probe *probe =
+        (cancellation_probe *)user_data;
+    if (checkpoint != K3_CHAT_CHECKPOINT_PREFILL ||
+        completed == 0u) {
+        return true;
+    }
+    probe->completed_prefill_checkpoints++;
+    return false;
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "usage: %s /path/to/moonshotai__Kimi-K3\n",
@@ -35,6 +53,31 @@ int main(int argc, char **argv) {
               &session, &config, &engine_stats,
               error, sizeof(error)),
           error);
+    const k3_chat_message cancelled_messages[] = {
+        {
+            .role = K3_CHAT_ROLE_USER,
+            .content = "This request must be cancelled.",
+        },
+    };
+    cancellation_probe probe = { 0 };
+    const k3_chat_completion_options cancelled_options = {
+        .control_callback = cancel_after_first_prefill,
+        .control_data = &probe,
+    };
+    CHECK(!k3_chat_session_complete_messages_with_options(
+              session,
+              cancelled_messages,
+              sizeof(cancelled_messages) /
+                  sizeof(cancelled_messages[0]),
+              32u, &cancelled_options,
+              NULL, NULL, &turn, error, sizeof(error)),
+          "controlled chat cancellation unexpectedly completed");
+    CHECK(turn.cancelled &&
+              probe.completed_prefill_checkpoints == 1u &&
+              strcmp(error, "chat request cancelled") == 0,
+          "controlled chat cancellation was not reported");
+    k3_chat_turn_result_free(&turn);
+
     CHECK(k3_chat_session_turn(
               session, "Say hello.", 32u,
               NULL, NULL, &turn, error, sizeof(error)),

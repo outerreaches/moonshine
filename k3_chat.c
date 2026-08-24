@@ -581,39 +581,69 @@ static bool encode_turn_prompt(k3_chat_session *session,
         &render_options, prompt, error, error_size);
 }
 
+static bool control_continue(
+        k3_chat_control_callback callback,
+        void *data,
+        k3_chat_checkpoint checkpoint,
+        uint32_t completed,
+        k3_chat_turn_result *result,
+        char *error,
+        size_t error_size) {
+    if (callback == NULL || callback(checkpoint, completed, data)) {
+        return true;
+    }
+    result->cancelled = true;
+    set_error(error, error_size, "chat request cancelled");
+    return false;
+}
+
 typedef struct {
     k3_chat_prefill_progress_callback callback;
     void                             *data;
+    k3_chat_control_callback          control_callback;
+    void                             *control_data;
+    k3_chat_turn_result              *result;
+    char                             *error;
+    size_t                            error_size;
     uint32_t                          completed_tokens;
     uint32_t                          chunk_tokens;
     uint32_t                          total_tokens;
     bool                              chunked;
 } prefill_progress_bridge;
 
-static void report_layer_progress(uint32_t completed,
+static bool report_layer_progress(uint32_t completed,
                                   uint32_t total,
                                   void *user_data) {
     prefill_progress_bridge *bridge =
         (prefill_progress_bridge *)user_data;
-    if (bridge->callback == NULL) return;
+    uint32_t checkpoint_completed = completed;
     if (!bridge->chunked) {
-        bridge->callback(
-            K3_CHAT_PREFILL_PROGRESS_LAYERS,
-            completed, total, bridge->data);
-        return;
+        if (bridge->callback != NULL) {
+            bridge->callback(
+                K3_CHAT_PREFILL_PROGRESS_LAYERS,
+                completed, total, bridge->data);
+        }
+    } else {
+        const uint64_t chunk_progress =
+            (uint64_t)bridge->chunk_tokens * completed / total;
+        uint64_t prompt_progress =
+            (uint64_t)bridge->completed_tokens + chunk_progress;
+        if (prompt_progress > bridge->total_tokens) {
+            prompt_progress = bridge->total_tokens;
+        }
+        checkpoint_completed = (uint32_t)prompt_progress;
+        if (bridge->callback != NULL) {
+            bridge->callback(
+                K3_CHAT_PREFILL_PROGRESS_TOKENS,
+                checkpoint_completed,
+                bridge->total_tokens,
+                bridge->data);
+        }
     }
-    const uint64_t chunk_progress =
-        (uint64_t)bridge->chunk_tokens * completed / total;
-    uint64_t prompt_progress =
-        (uint64_t)bridge->completed_tokens + chunk_progress;
-    if (prompt_progress > bridge->total_tokens) {
-        prompt_progress = bridge->total_tokens;
-    }
-    bridge->callback(
-        K3_CHAT_PREFILL_PROGRESS_TOKENS,
-        (uint32_t)prompt_progress,
-        bridge->total_tokens,
-        bridge->data);
+    return control_continue(
+        bridge->control_callback, bridge->control_data,
+        K3_CHAT_CHECKPOINT_PREFILL, checkpoint_completed,
+        bridge->result, bridge->error, bridge->error_size);
 }
 
 static void add_prefill_stats(k3_engine_prefill_stats *total,
@@ -724,6 +754,9 @@ static bool execute_prompt(
         uint32_t *predicted,
         k3_chat_prefill_progress_callback progress_callback,
         void *progress_data,
+        k3_chat_control_callback control_callback,
+        void *control_data,
+        bool *state_changed,
         k3_chat_turn_result *result,
         char *error,
         size_t error_size) {
@@ -735,6 +768,7 @@ static bool execute_prompt(
         result->prefill_strategy = K3_CHAT_PREFILL_SEQUENTIAL;
         float value = 0.0f;
         for (size_t i = 0u; ok && i < prompt->count; i++) {
+            *state_changed = true;
             ok = k3_engine_forward_token(
                 session->engine, prompt->data[i],
                 predicted, &value, error, error_size);
@@ -744,6 +778,13 @@ static bool execute_prompt(
                     (uint32_t)(i + 1u),
                     (uint32_t)prompt->count,
                     progress_data);
+            }
+            if (ok) {
+                ok = control_continue(
+                    control_callback, control_data,
+                    K3_CHAT_CHECKPOINT_PREFILL,
+                    (uint32_t)(i + 1u),
+                    result, error, error_size);
             }
         }
     } else {
@@ -777,6 +818,7 @@ static bool execute_prompt(
                 chunk_tokens > 2u) {
                 chunk_tokens--;
             }
+            *state_changed = true;
             if (chunk_tokens == 1u) {
                 ok = k3_engine_forward_token(
                     session->engine,
@@ -788,12 +830,24 @@ static bool execute_prompt(
                         completed_tokens + 1u, total_tokens,
                         progress_data);
                 }
+                if (ok) {
+                    ok = control_continue(
+                        control_callback, control_data,
+                        K3_CHAT_CHECKPOINT_PREFILL,
+                        completed_tokens + 1u,
+                        result, error, error_size);
+                }
             } else {
                 k3_engine_prefill_stats measured;
                 memset(&measured, 0, sizeof(measured));
                 prefill_progress_bridge bridge = {
                     .callback = progress_callback,
                     .data = progress_data,
+                    .control_callback = control_callback,
+                    .control_data = control_data,
+                    .result = result,
+                    .error = error,
+                    .error_size = error_size,
                     .completed_tokens = completed_tokens,
                     .chunk_tokens = chunk_tokens,
                     .total_tokens = total_tokens,
@@ -847,6 +901,8 @@ static bool execute_encoded_turn(
         uint32_t max_generated_tokens,
         k3_chat_prefill_progress_callback progress_callback,
         void *progress_data,
+        k3_chat_control_callback control_callback,
+        void *control_data,
         k3_chat_lifecycle_callback lifecycle_callback,
         void *lifecycle_data,
         bool thinking,
@@ -862,6 +918,7 @@ static bool execute_encoded_turn(
     k3_token_buffer thinking_trailer = { 0 };
     bool ok = true;
     bool mutated = false;
+    bool state_changed = false;
     bool diagnostics_active = false;
     if (thinking && !k3_tokenizer_encode(
             session->tokenizer,
@@ -944,9 +1001,17 @@ static bool execute_encoded_turn(
     k3_engine_get_cache_stats(
         session->engine, &result->cache_before);
     uint32_t predicted = 0u;
+    if (!control_continue(
+            control_callback, control_data,
+            K3_CHAT_CHECKPOINT_PREFILL, 0u,
+            result, error, error_size)) {
+        ok = false;
+        goto cleanup;
+    }
     if (!execute_prompt(
             session, prompt, range_chunk_tokens, &predicted,
             progress_callback, progress_data,
+            control_callback, control_data, &state_changed,
             result, error, error_size)) {
         ok = false;
         goto cleanup;
@@ -986,6 +1051,13 @@ static bool execute_encoded_turn(
     report_lifecycle(
         lifecycle_callback, lifecycle_data,
         K3_CHAT_LIFECYCLE_DECODE_START, result);
+    if (!control_continue(
+            control_callback, control_data,
+            K3_CHAT_CHECKPOINT_DECODE, 0u,
+            result, error, error_size)) {
+        ok = false;
+        goto cleanup;
+    }
     for (uint32_t generated = 0u;
          generated < generation_limit;
          generated++) {
@@ -1012,6 +1084,14 @@ static bool execute_encoded_turn(
             if (!append_retained_tokens(
                     session, &token, 1u,
                     error, error_size)) {
+                ok = false;
+                goto cleanup;
+            }
+            if (!control_continue(
+                    control_callback, control_data,
+                    K3_CHAT_CHECKPOINT_DECODE,
+                    result->generated_tokens,
+                    result, error, error_size)) {
                 ok = false;
                 goto cleanup;
             }
@@ -1089,6 +1169,14 @@ static bool execute_encoded_turn(
             ok = false;
             goto cleanup;
         }
+        if (!control_continue(
+                control_callback, control_data,
+                K3_CHAT_CHECKPOINT_DECODE,
+                result->generated_tokens,
+                result, error, error_size)) {
+            ok = false;
+            goto cleanup;
+        }
         if ((result->generated_tokens & 63u) == 0u) {
             report_lifecycle(
                 lifecycle_callback, lifecycle_data,
@@ -1126,6 +1214,14 @@ static bool execute_encoded_turn(
                 goto cleanup;
             }
             result->forced_trailer_tokens++;
+            if (!control_continue(
+                    control_callback, control_data,
+                    K3_CHAT_CHECKPOINT_DECODE,
+                    result->generated_tokens,
+                    result, error, error_size)) {
+                ok = false;
+                goto cleanup;
+            }
         }
         result->finish_reason = K3_CHAT_FINISH_LENGTH;
     } else {
@@ -1196,7 +1292,20 @@ cleanup:
         free(result->tool_calls);
         result->tool_calls = NULL;
         result->tool_call_count = 0u;
-        if (mutated || !session->healthy) {
+        if (result->cancelled && state_changed) {
+            char reset_error[512];
+            if (!k3_chat_session_reset(
+                    session, false,
+                    reset_error, sizeof(reset_error))) {
+                result->cancelled = false;
+                set_error(
+                    error, error_size,
+                    "resetting cancelled chat state failed: %s",
+                    reset_error);
+            }
+        }
+        if (!result->cancelled &&
+            (mutated || !session->healthy)) {
             session->healthy = false;
             session->retained_tokens.count = 0u;
         }
@@ -1283,7 +1392,7 @@ bool k3_chat_session_turn(
             session, &prompt,
             (uint32_t)prompt.count, 0u, 0u,
             max_generated_tokens, NULL, NULL,
-            NULL, NULL,
+            NULL, NULL, NULL, NULL,
             false, NULL, NULL,
             callback, callback_data, result,
             error, error_size);
@@ -1518,6 +1627,15 @@ bool k3_chat_session_complete_messages_with_options(
                 options->lifecycle_data,
             K3_CHAT_LIFECYCLE_PREFILL_START, result);
     }
+    if (ok) {
+        ok = control_continue(
+            options == NULL ? NULL :
+                options->control_callback,
+            options == NULL ? NULL :
+                options->control_data,
+            K3_CHAT_CHECKPOINT_PREFILL, 0u,
+            result, error, error_size);
+    }
     uint32_t range_chunk_tokens = 0u;
     if (ok && reused == 0u) {
         ok = preflight_replacement_prefill(
@@ -1543,6 +1661,10 @@ bool k3_chat_session_complete_messages_with_options(
                 options->progress_callback,
             options == NULL ? NULL :
                 options->progress_data,
+            options == NULL ? NULL :
+                options->control_callback,
+            options == NULL ? NULL :
+                options->control_data,
             options == NULL ? NULL :
                 options->lifecycle_callback,
             options == NULL ? NULL :

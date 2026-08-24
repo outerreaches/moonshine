@@ -330,9 +330,12 @@ curl http://127.0.0.1:8080/v1/models
 ```
 
 The OpenAI model ID is `moonshine`. Health and discovery include the configured
-`context_length` and effective `max_output_tokens`. Set `MOONSHINE_API_KEY` or
-use `--api-key` before binding beyond loopback. This research server has one
-blocking request slot.
+`context_length`, effective `max_output_tokens`, and one-slot availability.
+Set `MOONSHINE_API_KEY` or use `--api-key` before binding beyond loopback. The
+research server has one inference slot, but its independent control thread
+keeps health/model discovery responsive while busy. A competing completion is
+rejected with HTTP 503 and `Retry-After: 1`; it is never queued behind the
+active request.
 
 The output ceiling defaults to 8,192 and can be raised to 65,536 with
 `--max-output-tokens`. It cannot exceed the configured context. The Chat
@@ -368,7 +371,9 @@ commands and qualification boundaries.
 
 Long prefill can take minutes. Configure client request/read timeouts
 accordingly; use `curl --max-time 0` for manual checks. Streaming requests emit
-SSE comment keepalives with token/layer progress during prefill.
+ten-second SSE comments during prefill and quiet decode regions. Disconnects
+cancel at the next complete token/layer boundary; causal state resets to zero
+while immutable expert-cache mappings remain available.
 
 The server preserves immutable expert-cache mappings between requests.
 Append-only causal-state reuse is automatic while the next request extends the
@@ -429,6 +434,9 @@ gate is:
 ```sh
 .venv-sdk/bin/python tests/qualify_openai_sdk_live.py
 ```
+
+Use `--base-url` and `--api-key` when qualifying an already running protected
+deployment.
 
 Neither command is part of the native runtime dependency set.
 

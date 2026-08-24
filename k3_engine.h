@@ -329,10 +329,11 @@ bool k3_engine_forward_range(
 
 /*
  * Called after each completed layer during layer-major prefill. The callback
- * runs on the inference thread and must return quickly. It is informational:
- * inference continues even if a consumer can no longer receive progress.
+ * runs on the inference thread and must return quickly. Return false to stop
+ * before the next layer; the current layer has completed and all of its
+ * I/O/GPU work has been reaped.
  */
-typedef void (*k3_engine_prefill_progress_callback)(
+typedef bool (*k3_engine_prefill_progress_callback)(
         uint32_t completed_layers,
         uint32_t total_layers,
         void    *user_data);

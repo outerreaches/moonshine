@@ -444,13 +444,16 @@ memory, and pass criteria are documented in `docs/qualification-*.md` and
 - At 128K on the qualified 128 GB host, use `--experts 30`. Thirty-two slots can
   violate the CMA-plus-4-GiB safety reserve on a later request.
 - Runtime state is 0.920 GiB at 8K, 1.566 GiB at 32K, and 4.150 GiB at 128K.
-- The server processes one request at a time. Parallel request slots, sampling,
-  and HTTP request chunking are not implemented.
+- The server has one inference slot. Health/model discovery remain responsive
+  while it is occupied; a competing completion receives HTTP 503 instead of
+  waiting in the listener backlog.
 - The source ceiling is 65,536 output tokens, but the effective limit is
   clamped to configured and remaining context. A continuous 64K decode has not
   been qualified and would take many hours.
 - Layer-major TTFT can be many minutes. Use streaming and long client timeouts.
-  SSE emits comment keepalives during prefill; ordinary JSON cannot.
+  SSE emits comment keepalives during both prefill and decode. A disconnected
+  client cancels at the next complete token/layer boundary and resets semantic
+  state while retaining immutable expert-cache entries.
 - Auxiliary client requests can replace the single retained causal prefix and
   occupy the only request slot. Route title generation, security review, and
   similar work to another model when possible.
@@ -467,10 +470,10 @@ window closed scan-resistant admission, larger compressed-resident cache slots,
 MZG2 queue-depth changes, layer-scoped integrity clearing, and event-driven
 prefill buffer reuse on this node.
 
-Current open work is intentionally narrower:
+Current open work is intentionally narrower. The busy-safe control plane,
+disconnect cancellation, decode keepalives, and graceful signal drain are
+implemented and qualified.
 
-- busy-safe health/model discovery, disconnect cancellation, graceful shutdown,
-  and decode-phase keepalives;
 - engine/server activation of the exact prefix-checkpoint catalog;
 - integration and measurement of the completed one-pass selected-prefill route
   index;

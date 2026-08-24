@@ -71,6 +71,7 @@ typedef struct {
     uint32_t                 forced_trailer_tokens;
     uint32_t                 position;
     bool                     thinking;
+    bool                     cancelled;
     double                   prompt_seconds;
     double                   decode_seconds;
     double                   tokens_per_second;
@@ -95,6 +96,20 @@ typedef void (*k3_chat_prefill_progress_callback)(
     uint32_t                      completed,
     uint32_t                      total,
     void                         *user_data);
+
+typedef enum {
+    K3_CHAT_CHECKPOINT_PREFILL = 0,
+    K3_CHAT_CHECKPOINT_DECODE = 1,
+} k3_chat_checkpoint;
+
+/*
+ * Called only between complete prefill tokens/layers or generated tokens.
+ * Return false to cancel before the next unit of model work.
+ */
+typedef bool (*k3_chat_control_callback)(
+    k3_chat_checkpoint checkpoint,
+    uint32_t           completed,
+    void              *user_data);
 
 /*
  * Coarse request lifecycle notifications for transports and operators. These
@@ -130,6 +145,8 @@ typedef struct {
     bool                              clear_expert_cache;
     k3_chat_prefill_progress_callback progress_callback;
     void                             *progress_data;
+    k3_chat_control_callback          control_callback;
+    void                             *control_data;
     bool                              thinking;
     const char                       *thinking_effort;
     /* Optional token-live callback for the generated <think> channel. */

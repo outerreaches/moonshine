@@ -34,8 +34,12 @@ make test-chat-hello MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3
 ```
 
 Also verify `moonshine-server` health, model discovery, JSON completion, and
-SSE completion on the qualified host. Confirm pre-TTFT SSE keepalives, a
-warmer second stateless request, automatic exact append-prefix reuse through
+SSE completion on the qualified host. While one completion is active, require
+responsive `busy:true` health/model discovery and an immediate HTTP 503 for a
+competing completion without backlog growth. Confirm prefill and quiet-decode
+SSE keepalives, disconnect cancellation with a successful exact recovery
+request, graceful `SIGTERM` during active inference, a warmer second stateless
+request, automatic exact append-prefix reuse through
 `usage.prompt_tokens_details.cached_tokens`, and mismatch fallback. For a
 raised-ceiling candidate,
 confirm health/model metadata, acceptance at the configured ceiling, rejection
@@ -64,10 +68,13 @@ that redirected output contains no ANSI escapes; `NO_COLOR=1` disables TTY
 color; exact reuse is reported before prefill; reasoning, response-or-tool, and
 64-token decode-progress events appear in order; and final usage matches the
 API response. Exercise one mismatch, malformed request, authentication failure,
-and disconnected client. Audit the captured log for prompts, generated text,
-tool arguments, request bodies, credentials, control-character line injection,
-and unbounded records. Use [the operational logging contract](docs/observability.md)
-as the expected event surface.
+busy rejection, mid-prefill disconnect, buffered-decode disconnect, and
+`SIGTERM` during active work. Require a single `request.cancelled` record with
+the correct reason and no corresponding completion/failure. Audit the captured
+log for prompts, generated text, tool arguments, request bodies, credentials,
+control-character line injection, and unbounded records. Use
+[the operational logging contract](docs/observability.md) as the expected event
+surface.
 
 For a decode-diagnostics change, use fresh single-request servers with the
 same model, context, expert capacity, and fixed request. Run the baseline with

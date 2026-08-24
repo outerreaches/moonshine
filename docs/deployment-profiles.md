@@ -184,11 +184,11 @@ instead of passing a zero-duration request. Start a fresh Pi session after
 changing these values; a session that already contains a partial `terminated`
 assistant response and retry errors is not a clean continuation candidate.
 
-This configuration is a necessary client workaround, not the final server
-behavior. Moonshine still needs decode-phase SSE keepalives during buffered
-tool/structured output, inference cancellation after peer disconnect, passive
-half-close detection, and busy-safe handling that does not leave stale sockets
-in the accept backlog.
+These client settings remain defense in depth, but the server-side failure mode
+is closed. Decode now emits SSE comments while tool/structured content is
+buffered. A peer disconnect or passive half-close cancels after the current
+complete token/layer, and the independent control thread drains accepted
+connections instead of leaving retries in the kernel backlog.
 
 ## Hermes Agent compatibility
 
@@ -258,9 +258,9 @@ tokens, 4,300 reused/cached tokens, and only 51 evaluated tokens, then generated
 a 47-token final answer containing the working directory. Exact reasoning
 replay is therefore qualified across the actual Hermes tool boundary.
 
-Moonshine emits SSE progress comments during prefill, but this engine is much
-slower than a cloud endpoint. For ordinary short-prompt agent use, make the
-Hermes timeouts explicit:
+Moonshine emits SSE progress comments during prefill and quiet decode regions,
+but this engine is much slower than a cloud endpoint. For ordinary short-prompt
+agent use, make the Hermes timeouts explicit:
 
 ```sh
 HERMES_API_TIMEOUT=1800
@@ -272,7 +272,8 @@ stale detector. Its default is 900 seconds and it does not count Moonshine's
 SSE comment keepalives as model-output chunks. Set
 `agent.local_stream_stale_timeout: 1800` (or
 `HERMES_LOCAL_STREAM_STALE_TIMEOUT=1800`) as well; otherwise a long prefill can
-trigger a reconnect at 15 minutes while the original request is still running.
+trigger a reconnect at 15 minutes and force Moonshine to cancel the abandoned
+request at its next safe checkpoint.
 
 These are seconds. Hermes normally raises the stream read timeout for LAN and
 loopback endpoints, but explicit values remove endpoint-detection ambiguity.
@@ -316,22 +317,18 @@ For deliberately long 16K/32K prompts, start with 7,200 seconds for both
 values. The qualified filled-32K prefill took about 73 minutes before decode,
 so the ordinary 30-minute tier is not sufficient for that workload.
 
-The server currently has one blocking accept/inference path, so **do not poll
-it on a timer**. A probe opened while a request is in flight completes its TCP
-handshake in the kernel and then waits in the accept backlog; the client timing
-out does not remove it. A five-second monitor was observed filling the
-16-entry backlog during a single long request (`Recv-Q=17`), after which the
-kernel refuses further connections — including agent continuations.
+Health and model discovery are safe to poll while inference is active. The
+control thread accepts them independently of the one model slot; `/health`
+reports `busy:true` and `available_slots:0` until that request releases the
+slot. A competing completion receives HTTP 503 with `Retry-After: 1` rather
+than waiting in the listener backlog.
 
-Until Moonshine offers a busy-safe status path, monitor it passively: the
-listening socket proves residency, `/proc/<pid>/cmdline` carries the configured
-context, and a non-empty accept queue indicates the slot is occupied. Check
-`ss -ltn 'sport = :8080'` rather than issuing a request.
-
-The timeout only prevents premature client cancellation. It does not change
-Moonshine's single-request slot, model speed, context accounting, or output
-ceiling. Prefer streaming for Hermes so progress keepalives can traverse the
-connection; ordinary JSON responses cannot emit keepalives.
+Client timeouts still need to cover legitimate inference wall time. Streaming
+is preferred because ten-second SSE comments cover prefill and quiet decode
+regions; ordinary JSON cannot carry application-level progress. If the client
+abandons either form, Moonshine detects the closed peer at the next safe
+token/layer checkpoint, resets semantic state, and retains immutable
+expert-cache entries.
 
 Hermes title generation is a separate non-streaming request with its own
 30-second default timeout. The observed helper made repeated 30-second

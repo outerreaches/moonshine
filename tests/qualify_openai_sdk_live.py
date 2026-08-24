@@ -55,10 +55,13 @@ def main() -> None:
     parser.add_argument(
         "--base-url", default="http://127.0.0.1:18084/v1"
     )
+    parser.add_argument(
+        "--api-key", default="moonshine-local-qualification"
+    )
     args = parser.parse_args()
     client = OpenAI(
         base_url=args.base_url,
-        api_key="moonshine-local-qualification",
+        api_key=args.api_key,
         timeout=1200.0,
     )
     messages = [{

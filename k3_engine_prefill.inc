@@ -1893,8 +1893,12 @@ static bool k3_engine_forward_range_impl(
     clock_gettime(CLOCK_MONOTONIC, &phase_end);
     measured.layer0_seconds =
         elapsed_seconds(phase_start, phase_end);
-    if (ok && progress_callback) {
-        progress_callback(1u, K3_ENGINE_LAYERS, progress_data);
+    if (ok && progress_callback &&
+        !progress_callback(1u, K3_ENGINE_LAYERS, progress_data)) {
+        engine_error(
+            error, error_size,
+            "K3 prefill stopped after completed layer 1");
+        ok = false;
     }
     void *input = workspace.hidden[1];
     void *output = workspace.hidden[0];
@@ -1909,10 +1913,15 @@ static bool k3_engine_forward_range_impl(
             void *swap = input;
             input = output;
             output = swap;
-            if (progress_callback) {
-                progress_callback(
+            if (progress_callback &&
+                !progress_callback(
                     layer + 1u, K3_ENGINE_LAYERS,
-                    progress_data);
+                    progress_data)) {
+                engine_error(
+                    error, error_size,
+                    "K3 prefill stopped after completed layer %u",
+                    layer + 1u);
+                ok = false;
             }
         }
     }

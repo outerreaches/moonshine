@@ -15,6 +15,17 @@ Semantic Versioning once its first research-preview tag is published.
 - A transport-facing coarse chat lifecycle callback used by the server without
   changing inference kernels, arithmetic, routing, I/O, cache policy, or
   scheduling.
+- A busy-safe one-slot HTTP control plane. A dedicated acceptor serves health
+  and authenticated model discovery during inference, reports slot
+  availability, rejects competing completions with HTTP 503/`Retry-After`, and
+  bounds request and response socket I/O to 30 seconds.
+- Transport-aware cancellation checkpoints after complete prefill
+  tokens/layers, generated tokens, and forced-trailer tokens. Peer loss and
+  termination signals stop before the next model unit, drain current work,
+  reset causal state without clearing immutable expert-cache mappings, and
+  emit a typed `request.cancelled` lifecycle record.
+- Ten-second decode SSE comments for quiet reasoning, tool, and structured
+  output regions, independent of the existing prefill progress comments.
 - A production-scale MXFP4/BF16 expert GEMM shape screen spanning selected-row
   counts through 1,170, with numerical envelopes and tile/backend timing.
 - Opt-in decode cache snapshots, per-layer I/O/timing ledgers, content-derived
@@ -87,6 +98,10 @@ Semantic Versioning once its first research-preview tag is published.
   every MZG2 probability/LUT table before GPU decode.
 - Require explicit arguments for the layer-local MZG2 transcoder so a no-argument
   invocation cannot create a large derived artifact in the source tree.
+- Prevent timed-out monitoring/retry connections from saturating the listener
+  backlog during a long inference request. Health/model discovery now remains
+  responsive, abandoned streaming and JSON work releases the inference slot,
+  and `SIGINT`/`SIGTERM` drains active inference before engine destruction.
 
 ## [0.2.0-research-preview] - 2026-08-01
 
