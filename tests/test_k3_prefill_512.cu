@@ -133,6 +133,15 @@ int main(int argc, char **argv) {
               &engine, root, context, 32u, 16u, true,
               &startup, error, sizeof(error)),
           error);
+    const char *prefill_diagnostics =
+        getenv("MOONSHINE_PREFILL_DIAGNOSTICS");
+    if (prefill_diagnostics != NULL &&
+        prefill_diagnostics[0] != '\0') {
+        CHECK(k3_engine_configure_prefill_diagnostics(
+                  engine, prefill_diagnostics,
+                  error, sizeof(error)),
+              error);
+    }
     k3_prefill_plan plan;
     CHECK(k3_engine_plan_prefill_with_projection_backend(
               engine, token_count,

@@ -54,6 +54,7 @@ PORTABLE_CPU_TESTS := \
 	tests/test_k3_prefix_reuse \
 	tests/test_k3_prefix_catalog \
 	tests/test_k3_prefill_route_index \
+	tests/test_k3_prefill_timeline \
 	tests/test_k3_q8_codec \
 	tests/test_k3_json \
 	tests/test_k3_openai
@@ -110,8 +111,8 @@ ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS)
 	test-long-context-retrieval \
 	test-mla-batch-determinism test-mla-batch-kernels \
 	test-moe-tail-profile test-decode-cache-replay test-cache-analyzer \
-	test-static-q8-screen test-mzg-transcoder test-reduction-qualification \
-	test-openai-sdk clean
+	test-prefill-screen-analyzer test-static-q8-screen test-mzg-transcoder \
+	test-reduction-qualification test-openai-sdk clean
 
 all: libmoonshine.a moonshine-chat moonshine-server
 
@@ -216,6 +217,8 @@ tests/test_k3_prefix_catalog.o: tests/test_k3_prefix_catalog.c \
 tests/test_k3_state_checkpoint.o: tests/test_k3_state_checkpoint.cu k3_engine.h
 tests/test_k3_prefill_route_index.o: tests/test_k3_prefill_route_index.c \
 	k3_prefill_route_index.h
+tests/test_k3_prefill_timeline.o: tests/test_k3_prefill_timeline.c \
+	k3_prefill.h
 tests/test_k3_tokenizer.o: tests/test_k3_tokenizer.c k3_tokenizer.h
 tools/transcode_mzg2_layer.o: tools/transcode_mzg2_layer.cu \
 	k3_mzg2.h k3_safetensors.h
@@ -244,6 +247,9 @@ tests/test_k3_prefix_catalog: tests/test_k3_prefix_catalog.o \
 
 tests/test_k3_prefill_route_index: tests/test_k3_prefill_route_index.o \
 		k3_prefill_route_index.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_k3_prefill_timeline: tests/test_k3_prefill_timeline.o k3_prefill.o \
+		k3_safetensors.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 tests/test_k3_q8_codec: tests/test_k3_q8_codec.o k3_q8_codec.o \
 		k3_static_layout.o
@@ -280,6 +286,10 @@ test-cache-analyzer:
 		$(PYTHON) -m unittest discover -s tests \
 		-p 'test_analyze_decode_cache.py' -v
 
+test-prefill-screen-analyzer:
+	PYTHONDONTWRITEBYTECODE=1 \
+		$(PYTHON) -m unittest -v tests/test_analyze_prefill_screen.py
+
 test-static-q8-screen: tests/test_k3_q8_codec tools/screen_static_q8
 	./tests/test_k3_q8_codec
 	./tools/screen_static_q8 --self-test
@@ -288,11 +298,13 @@ test-mzg-transcoder:
 	PYTHONDONTWRITEBYTECODE=1 \
 		$(PYTHON) -m unittest -v tests/test_transcode_mzg.py
 
-test-cpu: $(PORTABLE_CPU_TESTS) test-cache-analyzer
+test-cpu: $(PORTABLE_CPU_TESTS) test-cache-analyzer \
+	test-prefill-screen-analyzer
 	./tests/test_k3_expert_cache
 	./tests/test_k3_prefix_reuse
 	./tests/test_k3_prefix_catalog
 	./tests/test_k3_prefill_route_index
+	./tests/test_k3_prefill_timeline
 	./tests/test_k3_q8_codec
 	./tests/test_k3_json
 	./tests/test_k3_openai

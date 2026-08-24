@@ -48,6 +48,17 @@ The admission gate may stop naturally; it does not need to generate the entire
 configured maximum. Record the commit, model revision, hardware, kernel, ROCm
 version, context, output ceiling, memory ledger, and timings.
 
+For a routed-prefill timing change, use `--prefill-diagnostics` or
+`MOONSHINE_PREFILL_DIAGNOSTICS` only in fresh qualification processes. Discard
+one warm-up and publish four identical baseline arms as the noise floor. Run
+`tools/analyze_prefill_screen.py --noise-only`; `UNRESOLVABLE` stops the
+screen before candidate work. Only `READY_FOR_ABBA` permits
+baseline/candidate/candidate/baseline in one uninterrupted window and the
+complete nine-file analysis. Require exact route-union and physical-I/O
+identity, gate on the mechanism's subphase, and use aggregate phase wall only
+as a no-regression guard. Record NVMe temperature/throttle state externally
+for every arm.
+
 For a persistent 128K service on the qualified 128 GB host, use
 `--experts 30` and complete at least two independent prefills in the same
 process. The Q8/32 128K configured-capacity fixture covers one cold request;

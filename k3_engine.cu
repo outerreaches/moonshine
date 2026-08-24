@@ -137,6 +137,47 @@ static const uint64_t K3_ENGINE_BF16_EXTRA_GUARD_BYTES =
     UINT64_C(4) * UINT64_C(1024) * UINT64_C(1024) *
     UINT64_C(1024);
 
+
+enum {
+    K3_PREFILL_EVENT_DEFAULT_START = 0,
+    K3_PREFILL_EVENT_DEFAULT_END,
+    K3_PREFILL_EVENT_EXPERT_START,
+    K3_PREFILL_EVENT_EXPERT_END,
+    K3_PREFILL_EVENT_SHARED_START,
+    K3_PREFILL_EVENT_SHARED_END,
+    K3_PREFILL_EVENT_DECODER_START,
+    K3_PREFILL_EVENT_DECODER_END,
+    K3_PREFILL_EVENT_COUNT,
+};
+
+typedef struct {
+    uint32_t layer;
+    uint32_t tokens;
+    uint32_t unique_experts;
+    uint32_t read_requests;
+    uint64_t physical_read_bytes;
+    k3_prefill_ring_timeline ring;
+    uint64_t mzg2_launches;
+    uint64_t integrity_clears;
+    uint64_t index_h2d_copies;
+    uint64_t gathers;
+    uint64_t expert_gemms;
+    uint64_t scatters;
+    uint64_t stream_synchronizes;
+    uint64_t event_waits;
+    double attention_seconds;
+    double router_seconds;
+    double routed_stream_seconds;
+    double read_wait_seconds;
+    double submit_seconds;
+    double index_seconds;
+    double expert_pipeline_seconds;
+    double moe_tail_seconds;
+    double default_span_ms;
+    double expert_span_ms;
+    double shared_span_ms;
+    double mzg2_decoder_gpu_ms;
+} k3_prefill_layer_diagnostics;
 struct k3_engine {
     k3_st_model model;
     bool model_open;
@@ -198,11 +239,17 @@ struct k3_engine {
     off_t decode_cache_offset;
     off_t decode_router_logits_offset;
     bool decode_diagnostics_active;
+    FILE *prefill_diagnostics;
+    uint64_t prefill_diagnostics_capture;
+    off_t prefill_diagnostics_offset;
+    bool prefill_diagnostics_active;
+    hipEvent_t prefill_event[K3_PREFILL_EVENT_COUNT];
 };
 
 static uint64_t engine_model_layout_crc64(
     const k3_st_model *model);
 static bool rollback_decode_diagnostics_capture(k3_engine *engine);
+static bool rollback_prefill_diagnostics_capture(k3_engine *engine);
 
 static void engine_error(char *error,
                          size_t error_size,
@@ -399,6 +446,20 @@ extern "C" void k3_engine_destroy(k3_engine *engine) {
         engine->decode_ledger) {
         (void)rollback_decode_diagnostics_capture(engine);
         engine->decode_diagnostics_active = false;
+    }
+    if (engine->prefill_diagnostics_active &&
+        engine->prefill_diagnostics) {
+        (void)rollback_prefill_diagnostics_capture(engine);
+        engine->prefill_diagnostics_active = false;
+    }
+    if (engine->prefill_diagnostics) {
+        (void)fclose(engine->prefill_diagnostics);
+    }
+    for (uint32_t index = 0u;
+         index < K3_PREFILL_EVENT_COUNT; index++) {
+        if (engine->prefill_event[index]) {
+            (void)hipEventDestroy(engine->prefill_event[index]);
+        }
     }
     if (engine->decode_cache) {
         (void)fclose(engine->decode_cache);
@@ -2396,6 +2457,7 @@ static FILE *open_private_decode_diagnostics_file(const char *path) {
             O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
             S_IRUSR | S_IWUSR);
     } while (fd < 0 && errno == EINTR);
+
     if (fd < 0) return NULL;
     if (fchmod(fd, S_IRUSR | S_IWUSR) != 0) {
         const int saved_errno = errno;
@@ -2470,6 +2532,184 @@ static bool rollback_decode_diagnostics_capture(k3_engine *engine) {
             engine->decode_router_logits,
             engine->decode_router_logits_offset);
     return ledger_ok && routes_ok && cache_ok && logits_ok;
+}
+extern "C" bool k3_engine_configure_prefill_diagnostics(
+        k3_engine *engine,
+        const char *prefix,
+        char *error,
+        size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (!engine || !prefix || prefix[0] == '\0' ||
+        engine->prefill_diagnostics ||
+        engine->prefill_diagnostics_active) {
+        engine_error(error, error_size,
+                     "invalid prefill diagnostics configuration");
+        return false;
+    }
+    char path[4096];
+    const int length = snprintf(
+        path, sizeof(path), "%s.prefill.csv", prefix);
+    if (length < 0 || (size_t)length >= sizeof(path)) {
+        engine_error(error, error_size,
+                     "prefill diagnostics prefix is too long");
+        return false;
+    }
+    FILE *stream = open_private_decode_diagnostics_file(path);
+    if (!stream) {
+        engine_error(
+            error, error_size,
+            "opening prefill diagnostics %s failed: %s",
+            path, strerror(errno));
+        return false;
+    }
+    if (fprintf(
+            stream,
+            "capture,layer,tokens,unique_experts,read_requests,"
+            "physical_read_bytes,attention_seconds,router_seconds,"
+            "routed_stream_seconds,read_wait_seconds,submit_seconds,"
+            "index_seconds,expert_pipeline_seconds,moe_tail_seconds,"
+            "default_span_ms,expert_span_ms,shared_span_ms,"
+            "mzg2_decoder_gpu_ms,ring_depth0_seconds,"
+            "ring_depth1_seconds,ring_depth2_seconds,ring_transitions,"
+            "ring_max_depth,mzg2_launches,integrity_clears,"
+            "index_h2d_copies,gathers,expert_gemms,scatters,"
+            "stream_synchronizes,event_waits\n") < 0 ||
+        fflush(stream) != 0) {
+        engine_error(
+            error, error_size,
+            "writing prefill diagnostics header failed: %s",
+            strerror(errno));
+        (void)fclose(stream);
+        (void)unlink(path);
+        return false;
+    }
+    for (uint32_t index = 0u;
+         index < K3_PREFILL_EVENT_COUNT; index++) {
+        const hipError_t status =
+            hipEventCreate(&engine->prefill_event[index]);
+        if (status != hipSuccess) {
+            engine_error(
+                error, error_size,
+                "creating prefill diagnostic event %u failed: %s",
+                index, hipGetErrorString(status));
+            for (uint32_t created = 0u;
+                 created <= index; created++) {
+                if (engine->prefill_event[created]) {
+                    (void)hipEventDestroy(
+                        engine->prefill_event[created]);
+                    engine->prefill_event[created] = NULL;
+                }
+            }
+            (void)fclose(stream);
+            (void)unlink(path);
+            return false;
+        }
+    }
+    engine->prefill_diagnostics = stream;
+    return true;
+}
+
+static bool begin_prefill_diagnostics_capture(
+        k3_engine *engine,
+        char *error,
+        size_t error_size) {
+    if (!engine->prefill_diagnostics) return true;
+    if (engine->prefill_diagnostics_active ||
+        fflush(engine->prefill_diagnostics) != 0) {
+        engine_error(
+            error, error_size,
+            "starting prefill diagnostics capture failed: %s",
+            strerror(errno));
+        return false;
+    }
+    engine->prefill_diagnostics_offset =
+        ftello(engine->prefill_diagnostics);
+    if (engine->prefill_diagnostics_offset < 0) {
+        engine_error(error, error_size,
+                     "recording prefill diagnostics offset failed");
+        return false;
+    }
+    engine->prefill_diagnostics_capture++;
+    engine->prefill_diagnostics_active = true;
+    return true;
+}
+
+static bool rollback_prefill_diagnostics_capture(k3_engine *engine) {
+    return engine && engine->prefill_diagnostics &&
+        rollback_decode_diagnostics_stream(
+            engine->prefill_diagnostics,
+            engine->prefill_diagnostics_offset);
+}
+
+static void abort_prefill_diagnostics_capture(k3_engine *engine) {
+    if (!engine || !engine->prefill_diagnostics_active) return;
+    (void)rollback_prefill_diagnostics_capture(engine);
+    engine->prefill_diagnostics_active = false;
+}
+
+static bool end_prefill_diagnostics_capture(
+        k3_engine *engine,
+        char *error,
+        size_t error_size) {
+    if (!engine->prefill_diagnostics) return true;
+    if (!engine->prefill_diagnostics_active ||
+        fflush(engine->prefill_diagnostics) != 0) {
+        engine_error(
+            error, error_size,
+            "finishing prefill diagnostics capture failed: %s",
+            strerror(errno));
+        abort_prefill_diagnostics_capture(engine);
+        return false;
+    }
+    engine->prefill_diagnostics_active = false;
+    return true;
+}
+
+static bool write_prefill_diagnostics_layer(
+        k3_engine *engine,
+        const k3_prefill_layer_diagnostics *layer,
+        char *error,
+        size_t error_size) {
+    if (!engine->prefill_diagnostics_active) return true;
+    const double ns_to_seconds = 1e-9;
+    if (fprintf(
+            engine->prefill_diagnostics,
+            "%llu,%u,%u,%u,%u,%llu,"
+            "%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,"
+            "%.6f,%.6f,%.6f,%.6f,%.9f,%.9f,%.9f,"
+            "%llu,%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+            (unsigned long long)
+                engine->prefill_diagnostics_capture,
+            layer->layer, layer->tokens, layer->unique_experts,
+            layer->read_requests,
+            (unsigned long long)layer->physical_read_bytes,
+            layer->attention_seconds, layer->router_seconds,
+            layer->routed_stream_seconds,
+            layer->read_wait_seconds, layer->submit_seconds,
+            layer->index_seconds, layer->expert_pipeline_seconds,
+            layer->moe_tail_seconds,
+            layer->default_span_ms, layer->expert_span_ms,
+            layer->shared_span_ms, layer->mzg2_decoder_gpu_ms,
+            layer->ring.depth_nanoseconds[0] * ns_to_seconds,
+            layer->ring.depth_nanoseconds[1] * ns_to_seconds,
+            layer->ring.depth_nanoseconds[2] * ns_to_seconds,
+            (unsigned long long)layer->ring.transitions,
+            layer->ring.max_depth,
+            (unsigned long long)layer->mzg2_launches,
+            (unsigned long long)layer->integrity_clears,
+            (unsigned long long)layer->index_h2d_copies,
+            (unsigned long long)layer->gathers,
+            (unsigned long long)layer->expert_gemms,
+            (unsigned long long)layer->scatters,
+            (unsigned long long)layer->stream_synchronizes,
+            (unsigned long long)layer->event_waits) < 0) {
+        engine_error(
+            error, error_size,
+            "writing prefill diagnostics layer failed: %s",
+            strerror(errno));
+        return false;
+    }
+    return true;
 }
 
 extern "C" bool k3_engine_configure_decode_diagnostics(

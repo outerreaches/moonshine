@@ -229,6 +229,18 @@ bool k3_engine_configure_decode_diagnostics(
     size_t error_size);
 
 /*
+ * Opt-in content-free routed-prefill instrumentation. PREFIX creates one
+ * private (0600) PREFIX.prefill.csv file with at most one row per routed layer
+ * and range capture. Rows contain timing, I/O occupancy, and command counts,
+ * never routes, token IDs, weights, or text. Failed captures roll back.
+ */
+bool k3_engine_configure_prefill_diagnostics(
+    k3_engine *engine,
+    const char *prefix,
+    char *error,
+    size_t error_size);
+
+/*
  * Optional content-free companion capture for decode diagnostics: appends
  * the raw 896 router logits (float32) of every routed layer at every decode
  * step to PREFIX.router_logits.f32, step-major and layer-minor. Requires

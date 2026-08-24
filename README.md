@@ -465,18 +465,20 @@ Deployment-specific timeout and client guidance is in
 
 ## Project status and roadmap
 
-MZG2 is promoted for the qualified K3 deployment. The latest measured cache
-window closed scan-resistant admission, larger compressed-resident cache slots,
-MZG2 queue-depth changes, layer-scoped integrity clearing, and event-driven
-prefill buffer reuse on this node.
+MZG2 is promoted for the qualified K3 deployment. Decisive screens closed
+scan-resistant admission and compressed-resident cache slots. The route-index
+engine integration is also closed by its 0.148% direct wall-time ceiling.
 
-Current open work is intentionally narrower. The busy-safe control plane,
-disconnect cancellation, decode keepalives, and graceful signal drain are
-implemented and qualified.
+The opt-in routed-prefill harness is functionally qualified: exact output and
+I/O, private 92-layer captures, deterministic commands, and QD2 occupancy all
+passed. Four consecutive 512-position arms had 4.766% expert-pipeline spread,
+so the former 5% event-scheduler gate is unresolvable under the required
+three-times-noise rule and no ABBA was run. QD2 was fully empty for only 0.216%
+of routed-stream wall. Event scheduling is parked rather than promoted.
+
+Current open work:
 
 - engine/server activation of the exact prefix-checkpoint catalog;
-- integration and measurement of the completed one-pass selected-prefill route
-  index;
 - derived static-Q8 startup acceleration;
 - dual-device expert streaming after sufficient second-device capacity exists;
 - broader quality qualification for the diagnostic KDA backend;

@@ -69,6 +69,35 @@ static void prefill_add_host_subphase(
     *accumulator += elapsed_seconds(start, end);
 }
 
+static uint64_t prefill_monotonic_nanoseconds(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * UINT64_C(1000000000) +
+        (uint64_t)now.tv_nsec;
+}
+
+static bool prefill_diagnostic_event_elapsed(
+        k3_engine *engine,
+        uint32_t start,
+        uint32_t end,
+        double *milliseconds,
+        char *error,
+        size_t error_size) {
+    float measured = 0.0f;
+    const hipError_t status = hipEventElapsedTime(
+        &measured, engine->prefill_event[start],
+        engine->prefill_event[end]);
+    if (status != hipSuccess) {
+        engine_error(
+            error, error_size,
+            "K3 prefill diagnostic event timing failed: %s",
+            hipGetErrorString(status));
+        return false;
+    }
+    *milliseconds = measured;
+    return true;
+}
+
 static void *prefill_slice(void *base,
                            uint32_t row,
                            uint64_t elements_per_row) {
@@ -1001,6 +1030,7 @@ static bool prefill_stream_routed_layer(
         k3_prefill_workspace *workspace,
         uint32_t layer,
         k3_engine_prefill_stats *stats,
+        k3_prefill_layer_diagnostics *diagnostics,
         char *error,
         size_t error_size) {
     bool selected_experts[K3_ENGINE_EXPERTS] = { false };
@@ -1098,6 +1128,15 @@ static bool prefill_stream_routed_layer(
         }
         expected_physical_bytes += physical_bytes;
     }
+    if (diagnostics &&
+        !k3_prefill_ring_timeline_begin(
+            &diagnostics->ring,
+            prefill_monotonic_nanoseconds(), 0u)) {
+        engine_error(error, error_size,
+                     "layer-%u prefill ring timeline init failed",
+                     layer);
+        return false;
+    }
 
     uint32_t next = 0u;
     k3_io_request requests[K3_ENGINE_STREAM_QD];
@@ -1119,6 +1158,17 @@ static bool prefill_stream_routed_layer(
             error, error_size)) {
         return false;
     }
+    if (diagnostics &&
+        !k3_prefill_ring_timeline_update(
+            &diagnostics->ring,
+            prefill_monotonic_nanoseconds(),
+            k3_io_uring_outstanding(engine->staging_ring))) {
+        engine_error(error, error_size,
+                     "layer-%u prefill ring submit timeline failed",
+                     layer);
+        abort_prefill_io(engine);
+        return false;
+    }
     prefill_add_host_subphase(
         &stats->routed_submit_seconds,
         subphase_start);
@@ -1132,6 +1182,18 @@ static bool prefill_stream_routed_layer(
                 engine->staging_ring, completions,
                 K3_ENGINE_STREAM_QD, &completion_count,
                 error, error_size)) {
+            abort_prefill_io(engine);
+            return false;
+        }
+        if (diagnostics &&
+            !k3_prefill_ring_timeline_update(
+                &diagnostics->ring,
+                prefill_monotonic_nanoseconds(),
+                k3_io_uring_outstanding(engine->staging_ring))) {
+            engine_error(
+                error, error_size,
+                "layer-%u prefill ring completion timeline failed",
+                layer);
             abort_prefill_io(engine);
             return false;
         }
@@ -1221,8 +1283,23 @@ static bool prefill_stream_routed_layer(
             } else if (
                     selected->layout.codec ==
                         K3_ENGINE_EXPERT_MZG2) {
-                if (!engine->mzg2_prefill_output[buffer] ||
-                    !k3_mzg2_store_launch(
+                const bool time_decoder = diagnostics != NULL;
+                if (time_decoder &&
+                    hipEventRecord(
+                        engine->prefill_event[
+                            K3_PREFILL_EVENT_DECODER_START],
+                        engine->expert_stream) != hipSuccess) {
+                    engine_error(
+                        error, error_size,
+                        "layer-%u MZG2 prefill decoder-start "
+                        "event failed",
+                        layer);
+                    abort_prefill_io(engine);
+                    return false;
+                }
+                const bool launched =
+                    engine->mzg2_prefill_output[buffer] &&
+                    k3_mzg2_store_launch(
                         engine->mzg2_store, layer,
                         selected->expert,
                         engine->staging_host[buffer],
@@ -1231,9 +1308,27 @@ static bool prefill_stream_routed_layer(
                         engine->mzg2_prefill_output[buffer],
                         engine->mzg2_errors_device + buffer,
                         engine->expert_stream,
-                        error, error_size)) {
+                        error, error_size);
+                if (!launched ||
+                    (time_decoder &&
+                     hipEventRecord(
+                         engine->prefill_event[
+                             K3_PREFILL_EVENT_DECODER_END],
+                         engine->expert_stream) != hipSuccess)) {
+                    if (launched && error && error_size &&
+                        error[0] == '\0') {
+                        engine_error(
+                            error, error_size,
+                            "layer-%u MZG2 prefill decoder-end "
+                            "event failed",
+                            layer);
+                    }
                     abort_prefill_io(engine);
                     return false;
+                }
+                if (diagnostics) {
+                    diagnostics->mzg2_launches++;
+                    diagnostics->integrity_clears++;
                 }
                 base = (uint8_t *)
                     engine->mzg2_prefill_output[buffer];
@@ -1244,17 +1339,45 @@ static bool prefill_stream_routed_layer(
                      selected->layout.aligned_start);
             }
             clock_gettime(CLOCK_MONOTONIC, &subphase_start);
-            if (!launch_prefill_expert(
-                    engine, workspace, base,
-                    &selected->layout, selected_count) ||
-                hipStreamSynchronize(
-                    engine->expert_stream) != hipSuccess) {
+            if (diagnostics) {
+                diagnostics->index_h2d_copies += 2u;
+                diagnostics->gathers++;
+                diagnostics->expert_gemms += 3u;
+                diagnostics->scatters++;
+            }
+            const bool expert_launched = launch_prefill_expert(
+                engine, workspace, base,
+                &selected->layout, selected_count);
+            hipError_t synchronize_status = hipSuccess;
+            if (expert_launched) {
+                synchronize_status =
+                    hipStreamSynchronize(engine->expert_stream);
+            }
+            if (diagnostics && expert_launched) {
+                diagnostics->stream_synchronizes++;
+            }
+            if (!expert_launched ||
+                synchronize_status != hipSuccess) {
                 engine_error(
                     error, error_size,
                     "layer-%u prefill expert %u batch failed",
                     layer, selected->expert);
                 abort_prefill_io(engine);
                 return false;
+            }
+            if (diagnostics &&
+                selected->layout.codec ==
+                    K3_ENGINE_EXPERT_MZG2) {
+                double decoder_ms = 0.0;
+                if (!prefill_diagnostic_event_elapsed(
+                        engine,
+                        K3_PREFILL_EVENT_DECODER_START,
+                        K3_PREFILL_EVENT_DECODER_END,
+                        &decoder_ms, error, error_size)) {
+                    abort_prefill_io(engine);
+                    return false;
+                }
+                diagnostics->mzg2_decoder_gpu_ms += decoder_ms;
             }
             if (selected->layout.codec == K3_ENGINE_EXPERT_MZG2 &&
                 engine->mzg2_errors_host[buffer] != 0u) {
@@ -1293,10 +1416,33 @@ static bool prefill_stream_routed_layer(
                 abort_prefill_io(engine);
                 return false;
             }
+            if (diagnostics &&
+                !k3_prefill_ring_timeline_update(
+                    &diagnostics->ring,
+                    prefill_monotonic_nanoseconds(),
+                    k3_io_uring_outstanding(
+                        engine->staging_ring))) {
+                engine_error(
+                    error, error_size,
+                    "layer-%u prefill ring refill timeline failed",
+                    layer);
+                abort_prefill_io(engine);
+                return false;
+            }
             prefill_add_host_subphase(
                 &stats->routed_submit_seconds,
                 subphase_start);
         }
+    }
+    if (diagnostics &&
+        !k3_prefill_ring_timeline_finish(
+            &diagnostics->ring,
+            prefill_monotonic_nanoseconds())) {
+        engine_error(error, error_size,
+                     "layer-%u prefill ring timeline finish failed",
+                     layer);
+        abort_prefill_io(engine);
+        return false;
     }
     if (k3_io_uring_outstanding(
             engine->staging_ring) != 0u) {
@@ -1374,6 +1520,26 @@ static bool prefill_routed_layer(
         "block_sparse_moe.shared_experts.up_proj.weight");
 #undef PREFILL_LAYER_WEIGHT
     const uint32_t tokens = workspace->token_count;
+    const bool diagnostics_enabled =
+        engine->prefill_diagnostics_active;
+    k3_engine_prefill_stats diagnostics_before;
+    k3_prefill_layer_diagnostics diagnostics;
+    if (diagnostics_enabled) {
+        diagnostics_before = *stats;
+        memset(&diagnostics, 0, sizeof(diagnostics));
+        diagnostics.layer = layer;
+        diagnostics.tokens = tokens;
+        if (hipEventRecord(
+                engine->prefill_event[
+                    K3_PREFILL_EVENT_DEFAULT_START],
+                NULL) != hipSuccess) {
+            engine_error(
+                error, error_size,
+                "layer-%u prefill default-start event failed",
+                layer);
+            return false;
+        }
+    }
     const uint32_t pre_attention_blocks =
         (layer + 11u) / 12u;
     const bool block_boundary = layer % 12u == 0u;
@@ -1459,6 +1625,9 @@ static bool prefill_routed_layer(
                      hipGetErrorString(status));
         return false;
     }
+    if (diagnostics_enabled) {
+        diagnostics.stream_synchronizes++;
+    }
     clock_gettime(CLOCK_MONOTONIC, &phase_end);
     const double attention_seconds =
         elapsed_seconds(phase_start, phase_end);
@@ -1510,6 +1679,9 @@ static bool prefill_routed_layer(
                      layer, hipGetErrorString(status));
         return false;
     }
+    if (diagnostics_enabled) {
+        diagnostics.stream_synchronizes++;
+    }
     const uint64_t route_count =
         (uint64_t)tokens * K3_ENGINE_TOP_K;
     status = hipMemcpy(
@@ -1558,10 +1730,28 @@ static bool prefill_routed_layer(
         stats->max_unique_experts_per_layer = unique_experts;
     }
     stats->unique_experts_across_layers += unique_experts;
+    if (diagnostics_enabled) {
+        diagnostics.unique_experts = unique_experts;
+    }
     clock_gettime(CLOCK_MONOTONIC, &phase_end);
     stats->router_seconds +=
         elapsed_seconds(phase_start, phase_end);
     clock_gettime(CLOCK_MONOTONIC, &phase_start);
+    if (diagnostics_enabled &&
+        (hipEventRecord(
+             engine->prefill_event[
+                 K3_PREFILL_EVENT_EXPERT_START],
+             engine->expert_stream) != hipSuccess ||
+         hipEventRecord(
+             engine->prefill_event[
+                 K3_PREFILL_EVENT_SHARED_START],
+             engine->shared_stream) != hipSuccess)) {
+        engine_error(
+            error, error_size,
+            "layer-%u prefill stream-start event failed",
+            layer);
+        return false;
+    }
 
     if (!k3_static_weight_gemm_bf16(
             routed_down,
@@ -1595,6 +1785,17 @@ static bool prefill_routed_layer(
                      layer);
         return false;
     }
+    if (diagnostics_enabled &&
+        hipEventRecord(
+            engine->prefill_event[
+                K3_PREFILL_EVENT_SHARED_END],
+            engine->shared_stream) != hipSuccess) {
+        engine_error(
+            error, error_size,
+            "layer-%u prefill shared-end event failed",
+            layer);
+        return false;
+    }
     status = hipMemsetAsync(
         workspace->moe_scratch[M_EXPERT_OUTPUTS], 0,
         (uint64_t)tokens * K3_ENGINE_TOP_K *
@@ -1603,7 +1804,19 @@ static bool prefill_routed_layer(
     if (status != hipSuccess ||
         !prefill_stream_routed_layer(
             engine, workspace, layer, stats,
+            diagnostics_enabled ? &diagnostics : NULL,
             error, error_size)) {
+        return false;
+    }
+    if (diagnostics_enabled &&
+        hipEventRecord(
+            engine->prefill_event[
+                K3_PREFILL_EVENT_EXPERT_END],
+            engine->expert_stream) != hipSuccess) {
+        engine_error(
+            error, error_size,
+            "layer-%u prefill expert-end event failed",
+            layer);
         return false;
     }
     clock_gettime(CLOCK_MONOTONIC, &phase_end);
@@ -1634,6 +1847,17 @@ static bool prefill_routed_layer(
                      layer);
         return false;
     }
+    if (diagnostics_enabled) {
+        diagnostics.stream_synchronizes++;
+        if (!prefill_diagnostic_event_elapsed(
+                engine,
+                K3_PREFILL_EVENT_EXPERT_START,
+                K3_PREFILL_EVENT_EXPERT_END,
+                &diagnostics.expert_span_ms,
+                error, error_size)) {
+            return false;
+        }
+    }
     status = hipStreamSynchronize(engine->shared_stream);
     if (status != hipSuccess ||
         !k3_rocm_add_bf16(
@@ -1653,6 +1877,27 @@ static bool prefill_routed_layer(
                      layer);
         return false;
     }
+    if (diagnostics_enabled) {
+        diagnostics.stream_synchronizes++;
+        if (!prefill_diagnostic_event_elapsed(
+                engine,
+                K3_PREFILL_EVENT_SHARED_START,
+                K3_PREFILL_EVENT_SHARED_END,
+                &diagnostics.shared_span_ms,
+                error, error_size)) {
+            return false;
+        }
+        if (hipEventRecord(
+                engine->prefill_event[
+                    K3_PREFILL_EVENT_DEFAULT_END],
+                NULL) != hipSuccess) {
+            engine_error(
+                error, error_size,
+                "layer-%u prefill default-end event failed",
+                layer);
+            return false;
+        }
+    }
     status = hipStreamSynchronize(NULL);
     if (status != hipSuccess) {
         engine_error(error, error_size,
@@ -1661,9 +1906,56 @@ static bool prefill_routed_layer(
                      hipGetErrorString(status));
         return false;
     }
+    if (diagnostics_enabled) {
+        diagnostics.stream_synchronizes++;
+        if (!prefill_diagnostic_event_elapsed(
+                engine,
+                K3_PREFILL_EVENT_DEFAULT_START,
+                K3_PREFILL_EVENT_DEFAULT_END,
+                &diagnostics.default_span_ms,
+                error, error_size)) {
+            return false;
+        }
+    }
     clock_gettime(CLOCK_MONOTONIC, &phase_end);
     stats->moe_tail_seconds +=
         elapsed_seconds(phase_start, phase_end);
+    if (diagnostics_enabled) {
+        diagnostics.read_requests =
+            stats->expert_read_requests -
+                diagnostics_before.expert_read_requests;
+        diagnostics.physical_read_bytes =
+            stats->routed_physical_read_bytes -
+                diagnostics_before.routed_physical_read_bytes;
+        diagnostics.attention_seconds =
+            stats->attention_seconds -
+                diagnostics_before.attention_seconds;
+        diagnostics.router_seconds =
+            stats->router_seconds -
+                diagnostics_before.router_seconds;
+        diagnostics.routed_stream_seconds =
+            stats->routed_stream_seconds -
+                diagnostics_before.routed_stream_seconds;
+        diagnostics.read_wait_seconds =
+            stats->routed_read_wait_seconds -
+                diagnostics_before.routed_read_wait_seconds;
+        diagnostics.submit_seconds =
+            stats->routed_submit_seconds -
+                diagnostics_before.routed_submit_seconds;
+        diagnostics.index_seconds =
+            stats->routed_index_seconds -
+                diagnostics_before.routed_index_seconds;
+        diagnostics.expert_pipeline_seconds =
+            stats->routed_expert_pipeline_seconds -
+                diagnostics_before.routed_expert_pipeline_seconds;
+        diagnostics.moe_tail_seconds =
+            stats->moe_tail_seconds -
+                diagnostics_before.moe_tail_seconds;
+        if (!write_prefill_diagnostics_layer(
+                engine, &diagnostics, error, error_size)) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -1863,6 +2155,11 @@ static bool k3_engine_forward_range_impl(
             error, error_size)) {
         return false;
     }
+    if (!begin_prefill_diagnostics_capture(
+            engine, error, error_size)) {
+        prefill_workspace_destroy(&workspace);
+        return false;
+    }
     k3_engine_prefill_stats measured;
     memset(&measured, 0, sizeof(measured));
     if (lease == K3_PREFILL_CACHE_BORROW_WARM_WORKSPACE) {
@@ -1989,6 +2286,12 @@ static bool k3_engine_forward_range_impl(
         elapsed_seconds(phase_start, phase_end);
     clock_gettime(CLOCK_MONOTONIC, &end);
     measured.wall_seconds = elapsed_seconds(start, end);
+    if (ok) {
+        ok = end_prefill_diagnostics_capture(
+            engine, error, error_size);
+    } else {
+        abort_prefill_diagnostics_capture(engine);
+    }
     if (stats) *stats = measured;
     prefill_workspace_destroy(&workspace);
     return ok;

@@ -354,6 +354,32 @@ all 82,432 expert spans and treats 1,446,793,422,960 physical bytes as the
 full-store ceiling because routes do not exist until execution. Runtime
 compacts each layer's sorted layout to the actual route union, submits one
 read per unique expert, and checks that dynamic request/byte ledger exactly.
+
+The portable `k3_prefill_route_index` core was screened as an engine
+replacement for the nested scan. It preserved exact token/value and I/O
+ledgers, and reduced measured route-index host time from roughly 2.08 s to
+0.056 s at 8,192 positions. That removes only 2.0245 s from a 1,365.3795 s
+baseline (**0.148% direct ceiling**), far below the 2% gate. The apparent
+2.096% wall regression sat inside 2.90--3.88% run spreads, so it is not
+attributed to the index. The integration was reverted because its direct
+component cannot justify promotion; the core remains non-production
+infrastructure.
+
+The routed-prefill harness is opt-in. When enabled, engine creation opens one
+private transactional CSV and creates timing-enabled HIP events. Each complete
+layer records host phases, default/expert/shared stream spans, accumulated MZG2
+decoder time, time-weighted QD2 occupancy, and deterministic command counts.
+When disabled, no diagnostic file or HIP event exists and the streaming
+schedule executes the same production branches as before.
+
+Its first 512-position qualification preserved token/value, all 35,501 reads,
+541,449,752,576 physical bytes, route-union counts, and every command ledger.
+The four post-warm-up expert-pipeline arms spread 4.766%, making a 5% gate
+unresolvable under the required 14.298% floor; candidate ABBA stopped before
+execution. QD2 depth-zero time averaged 0.204 s, only 0.216% of the 94.671 s
+routed-stream mean. The event-scheduler lane is parked pending a materially
+larger mechanism or lower-variance fixture.
+
 The locked 512-token fixture selected 234–611 experts per layer, averaging
 385.9, and reduced traffic to 623,090,706,040 bytes across 35,501 reads.
 At filled 8K the union became denser but still averaged only 625.3 experts per

@@ -31,6 +31,8 @@ typedef struct {
     k3_prefill_projection_backend range_backend;
     /* Optional PREFIX for sensitive decode cache/ledger/route CSVs. */
     const char *decode_diagnostics_prefix;
+    /* Optional PREFIX for content-free private routed-prefill timing CSV. */
+    const char *prefill_diagnostics_prefix;
     /* With decode_diagnostics_prefix: also capture raw router logits. */
     bool        router_logits_tap;
     /* Expensive non-cryptographic state fingerprints for qualification. */

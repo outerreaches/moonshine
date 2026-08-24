@@ -59,6 +59,57 @@ static bool multiply_u64(uint64_t left,
     return true;
 }
 
+bool k3_prefill_ring_timeline_begin(
+        k3_prefill_ring_timeline *timeline,
+        uint64_t nanoseconds,
+        uint32_t depth) {
+    if (timeline == NULL ||
+        depth > K3_PREFILL_RING_DEPTH_LIMIT) {
+        return false;
+    }
+    memset(timeline, 0, sizeof(*timeline));
+    timeline->last_nanoseconds = nanoseconds;
+    timeline->current_depth = depth;
+    timeline->max_depth = depth;
+    timeline->initialized = true;
+    return true;
+}
+
+bool k3_prefill_ring_timeline_update(
+        k3_prefill_ring_timeline *timeline,
+        uint64_t nanoseconds,
+        uint32_t depth) {
+    if (timeline == NULL || !timeline->initialized ||
+        depth > K3_PREFILL_RING_DEPTH_LIMIT ||
+        nanoseconds < timeline->last_nanoseconds) {
+        return false;
+    }
+    const uint64_t elapsed =
+        nanoseconds - timeline->last_nanoseconds;
+    if (timeline->depth_nanoseconds[timeline->current_depth] >
+        UINT64_MAX - elapsed) {
+        return false;
+    }
+    timeline->depth_nanoseconds[timeline->current_depth] += elapsed;
+    timeline->last_nanoseconds = nanoseconds;
+    if (timeline->current_depth != depth) {
+        timeline->transitions++;
+    }
+    timeline->current_depth = depth;
+    if (depth > timeline->max_depth) {
+        timeline->max_depth = depth;
+    }
+    return true;
+}
+
+bool k3_prefill_ring_timeline_finish(
+        k3_prefill_ring_timeline *timeline,
+        uint64_t nanoseconds) {
+    return timeline != NULL && timeline->initialized &&
+        k3_prefill_ring_timeline_update(
+            timeline, nanoseconds, timeline->current_depth);
+}
+
 static bool expert_span(
         const k3_st_model *model,
         uint32_t layer,

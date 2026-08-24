@@ -33,6 +33,20 @@ Semantic Versioning once its first research-preview tag is published.
   fingerprints for paired qualification. Private CSV creation, abort rollback,
   and explicit baseline comparison keep the diagnostics outside normal
   production logging.
+- Opt-in routed-prefill instrumentation through `--prefill-diagnostics` and
+  `MOONSHINE_PREFILL_DIAGNOSTICS`. Private transactional CSVs record one row
+  per routed layer with host phases, HIP-event stream/decoder spans,
+  time-weighted QD2 occupancy, exact I/O ledgers, and deterministic launch,
+  copy, clear, synchronization, and event-wait counts. The disabled path
+  creates no events and reads no clocks beyond existing production timers.
+- A deterministic prefill-screen analyzer that first enforces one discarded
+  warm-up and a four-arm noise floor, stopping before ABBA when the declared
+  gate is smaller than three times the spread. A resolvable screen then
+  requires ordered interleaved ABBA, route/I/O identity, the mechanism's own
+  subphase gate, aggregate phase no-regression, and private atomic JSON output.
+  The first 512-position capture was exact but returned `UNRESOLVABLE`: 4.766%
+  expert-pipeline spread implies a 14.298% floor for the former 5% P0b gate;
+  QD2 depth-zero time was only 0.216% of routed-stream wall.
 - An additional explicit router-logits tap for decode qualification. It writes
   private raw float32 logits only inside an active diagnostics transaction,
   participates in rollback, and is labeled more content-sensitive than routes.
@@ -80,7 +94,11 @@ Semantic Versioning once its first research-preview tag is published.
   top-k routes and per-token uniqueness, produces stable expert-local
   token/output slices in `O(routes + experts)`, reuses allocations, preserves
   the prior index after failed rebuilds, and performs allocation-free slice
-  lookup. Engine integration is deferred until the live client test completes.
+  lookup. Its engine integration preserved exact outputs and I/O, but removed
+  only 2.0245 seconds of a 1,365.3795-second 8,192-token baseline
+  (**0.148% direct ceiling**), far below the 2% promotion gate. The apparent
+  2.096% wall regression sat inside 2.90--3.88% run spreads; the integration
+  was reverted without attributing that drift to the index.
 - A GPU-free static-Q8 compression-screen foundation. The production Q8
   candidate classifier now lives in portable code shared by the engine and
   offline tool; the CPU Q8/128 reference locks BF16 conversion,
@@ -98,6 +116,12 @@ Semantic Versioning once its first research-preview tag is published.
   every MZG2 probability/LUT table before GPU decode.
 - Require explicit arguments for the layer-local MZG2 transcoder so a no-argument
   invocation cannot create a large derived artifact in the source tree.
+- Reject the staged selected-prefill route-index engine integration after exact
+  512-token and 8,192-token screens. The candidate removed nearly all measured
+  route-index host time but that component was only 0.148% of long-prefill wall,
+  so it cannot meet the 2% promotion gate; the production nested scan was
+  restored. Evidence:
+  `moonshine-experiments/prefill-route-index-qualification-20260824/`.
 - Prevent timed-out monitoring/retry connections from saturating the listener
   backlog during a long inference request. Health/model discovery now remains
   responsive, abandoned streaming and JSON work releases the inference slot,

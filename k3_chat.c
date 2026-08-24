@@ -510,6 +510,15 @@ bool k3_chat_session_create(
         k3_chat_session_destroy(session);
         return false;
     }
+    if (config->prefill_diagnostics_prefix != NULL &&
+        config->prefill_diagnostics_prefix[0] != '\0' &&
+        !k3_engine_configure_prefill_diagnostics(
+            session->engine,
+            config->prefill_diagnostics_prefix,
+            error, error_size)) {
+        k3_chat_session_destroy(session);
+        return false;
+    }
     if (config->router_logits_tap &&
         !k3_engine_configure_router_logits_tap(
             session->engine,

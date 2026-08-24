@@ -491,6 +491,36 @@ make test-prefill-scale \
   MOONSHINE_PREFILL_TOKENS=8192
 ```
 
+For a content-free routed-prefill instrumentation arm, use a new private prefix
+outside the checkout:
+
+```sh
+MOONSHINE_PREFILL_DIAGNOSTICS=/private/run/baseline-a \
+make test-prefill-scale \
+  MOONSHINE_MODEL=\"$MOONSHINE_MODEL\" \
+  MOONSHINE_PREFILL_TOKENS=8192
+```
+
+One arm produces `/private/run/baseline-a.prefill.csv` with 92 layer rows.
+First collect warm-up plus four fresh-process noise baselines and run:
+
+```sh
+python3 tools/analyze_prefill_screen.py \
+  --noise-only \
+  --metric expert_pipeline_seconds \
+  --gate-pct 5 \
+  --output /private/run/noise.json \
+  warmup.prefill.csv noise-1.prefill.csv noise-2.prefill.csv \
+  noise-3.prefill.csv noise-4.prefill.csv
+```
+
+Stop if the result is `UNRESOLVABLE`. A `READY_FOR_ABBA` result permits four
+more fresh-process arms—baseline A, candidate A, candidate B, baseline B—and
+the same command without `--noise-only`, passing all nine files in that order.
+The analyzer refuses route/I/O drift and gates tighter than three times the
+four-run noise spread. Collect NVMe temperature and throttle state beside every
+arm; those host measurements are intentionally not read by the engine.
+
 Graduated filled-context tests require matching token and configured-context
 values:
 

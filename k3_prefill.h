@@ -70,6 +70,36 @@ typedef struct {
     uint64_t new_device_bytes;
 } k3_prefill_plan;
 
+enum {
+    K3_PREFILL_RING_DEPTH_LIMIT = 2,
+};
+
+/*
+ * Model-free time-weighted QD2 occupancy tracker. Call update immediately
+ * before/after each ring state transition with a monotonic timestamp. Failed
+ * updates leave the previous valid timeline intact.
+ */
+typedef struct {
+    uint64_t depth_nanoseconds[K3_PREFILL_RING_DEPTH_LIMIT + 1u];
+    uint64_t last_nanoseconds;
+    uint64_t transitions;
+    uint32_t current_depth;
+    uint32_t max_depth;
+    bool initialized;
+} k3_prefill_ring_timeline;
+
+bool k3_prefill_ring_timeline_begin(
+    k3_prefill_ring_timeline *timeline,
+    uint64_t nanoseconds,
+    uint32_t depth);
+bool k3_prefill_ring_timeline_update(
+    k3_prefill_ring_timeline *timeline,
+    uint64_t nanoseconds,
+    uint32_t depth);
+bool k3_prefill_ring_timeline_finish(
+    k3_prefill_ring_timeline *timeline,
+    uint64_t nanoseconds);
+
 /*
  * Build a payload-free memory and I/O plan for one layer-major K3 chunk.
  *

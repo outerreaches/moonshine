@@ -110,6 +110,25 @@ higher disclosure risk. They are written only while a decode-diagnostics
 transaction is active; prompt and prefill router values remain outside the file
 and rollback boundary.
 
+`--prefill-diagnostics PREFIX` creates
+`PREFIX.prefill.csv` as a private `0600`, exclusive, no-follow file. Each
+committed range capture contains exactly 92 routed-layer rows. It records
+content-free host phase timings, HIP-event spans for the default/expert/shared
+streams and MZG2 decoder, time-weighted QD2 occupancy, physical reads, route
+union size, and deterministic command counts. It never records token IDs,
+expert IDs, routes, weights, logits, text, or credentials. A failed range
+rolls the file back to its pre-capture offset.
+
+Run `tools/analyze_prefill_screen.py --noise-only` first with exactly five
+files: discarded warm-up followed by four identical noise-floor baselines. If
+the gate is smaller than three times the target-metric spread, the tool returns
+`UNRESOLVABLE` and the protocol stops before ABBA. Only a
+`READY_FOR_ABBA` result permits the complete nine-file analysis, adding
+baseline A, candidate A, candidate B, and baseline B. Both modes reject
+route-union or I/O drift; the complete mode gates on the selected subphase and
+treats aggregate phase wall as a no-regression guard. JSON reports are
+atomically published mode `0600`.
+
 `--decode-state-digest` adds `request.state.digest` before the final
 `request.complete` event. It computes deterministic 64-bit FNV-1a comparison
 fingerprints over the complete causal-state regions after decode. Matching all

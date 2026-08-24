@@ -67,6 +67,7 @@ typedef struct {
     k3_prefill_projection_backend range_backend;
     bool        clear_expert_cache_per_request;
     const char *decode_diagnostics_prefix;
+    const char *prefill_diagnostics_prefix;
     bool        capture_state_digest;
     bool        router_logits_tap;
 } server_config;
@@ -290,6 +291,8 @@ static void usage(FILE *stream, const char *program) {
         "                        Force cold-cache request benchmarks\n"
         "  --decode-diagnostics PREFIX\n"
         "                        Write sensitive decode cache/ledger/route CSVs\n"
+        "  --prefill-diagnostics PREFIX\n"
+        "                        Write private content-free routed-prefill CSV\n"
         "  --decode-state-digest\n"
         "                        Log state-comparison fingerprints (expensive)\n"
         "  --router-logits-tap\n"
@@ -354,6 +357,7 @@ static bool parse_args(int argc, char **argv, server_config *config) {
             strcmp(argument, "--max-output-tokens") == 0 ||
             strcmp(argument, "--range-backend") == 0 ||
             strcmp(argument, "--decode-diagnostics") == 0 ||
+            strcmp(argument, "--prefill-diagnostics") == 0 ||
             strcmp(argument, "--max-body") == 0) {
             if (++i >= argc) {
                 return reject_config("%s needs a value", argument);
@@ -419,6 +423,14 @@ static bool parse_args(int argc, char **argv, server_config *config) {
                         "decode diagnostics prefix is empty");
                 }
                 config->decode_diagnostics_prefix = value;
+            } else if (strcmp(
+                           argument,
+                           "--prefill-diagnostics") == 0) {
+                if (value[0] == '\0') {
+                    return reject_config(
+                        "prefill diagnostics prefix is empty");
+                }
+                config->prefill_diagnostics_prefix = value;
             } else {
                 if (!parse_u32(value, 1024u, UINT32_MAX, &parsed)) {
                     return reject_config(
@@ -2180,6 +2192,8 @@ int main(int argc, char **argv) {
         .range_backend = config.range_backend,
         .decode_diagnostics_prefix =
             config.decode_diagnostics_prefix,
+        .prefill_diagnostics_prefix =
+            config.prefill_diagnostics_prefix,
         .capture_state_digest = config.capture_state_digest,
         .router_logits_tap = config.router_logits_tap,
     };
