@@ -386,14 +386,24 @@ ordering is not safe for a no-retry agent client: a completion POST sent 32 ms
 after response delivery received HTTP 503, and publication completed 2.127
 seconds after the response log. Production was rolled back.
 
-The next candidate must publish before the client-visible terminal boundary:
-before the HTTP response for non-streaming calls, and before final finish/usage
-plus `[DONE]` for streaming calls. Model-backed displacement/restart recovery
-otherwise passed exact response bytes, cached-token accounting, and all four
-state digests. Prefix restoration improved **65.77×** (63.008 s inferred
-evaluation versus 0.958 s import), and total prompt wall improved **2.87×**
-(95.174 → 33.124 s). These results qualify the checkpoint mechanism, not the
-current production response ordering.
+The latency-preserving candidate keeps response-first publication but adds an
+explicit `checkpoint_export` slot phase. Immediately before the response
+becomes terminal, the worker marks that phase. The control thread may then
+transfer exactly one authenticated completion into the existing pending slot;
+the worker cannot execute it until synchronous export returns. Further
+completion requests still receive HTTP 503, while health and model discovery
+remain responsive.
+
+This preserves the preceding response's completion latency and avoids a
+no-retry client failure. The queued request's inference start moves later by at
+most the remaining export time; avoiding both delays would require an immutable
+state copy and materially more memory/concurrency complexity.
+
+Model-backed displacement/restart recovery otherwise passed exact response
+bytes, cached-token accounting, and all four state digests. Prefix restoration
+improved **65.77×** (63.008 s inferred evaluation versus 0.958 s import), and
+total prompt wall improved **2.87×** (95.174 → 33.124 s). These results qualify
+the checkpoint mechanism, not the current production response ordering.
 
 ## Decode schedule
 

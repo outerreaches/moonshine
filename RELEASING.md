@@ -66,11 +66,14 @@ the live session, restore the same continuation, restart the server, and
 restore it again. Require identical response bytes and all four state digests,
 standard cached-token accounting, ≥5× prefix restoration versus full prefix
 evaluation, mode `0700`/`0600`, and fail-closed corrupt metadata/state
-behavior. Checkpoint publication must complete before the client-visible
-terminal response, and an immediate next completion must not receive HTTP 503.
-The disabled profile must perform no checkpoint I/O; a pre-feature rollback
-binary may omit checkpoint health metadata rather than reporting
-`enabled:false`.
+behavior. Mark terminal checkpoint export as a distinct slot phase and allow
+exactly one next completion to wait in the existing pending slot. An immediate
+next completion must not receive HTTP 503; a second contender must still be
+rejected without blocking health/model discovery. Require no material
+regression in the preceding response's terminal latency and require queued
+wait to remain bounded by publication time plus scheduling noise. The disabled
+profile must perform no checkpoint I/O; a pre-feature rollback binary may omit
+checkpoint health metadata rather than reporting `enabled:false`.
 
 For a persistent 128K service on the qualified 128 GB host, use
 `--experts 30` and complete at least two independent prefills in the same

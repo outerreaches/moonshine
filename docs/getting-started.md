@@ -632,8 +632,8 @@ limits:
 Do not enable this path in production yet. The first production canary passed
 exact displacement/restart recovery but an immediate follow-up received HTTP
 503 while post-response checkpoint export retained the request slot for 2.097
-seconds. A new candidate must publish before the client-visible terminal
-response and pass the immediate-next-completion gate.
+seconds. A new candidate must admit one bounded next-turn request during
+terminal checkpoint export and pass immediate-next/two-contender queue gates.
 
 ## Troubleshooting
 

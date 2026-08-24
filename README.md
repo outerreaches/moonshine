@@ -309,8 +309,8 @@ Production activation is currently blocked. A live canary proved exact
 displacement and restart recovery, but an immediate completion POST 32 ms after
 response delivery received HTTP 503 while synchronous checkpoint export held
 the one request slot for 2.097 seconds. Do not enable this path for a no-retry
-agent client until checkpoint publication precedes the client-visible terminal
-response.
+agent client until the server can accept one bounded next-turn request during
+terminal checkpoint export.
 
 ### Diagnostics and offline cache analysis
 
@@ -524,19 +524,22 @@ of routed-stream wall. Event scheduling is parked rather than promoted.
 
 Checkpoint next steps:
 
-1. Move durable publication before the client-visible terminal response:
-   before the HTTP response for non-streaming calls and before final
-   finish/usage plus `[DONE]` for streaming calls.
-2. Add an immediate-next-completion regression gate that requires no HTTP 503,
-   then repeat displacement, restart, response/digest, latency, permission, and
-   storage qualification.
-3. Only after that production gate passes, capture one private Prime-Agent
+1. Add an explicit `checkpoint_export` slot phase with capacity for one queued
+   completion. Open that queue immediately before the current response becomes
+   terminal, preserve response latency, and start the queued request only after
+   export releases causal state.
+2. Add immediate-next and two-contender regression gates: the first follow-up
+   must wait rather than receive HTTP 503; the second must still be rejected,
+   preserving the bounded one-slot contract.
+3. Repeat displacement, restart, response/digest, queue-latency, shutdown,
+   disconnect, permission, and storage qualification.
+4. After the production queue gate passes, capture one private Prime-Agent
    request immediately before and after natural compaction and measure its
    exact K3 token boundary.
-4. If Prime's summary-first context breaks before a useful boundary, preserve
+5. If Prime's summary-first context breaks before a useful boundary, preserve
    one immutable complete turn before the summary and repeat the exact-token
    and output-equivalence gates.
-5. Add hot in-memory recurrent anchors only after the client gate identifies
+6. Add hot in-memory recurrent anchors only after the client gate identifies
    useful boundaries; keep low-match edits on ordinary fallback.
 
 Other open work:
