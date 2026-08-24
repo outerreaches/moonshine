@@ -380,14 +380,20 @@ reset to position zero before full-prefill fallback and fail the request if
 that reset cannot restore a healthy engine. Checkpoint failure never clears the
 immutable expert cache and never weakens exact admission.
 
-The server exports synchronously only after the response has been delivered but
-before releasing the one request slot. This adds slot occupancy rather than
-response latency and avoids a worker touching mutable causal state.
-Model-backed displacement/restart recovery passed exact response bytes,
-cached-token accounting, and all four state digests. Prefix restoration
-improved **65.77×** (63.008 s inferred evaluation versus 0.958 s import),
-clearing the 5× gate; total prompt wall improved **2.87×**
-(95.174 → 33.124 s). The feature is promoted as an opt-in path.
+The current implementation exports synchronously after the response is visible
+but before releasing the one request slot. A production canary proved that this
+ordering is not safe for a no-retry agent client: a completion POST sent 32 ms
+after response delivery received HTTP 503, and publication completed 2.127
+seconds after the response log. Production was rolled back.
+
+The next candidate must publish before the client-visible terminal boundary:
+before the HTTP response for non-streaming calls, and before final finish/usage
+plus `[DONE]` for streaming calls. Model-backed displacement/restart recovery
+otherwise passed exact response bytes, cached-token accounting, and all four
+state digests. Prefix restoration improved **65.77×** (63.008 s inferred
+evaluation versus 0.958 s import), and total prompt wall improved **2.87×**
+(95.174 → 33.124 s). These results qualify the checkpoint mechanism, not the
+current production response ordering.
 
 ## Decode schedule
 

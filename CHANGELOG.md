@@ -91,6 +91,13 @@ Semantic Versioning once its first research-preview tag is published.
   evaluation versus 0.958 s import), clearing the 5× gate; total prompt wall
   improved **2.87×** (95.174 → 33.124 s, 65.20% lower). Deployment remains
   explicit through a private checkpoint root.
+- The first production checkpoint canary passed byte-exact live, displaced,
+  and restart recovery but failed client availability. A valid completion POST
+  sent 32 ms after response delivery received HTTP 503 while synchronous
+  checkpoint export retained the one request slot; that export finished in
+  2.097 seconds. Production was rolled back to the checkpoint-disabled binary.
+  Activation now requires publication before the client-visible terminal
+  response plus an immediate-next-completion no-503 gate.
 - A model-free exact-anchor recovery analyzer. The recorded 60% universal edit
   gate is a **NO-GO even under ideal anchor placement**: historical deep Hermes
   compaction preserved only 8/29,630 tokens (0.027%), and the observability

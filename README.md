@@ -287,8 +287,8 @@ make test-state-checkpoint \
   MOONSHINE_STATE_DIR=/tmp
 ```
 
-The promoted opt-in server feature can preserve bounded exact session
-checkpoints after delivering a response:
+The experimental opt-in server path can preserve bounded exact session
+checkpoints:
 
 ```sh
 ./moonshine-server /path/to/moonshotai__Kimi-K3 \
@@ -302,8 +302,15 @@ remains full-token and identity exact. Model-backed displacement/restart
 response bytes, cached-token accounting, and all four state digests passed.
 The measured restored-prefix cost fell from an inferred 63.008 s of evaluation
 to 0.958 s import (**65.77×**); total prompt wall fell 95.174 → 33.124 s
-(**2.87×**, 65.20% lower). The opt-in feature passes its ≥5× prefix-restoration
-gate; production enablement remains an explicit deployment choice.
+(**2.87×**, 65.20% lower). The mechanism passes its ≥5×
+prefix-restoration gate; production response ordering is a separate gate.
+
+Production activation is currently blocked. A live canary proved exact
+displacement and restart recovery, but an immediate completion POST 32 ms after
+response delivery received HTTP 503 while synchronous checkpoint export held
+the one request slot for 2.097 seconds. Do not enable this path for a no-retry
+agent client until checkpoint publication precedes the client-visible terminal
+response.
 
 ### Diagnostics and offline cache analysis
 
@@ -499,13 +506,14 @@ MZG2 is promoted for the qualified K3 deployment. Decisive screens closed
 scan-resistant admission and compressed-resident cache slots. The route-index
 engine integration is also closed by its 0.148% direct wall-time ceiling.
 
-The exact durable checkpoint path is promoted as an opt-in feature:
+The exact durable checkpoint path passes correctness and performance gates:
 displaced-session and post-restart response bytes, cached-token accounting, and
-all four state digests matched. Server publication and restart loading passed.
-Prefix restoration improved **65.77×** (63.008 s inferred evaluation versus
-0.958 s import), while total prompt wall improved **2.87×** (95.174 → 33.124 s).
-The production launch profile remains unchanged until an operator supplies a
-private checkpoint root.
+all four state digests matched. Prefix restoration improved **65.77×** (63.008
+s inferred evaluation versus 0.958 s import), while total prompt wall improved
+**2.87×** (95.174 → 33.124 s). A production canary was rolled back because
+synchronous post-response export kept the one request slot busy and rejected
+an immediate follow-up with HTTP 503. The production launch profile remains
+checkpoint-disabled.
 
 The opt-in routed-prefill harness is functionally qualified: exact output and
 I/O, private 92-layer captures, deterministic commands, and QD2 occupancy all
@@ -516,19 +524,20 @@ of routed-stream wall. Event scheduling is parked rather than promoted.
 
 Checkpoint next steps:
 
-1. Roll out the promoted durable feature with a private checkpoint root, then
-   verify enabled health metadata, bounded publication, displacement recovery,
-   and a restart hit on the production profile.
-2. Capture one private Prime-Agent request immediately before and after natural
-   compaction, tokenize both with the production K3 renderer, retain only
-   content-free segment hashes/counts, and delete the raw payloads.
-3. If Prime's summary-first context breaks before a useful boundary, prototype
-   a project-local `context` extension that preserves one immutable complete
-   turn before the summary, then repeat the exact-token and output-equivalence
-   gates.
-4. Add hot in-memory recurrent anchors only after that client gate identifies
-   useful boundaries; keep low-match edits on the ordinary exact/full-prefill
-   fallback.
+1. Move durable publication before the client-visible terminal response:
+   before the HTTP response for non-streaming calls and before final
+   finish/usage plus `[DONE]` for streaming calls.
+2. Add an immediate-next-completion regression gate that requires no HTTP 503,
+   then repeat displacement, restart, response/digest, latency, permission, and
+   storage qualification.
+3. Only after that production gate passes, capture one private Prime-Agent
+   request immediately before and after natural compaction and measure its
+   exact K3 token boundary.
+4. If Prime's summary-first context breaks before a useful boundary, preserve
+   one immutable complete turn before the summary and repeat the exact-token
+   and output-equivalence gates.
+5. Add hot in-memory recurrent anchors only after the client gate identifies
+   useful boundaries; keep low-match edits on ordinary fallback.
 
 Other open work:
 

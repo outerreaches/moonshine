@@ -604,7 +604,7 @@ should be treated as private conversation state: they contain no model
 weights, but they encode the processed token history. CRC64 detects accidental
 corruption and is not an authentication mechanism.
 
-The promoted durable exact-prefix server fixture is:
+The durable exact-prefix correctness fixture is:
 
 ```sh
 make test-prefix-checkpoint \
@@ -617,9 +617,9 @@ an unrelated request, restores the exact checkpoint, restarts the session, and
 requires identical response bytes and all four state digests. The fixture
 passed. Prefix restoration improved 65.77× (63.008 s inferred evaluation
 versus 0.958 s import), clearing the proposed 5× gate; total prompt wall
-improved 2.87× (95.174 → 33.124 s). The path is promoted as opt-in.
+improved 2.87× (95.174 → 33.124 s). The mechanism passes those gates.
 
-For manual server qualification, use an absolute private root plus explicit
+For manual server qualification only, use an absolute private root plus explicit
 limits:
 
 ```sh
@@ -628,6 +628,12 @@ limits:
   --prefix-checkpoint-entries 4 \
   --prefix-checkpoint-bytes 21474836480
 ```
+
+Do not enable this path in production yet. The first production canary passed
+exact displacement/restart recovery but an immediate follow-up received HTTP
+503 while post-response checkpoint export retained the request slot for 2.097
+seconds. A new candidate must publish before the client-visible terminal
+response and pass the immediate-next-completion gate.
 
 ## Troubleshooting
 
