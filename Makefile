@@ -111,8 +111,9 @@ ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS)
 	test-long-context-retrieval \
 	test-mla-batch-determinism test-mla-batch-kernels \
 	test-moe-tail-profile test-decode-cache-replay test-cache-analyzer \
-	test-prefill-screen-analyzer test-static-q8-screen test-mzg-transcoder \
-	test-reduction-qualification test-openai-sdk clean
+	test-prefill-screen-analyzer test-anchor-recovery-analyzer \
+	test-static-q8-screen test-mzg-transcoder test-reduction-qualification \
+	test-openai-sdk clean
 
 all: libmoonshine.a moonshine-chat moonshine-server
 
@@ -290,6 +291,11 @@ test-prefill-screen-analyzer:
 	PYTHONDONTWRITEBYTECODE=1 \
 		$(PYTHON) -m unittest -v tests/test_analyze_prefill_screen.py
 
+
+test-anchor-recovery-analyzer:
+	PYTHONDONTWRITEBYTECODE=1 \
+		$(PYTHON) -m unittest -v tests/test_analyze_anchor_recovery.py
+
 test-static-q8-screen: tests/test_k3_q8_codec tools/screen_static_q8
 	./tests/test_k3_q8_codec
 	./tools/screen_static_q8 --self-test
@@ -299,7 +305,7 @@ test-mzg-transcoder:
 		$(PYTHON) -m unittest -v tests/test_transcode_mzg.py
 
 test-cpu: $(PORTABLE_CPU_TESTS) test-cache-analyzer \
-	test-prefill-screen-analyzer
+	test-prefill-screen-analyzer test-anchor-recovery-analyzer
 	./tests/test_k3_expert_cache
 	./tests/test_k3_prefix_reuse
 	./tests/test_k3_prefix_catalog

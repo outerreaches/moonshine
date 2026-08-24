@@ -90,6 +90,13 @@ Semantic Versioning once its first research-preview tag is published.
   executor's two-token suffix invariant, rejects conflicting records, and
   performs allocation-free lookup. State-file metadata now exposes configured
   context for this identity check. Server activation remains separately gated.
+- A model-free exact-anchor recovery analyzer. The recorded 60% universal edit
+  gate is a **NO-GO even under ideal anchor placement**: deep Hermes
+  compaction preserved only 8/29,630 tokens (0.027%), and the observability
+  edit preserved at most 86/158 (54.43%). Reasoning omission can recover
+  3,849/3,905 (98.57%) and exact structured displacement 237/354 (66.95%).
+  Activation is therefore narrowed to durable exact-prefix
+  displacement/restart recovery, not semantic recovery across deep rewrites.
 - A model-free one-pass selected-prefill route index. It validates token-major
   top-k routes and per-token uniqueness, produces stable expert-local
   token/output slices in `O(routes + experts)`, reuses allocations, preserves

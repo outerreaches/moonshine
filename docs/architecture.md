@@ -322,6 +322,63 @@ tokens. Export took 1.043 seconds on the qualified host. CRC64 protects
 against accidental corruption; the file is not cryptographically
 authenticated.
 
+The exact-anchor policy screen corrects the scope of future catalog activation.
+An imported recurrent state can represent only the exact tokens that produced
+it; no checkpoint can restore deeper than the candidate's full exact common
+prefix. Even ideal anchors therefore recover only 8/29,630 tokens (0.027%) for
+the recorded deep-compaction shape and 86/158 (54.43%) for the observability
+edit, failing the proposed 60% universal edit gate. Reasoning omission
+(3,849/3,905, 98.57%) and exact structured displacement (237/354, 66.95%) do
+clear it.
+
+The remaining activation target is deliberately narrower: preserve an exact
+checkpoint when another request or restart displaces the live session, then
+restore it only when its complete token sequence is an identity-compatible
+prefix of the new rendered request. Deep rewritten histories still prefill
+from their true exact common prefix; no semantic or fuzzy admission is allowed.
+
+### Durable exact-prefix activation contract
+
+The retained implementation target is opt-in and bounded, not a semantic
+cache. A private checkpoint root will bind one manifest to state format,
+configured context, model-layout CRC, and static precision. Each entry owns:
+
+- one existing versioned state file;
+- the complete exact retained-token ledger;
+- historical tool-choice, single-call, and response-format markers, including
+  owned canonical schema text and message boundaries;
+- state metadata and checksums;
+- only relative, traversal-free filenames under the checkpoint root.
+
+Publication order is state temporary/rename, checksummed token/directive
+sidecar temporary/rename, then an fsynced manifest rename. The directory is
+`0700`; files are `0600`; publication of the manifest is the only point at
+which an entry becomes discoverable. A bounded entry/byte LRU writes the
+replacement first, publishes a manifest without evicted entries, then removes
+their now-unreferenced files.
+
+Admission renders the ordinary candidate and bounded saved-directive variants,
+then selects the longest full-token, identity-compatible catalog prefix that
+leaves the required two-token suffix. Before device mutation it allocates and
+copies the replacement host token/directive ledger. Engine import performs its
+existing complete header/identity/payload-CRC validation before upload. After
+successful device import, the staged host ledger is swapped into the session
+without allocation and standard suffix execution continues. Usage reports the
+checkpoint position as cached prompt tokens.
+
+An invalid file or allocation failure before upload leaves the live session
+unchanged and falls back to ordinary exact-prefix/full-prefill admission. A
+failure after device upload begins invalidates causal state; the server must
+reset to position zero before full-prefill fallback and fail the request if
+that reset cannot restore a healthy engine. Checkpoint failure never clears the
+immutable expert cache and never weakens exact admission.
+
+The first server implementation should export synchronously only after the
+response has been delivered but before releasing the one request slot. This
+adds slot occupancy rather than response latency and avoids a worker touching
+mutable causal state. Export failure is a bounded warning: it does not fail the
+already completed response or publish a partial entry.
+
 ## Decode schedule
 
 `k3_engine_forward_token()` is the regression path:

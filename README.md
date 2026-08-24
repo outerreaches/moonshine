@@ -287,7 +287,9 @@ information.
 
 Captured routes can be replayed with `tools/analyze_decode_cache.py`, including
 uniform LRU, capacity curves, fixed-total allocation, and scan-resistant policy
-screens. See [Operational logging](docs/observability.md) and
+screens. `tools/analyze_anchor_recovery.py` bounds exact checkpoint recovery
+from recorded common-prefix/anchor positions; it cannot infer semantic reuse.
+See [Operational logging](docs/observability.md) and
 [Offline decode-cache analysis](docs/offline-decode-cache-analysis.md).
 
 ### Diagnostic KDA prefill backend
@@ -478,7 +480,9 @@ of routed-stream wall. Event scheduling is parked rather than promoted.
 
 Current open work:
 
-- engine/server activation of the exact prefix-checkpoint catalog;
+- engine/server activation of durable exact-prefix checkpoints for displaced
+  or restarted sessions; semantic-anchor recovery across deep history rewrites
+  is closed by the 8/29,630 exact-common-prefix upper bound;
 - derived static-Q8 startup acceleration;
 - dual-device expert streaming after sufficient second-device capacity exists;
 - broader quality qualification for the diagnostic KDA backend;
