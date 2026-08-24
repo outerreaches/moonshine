@@ -170,10 +170,11 @@ head produce a greedy token.
 
 The loader parses SafeTensors headers from all 96 shards into a sorted tensor
 directory without loading payloads. Static tensors always come from this
-unchanged source tree. The qualified default also streams raw experts.
-`MOONSHINE_MZG2_EXPERIMENT` selects an absolute MZG2 sidecar or complete
-directory; `MOONSHINE_EXPERT_STORE` retains the legacy MZG1 selector. Both
-paths fail closed on invalid selection and cannot be enabled together.
+unchanged source tree. The qualified K3 deployment selects an absolute MZG2
+sidecar or complete directory with `MOONSHINE_MZG2_STORE`;
+`MOONSHINE_EXPERT_STORE` retains the legacy MZG1 selector. Both paths fail
+closed on invalid selection and cannot be enabled together. Unset/`off` uses
+raw SafeTensor experts as the portable fallback.
 
 The accepted engine divides memory as follows:
 
@@ -230,18 +231,17 @@ post-TTFT decode is 42.118 vs 33.766 seconds (0.404 vs 0.503 token/s).
 Selected two-token prefill is 8.830 vs 7.970 seconds. MZG1 therefore remains an
 opt-in research artifact; raw SafeTensors remain the production default.
 
-MZG2 is the qualified, opt-in GPU-decoder store. It divides the canonical
-expert layout into 1,071 independent 16 KiB output tiles, uses 32 interleaved
-static-rANS states per tile, reads each compressed block directly into mapped
-O_DIRECT staging, and decodes an admitted miss straight into its device-cache
-slot on the existing expert stream. Per-tile checksums, compressed-cursor
-bounds, fixed output offsets, and terminal-state checks fail before cache
-metadata commits. Ninety-two sidecars contain all 82,432 experts in
-1,171.084 GiB, 13.0674105% below source, after immediate and independent
-full-source verification. Engine hello improves about 10.6%, selected prefill
-11.6%, and live 128K/30 11.7--12.8%, with exact outputs. An absolute
-`MOONSHINE_MZG2_EXPERIMENT` directory selects it and is mutually exclusive
-with MZG1. Raw SafeTensors remain the production default.
+MZG2 is the production GPU-decoder store for the qualified K3 deployment. It
+divides the canonical expert into independently bounded 16 KiB rANS tiles,
+reads each selected block through existing QD2 O_DIRECT staging, and decodes an
+admitted miss straight into its device-cache slot on the existing expert
+stream. Per-tile checksums, compressed-cursor bounds, fixed output offsets, and
+terminal-state checks fail before cache metadata commits. Ninety-two sidecars
+contain all 82,432 experts in 1,171.084 GiB, 13.0674105% below source, after
+immediate and independent full-source verification. Engine hello improves
+about 10.6%, selected prefill 11.6%, and live 128K/30 11.7--12.8%, with exact
+outputs. An absolute `MOONSHINE_MZG2_STORE` directory selects it and is mutually
+exclusive with MZG1. Unset/`off` retains raw SafeTensors as the rollback path.
 
 ## Attention and state
 

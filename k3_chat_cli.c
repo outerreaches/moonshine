@@ -365,7 +365,7 @@ int main(int argc, char **argv) {
             (1024.0 * 1024.0 * 1024.0),
         (double)engine_stats.state_bytes /
             (1024.0 * 1024.0 * 1024.0),
-        engine_stats.mzg2_experiment_store ? "mzg2-experiment" :
+        engine_stats.mzg2_store ? "mzg2" :
             engine_stats.mzg_expert_store ? "mzg1" : "safetensors");
 
     int result = 0;

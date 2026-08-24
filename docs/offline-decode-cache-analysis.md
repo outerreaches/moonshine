@@ -21,6 +21,10 @@ with zero observed-hit-mask mismatches. Both the current
 `host_interval_seconds` ledger and the explicitly versioned historical
 `wall_seconds` ledger are recognized; their different summary-step semantics
 are not interchangeable.
+Logical bytes must still imply one exact expert size per miss. Physical bytes
+may exceed logical bytes through O_DIRECT alignment or fall below them for a
+qualified compressed store; nonzero reads still require nonzero physical
+bytes.
 
 A header-only cache file is an empty snapshot, but emptiness alone does not
 prove that a larger cache is reconstructible. Any target above the source
@@ -74,6 +78,10 @@ must not be committed without an explicit disclosure review.
   exact per-layer frequency counters. Every requested expert must be resident
   after commit. It is TinyLFU-like only, not canonical Window-TinyLFU and not a
   deployment claim.
+- **Scan-resistant admission policies** replay second-touch admission,
+  2Q/segmented LRU, and windowed TinyLFU candidates. Hits remain
+  frozen at batch start; bypassed misses need not remain resident. Parameters
+  must be frozen on training captures and promoted only on held-out replay.
 - **Full-trace pinned LRU** selects pins from the evaluated future and is
   explicitly **oracle/nonpromotable**.
 - **Prefix-trained pinned LRU** selects pins only from an excluded prefix, then

@@ -104,8 +104,8 @@ typedef struct {
 } k3_mzg2_span;
 
 /*
- * MOONSHINE_MZG2_EXPERIMENT selects an absolute partial-layer sidecar or a
- * complete sidecar directory. Unset/off leaves the qualified SafeTensor path
+ * MOONSHINE_MZG2_STORE selects an absolute partial-layer sidecar or a complete
+ * sidecar directory. Unset/off leaves the qualified SafeTensor fallback
  * unchanged. MZG2 and MZG1 selection remain mutually exclusive.
  */
 bool k3_mzg2_store_open_optional(k3_mzg2_store **out,

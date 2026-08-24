@@ -123,11 +123,11 @@ int main(int argc, char **argv) {
     CHECK(stats.staging_bytes ==
               K3_EXPECTED_STAGING_BYTES *
                   (stats.mzg_expert_store ? 2u : 1u) +
-              (stats.mzg2_experiment_store ?
+              (stats.mzg2_store ?
                   K3_EXPECTED_MZG2_OUTPUT_BYTES : 0u) &&
               stats.staging_slots == 16u,
           "engine staging byte ledger");
-    CHECK(!(stats.mzg_expert_store && stats.mzg2_experiment_store),
+    CHECK(!(stats.mzg_expert_store && stats.mzg2_store),
           "compressed expert stores are mutually exclusive");
     CHECK(k3_engine_find_weight(
               engine,

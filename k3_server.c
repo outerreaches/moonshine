@@ -1893,7 +1893,7 @@ int main(int argc, char **argv) {
         config.api_key == NULL ? "off" : "on",
         config.range_backend == K3_PREFILL_PROJECTION_DEFAULT ?
             "default" : "kda-blas",
-        stats.mzg2_experiment_store ? "mzg2-experiment" :
+        stats.mzg2_store ? "mzg2" :
             stats.mzg_expert_store ? "mzg1" : "safetensors");
 
     while (!stop_requested) {

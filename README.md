@@ -572,17 +572,16 @@ hf download moonshotai/Kimi-K3 \
 ```
 
 The engine always expects all 96 `model-*.safetensors` shards and the original
-tensor names/layout. `MOONSHINE_EXPERT_STORE=auto` explicitly selects a
-complete `expert-store-mzg1` for routed experts; unset/`off` keeps the
-qualified raw path. Source SafeTensors remain authoritative for static tensors
-and model identity. Validate the directory without allocating the full engine:
+tensor names/layout. `MOONSHINE_EXPERT_STORE=auto` explicitly selects the
+legacy `expert-store-mzg1`; unset/`off` leaves it disabled. Source SafeTensors
+remain authoritative for static tensors and model identity.
 
-`MOONSHINE_MZG2_EXPERIMENT=/absolute/expert-store-mzg2` selects the qualified
-GPU-rANS store. Its 92 sidecars contain all 82,432 experts in 1,171.084 GiB,
-13.0674105% below source. Engine hello, selected prefill, and live 128K/30
-improve by roughly 10.6%, 11.6%, and 11.7--12.8% with exact outputs. It is
-mutually exclusive with MZG1 and remains opt-in; raw SafeTensors are the
-production default.
+`MOONSHINE_MZG2_STORE=/absolute/expert-store-mzg2` selects the qualified
+production GPU-rANS store. Its 92 sidecars contain all 82,432 experts in
+1,171.084 GiB, 13.0674105% below source. Engine hello, selected prefill, and
+live 128K/30 improve by roughly 10.6%, 11.6%, and 11.7--12.8% with exact
+outputs. It is mutually exclusive with MZG1. Unset/`off` retains raw
+SafeTensors as the portable fallback.
 
 ```sh
 make test-model-layout MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3

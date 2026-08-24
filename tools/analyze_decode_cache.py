@@ -601,10 +601,6 @@ def load_trace(run_dir: Path | str, capture: int, observed_capacity: int,
             raise AnalysisError(
                 f"decode ledger: layer {layer} max-inflight accounting fails")
         physical = int(row["physical_read_bytes"])
-        logical_layer = int(row["logical_expert_bytes"])
-        if physical < logical_layer:
-            raise AnalysisError(
-                f"decode ledger: layer {layer} physical bytes < logical bytes")
         if reads == 0 and physical != 0:
             raise AnalysisError(
                 f"decode ledger: layer {layer} has physical bytes with no reads")
@@ -624,8 +620,6 @@ def load_trace(run_dir: Path | str, capture: int, observed_capacity: int,
             ((summary_reads == 0) != (summary_maximum == 0))):
         raise AnalysisError("decode ledger: summary max-inflight is invalid")
     summary_physical = int(summary["physical_read_bytes"])
-    if summary_physical < int(summary["logical_expert_bytes"]):
-        raise AnalysisError("decode ledger: physical reads are below logical reads")
     if summary_reads == 0 and summary_physical != 0:
         raise AnalysisError("decode ledger: summary has physical bytes with no reads")
 
@@ -646,6 +640,14 @@ def load_trace(run_dir: Path | str, capture: int, observed_capacity: int,
         expert_bytes = None if logical == 0 else 0
         if expert_bytes == 0:
             raise AnalysisError("decode ledger: nonzero logical bytes with no misses")
+    if summary_reads != 0 and summary_physical == 0:
+        raise AnalysisError(
+            "decode ledger: summary has zero physical read bytes")
+    for layer, row in enumerate(layer_rows, start=1):
+        if int(row["read_requests"]) != 0 and \
+                int(row["physical_read_bytes"]) == 0:
+            raise AnalysisError(
+                f"decode ledger: layer {layer} has zero physical read bytes")
 
     return Trace(
         capture=capture,
@@ -999,6 +1001,234 @@ def simulate_frequency_retained(trace: Trace, capacity: int,
         **total.as_dict(),
     }
 
+def _touch(items: list[int], expert: int) -> None:
+    items.remove(expert)
+    items.append(expert)
+
+
+def _remember_ghost(items: list[int], expert: int, capacity: int) -> None:
+    if expert in items:
+        items.remove(expert)
+    items.append(expert)
+    if len(items) > capacity:
+        del items[:len(items) - capacity]
+
+
+def _record_policy_batch(metrics: Metrics, current: set[int],
+                         final: set[int], hits: int) -> None:
+    metrics.batches += 1
+    metrics.accesses += TOP_K
+    metrics.hits += hits
+    metrics.misses += TOP_K - hits
+    metrics.admissions += len(final - current)
+    metrics.evictions += len(current - final)
+
+
+def _scan_policy_result(policy: str, capacity: int, metrics: Metrics,
+                        violations: int, label: str,
+                        **parameters: int) -> dict[str, object]:
+    return {
+        "capacity": capacity,
+        "comparison_scope": "full_capture",
+        "deployability_label": label,
+        "future_data_leakage": False,
+        "initial_state": (
+            "captured LRU residents; policy metadata cold-started"),
+        "mandatory_requested_batch_residency": False,
+        "requested_batch_residency_violations": violations,
+        "oracle_nonpromotable": False,
+        "policy": policy,
+        "bypassed_misses": metrics.misses - metrics.admissions,
+        **parameters,
+        **metrics.as_dict(),
+    }
+
+
+def simulate_second_touch_admission(
+        trace: Trace, capacity: int, observed_capacity: int,
+        ghost_capacity: int) -> dict[str, object]:
+    if capacity <= 0 or ghost_capacity <= 0:
+        raise AnalysisError("second-touch capacities must be positive")
+    require_reconstructible_targets(trace, observed_capacity, (capacity,))
+    residents = [
+        list(_project_initial(trace, layer, capacity, observed_capacity))
+        for layer in range(1, LAYERS + 1)
+    ]
+    ghosts = [[] for _ in range(LAYERS)]
+    per_layer = [Metrics() for _ in range(LAYERS)]
+    violations = 0
+    for batch in trace.batches:
+        layer0 = batch.layer - 1
+        resident = residents[layer0]
+        ghost = ghosts[layer0]
+        current = set(resident)
+        hits = sum(expert in current for expert in batch.experts)
+        for expert in batch.experts:
+            if expert in resident:
+                _touch(resident, expert)
+            elif expert in ghost:
+                ghost.remove(expert)
+                if len(resident) == capacity:
+                    _remember_ghost(
+                        ghost, resident.pop(0), ghost_capacity)
+                resident.append(expert)
+            else:
+                _remember_ghost(ghost, expert, ghost_capacity)
+        final = set(resident)
+        if not set(batch.experts).issubset(final):
+            violations += 1
+        _record_policy_batch(
+            per_layer[layer0], current, final, hits)
+    return _scan_policy_result(
+        "scan_second_touch", capacity, sum_metrics(per_layer), violations,
+        "experimental online second-touch admission; held-out replay required",
+        ghost_capacity=ghost_capacity,
+    )
+
+
+def simulate_two_queue_admission(
+        trace: Trace, capacity: int, observed_capacity: int,
+        window_capacity: int, ghost_capacity: int) -> dict[str, object]:
+    main_capacity = capacity - window_capacity
+    if window_capacity <= 0 or main_capacity <= 0 or ghost_capacity <= 0:
+        raise AnalysisError("2Q capacities must be positive")
+    require_reconstructible_targets(trace, observed_capacity, (capacity,))
+    windows: list[list[int]] = []
+    mains: list[list[int]] = []
+    for layer in range(1, LAYERS + 1):
+        seed = list(_project_initial(
+            trace, layer, capacity, observed_capacity))
+        windows.append(seed[-window_capacity:])
+        mains.append(seed[:-window_capacity][-main_capacity:])
+    ghosts = [[] for _ in range(LAYERS)]
+    per_layer = [Metrics() for _ in range(LAYERS)]
+    violations = 0
+    for batch in trace.batches:
+        layer0 = batch.layer - 1
+        window = windows[layer0]
+        main = mains[layer0]
+        ghost = ghosts[layer0]
+        current = set(window) | set(main)
+        hits = sum(expert in current for expert in batch.experts)
+        for expert in batch.experts:
+            if expert in main:
+                _touch(main, expert)
+            elif expert in window:
+                window.remove(expert)
+                if len(main) == main_capacity:
+                    _remember_ghost(
+                        ghost, main.pop(0), ghost_capacity)
+                main.append(expert)
+            elif expert in ghost:
+                ghost.remove(expert)
+                if len(main) == main_capacity:
+                    _remember_ghost(
+                        ghost, main.pop(0), ghost_capacity)
+                main.append(expert)
+            else:
+                window.append(expert)
+                if len(window) > window_capacity:
+                    _remember_ghost(
+                        ghost, window.pop(0), ghost_capacity)
+        final = set(window) | set(main)
+        if not set(batch.experts).issubset(final):
+            violations += 1
+        _record_policy_batch(
+            per_layer[layer0], current, final, hits)
+    return _scan_policy_result(
+        "scan_two_queue", capacity, sum_metrics(per_layer), violations,
+        "experimental online 2Q admission; held-out replay required",
+        ghost_capacity=ghost_capacity,
+        main_capacity=main_capacity,
+        window_capacity=window_capacity,
+    )
+
+
+def simulate_window_tinylfu(
+        trace: Trace, capacity: int, observed_capacity: int,
+        window_capacity: int) -> dict[str, object]:
+    main_capacity = capacity - window_capacity
+    if window_capacity <= 0 or main_capacity <= 0:
+        raise AnalysisError("Window-TinyLFU capacities must be positive")
+    require_reconstructible_targets(trace, observed_capacity, (capacity,))
+    windows: list[list[int]] = []
+    mains: list[list[int]] = []
+    for layer in range(1, LAYERS + 1):
+        seed = list(_project_initial(
+            trace, layer, capacity, observed_capacity))
+        windows.append(seed[-window_capacity:])
+        mains.append(seed[:-window_capacity][-main_capacity:])
+    frequencies: list[dict[int, int]] = [dict() for _ in range(LAYERS)]
+    per_layer = [Metrics() for _ in range(LAYERS)]
+    violations = 0
+    for batch in trace.batches:
+        layer0 = batch.layer - 1
+        window = windows[layer0]
+        main = mains[layer0]
+        frequency = frequencies[layer0]
+        current = set(window) | set(main)
+        hits = sum(expert in current for expert in batch.experts)
+        for expert in batch.experts:
+            frequency[expert] = frequency.get(expert, 0) + 1
+            if expert in window:
+                _touch(window, expert)
+            elif expert in main:
+                _touch(main, expert)
+            else:
+                window.append(expert)
+                if len(window) > window_capacity:
+                    candidate = window.pop(0)
+                    if len(main) < main_capacity:
+                        main.append(candidate)
+                    else:
+                        victim = main[0]
+                        if frequency.get(candidate, 0) > \
+                                frequency.get(victim, 0):
+                            main.pop(0)
+                            main.append(candidate)
+        final = set(window) | set(main)
+        if not set(batch.experts).issubset(final):
+            violations += 1
+        _record_policy_batch(
+            per_layer[layer0], current, final, hits)
+    result = _scan_policy_result(
+        "scan_window_tinylfu", capacity, sum_metrics(per_layer), violations,
+        "experimental online Window-TinyLFU admission; held-out replay required",
+        main_capacity=main_capacity,
+        window_capacity=window_capacity,
+    )
+    result["frequency_metadata"] = {
+        "aging": "none_within_capture",
+        "collision_model": "none",
+        "counter_entries": sum(len(values) for values in frequencies),
+        "counter_kind": "exact_nonnegative_integer_per_layer_expert",
+        "counter_total": sum(
+            sum(values.values()) for values in frequencies),
+        "sha256": _frequency_digest(frequencies),
+    }
+    return result
+
+
+def scan_resistant_policy_results(
+        trace: Trace, capacity: int,
+        observed_capacity: int) -> list[dict[str, object]]:
+    results = [
+        simulate_second_touch_admission(
+            trace, capacity, observed_capacity, ghost)
+        for ghost in (capacity, 2 * capacity, 4 * capacity, 8 * capacity)
+    ]
+    for window in (8, 12, 16, 20, 24):
+        if window >= capacity:
+            continue
+        for ghost in (capacity, 2 * capacity, 4 * capacity):
+            results.append(simulate_two_queue_admission(
+                trace, capacity, observed_capacity, window, ghost))
+    for window in (1, 2, 4, 8, 12, 16, 20, 24):
+        if window < capacity:
+            results.append(simulate_window_tinylfu(
+                trace, capacity, observed_capacity, window))
+    return results
+
 
 def select_pins(batches: Sequence[Batch], pin_count: int
                 ) -> tuple[tuple[int, ...], ...]:
@@ -1231,12 +1461,14 @@ def _write_outputs(out: Path, analysis: Mapping[str, object],
             "cache_bytes",
         ), allocation_rows),
         "policies.csv": _csv_text((
-            "policy", "capacity", "pin_count_per_layer", "comparison_scope",
+            "policy", "capacity", "pin_count_per_layer", "window_capacity",
+            "main_capacity", "ghost_capacity", "comparison_scope",
             "oracle_nonpromotable", "future_data_leakage",
             "deployability_label", "initial_state", "training_steps",
             "evaluation_steps", "batches", "accesses", "hits", "misses",
-            "hit_rate", "admissions", "evictions", "logical_read_bytes",
-            "warmup_pin_misses", "mandatory_requested_batch_residency",
+            "hit_rate", "admissions", "evictions", "bypassed_misses",
+            "logical_read_bytes", "warmup_pin_misses",
+            "mandatory_requested_batch_residency",
             "requested_batch_residency_violations",
             "frequency_metadata_sha256",
         ), policy_rows),
@@ -1367,8 +1599,13 @@ def analyze(trace: Trace, observed_capacity: int,
         trace, observed_capacity, observed_capacity)
     frequency["policy"] = "experimental_frequency_retained_tinylfu_like"
     policies.append(frequency)
+    policies.extend(scan_resistant_policy_results(
+        trace, observed_capacity, observed_capacity))
     policies.sort(key=lambda row: (
-        str(row["policy"]), int(row.get("pin_count_per_layer", -1))))
+        str(row["policy"]),
+        int(row.get("pin_count_per_layer", -1)),
+        int(row.get("window_capacity", -1)),
+        int(row.get("ghost_capacity", -1))))
     policy_rows: list[dict[str, object]] = []
     for policy in policies:
         accesses = int(policy["accesses"])
@@ -1378,6 +1615,7 @@ def analyze(trace: Trace, observed_capacity: int,
             "accesses": accesses,
             "admissions": policy["admissions"],
             "batches": policy["batches"],
+            "bypassed_misses": policy.get("bypassed_misses", ""),
             "capacity": policy["capacity"],
             "comparison_scope": policy["comparison_scope"],
             "deployability_label": policy["deployability_label"],
@@ -1385,6 +1623,7 @@ def analyze(trace: Trace, observed_capacity: int,
             "evictions": policy["evictions"],
             "frequency_metadata_sha256": (
                 metadata["sha256"] if isinstance(metadata, dict) else ""),
+            "ghost_capacity": policy.get("ghost_capacity", ""),
             "future_data_leakage": policy["future_data_leakage"],
             "hit_rate": f"{hits / accesses:.12f}" if accesses else "0.000000000000",
             "hits": hits,
@@ -1394,6 +1633,7 @@ def analyze(trace: Trace, observed_capacity: int,
             "mandatory_requested_batch_residency": policy[
                 "mandatory_requested_batch_residency"],
             "misses": policy["misses"],
+            "main_capacity": policy.get("main_capacity", ""),
             "oracle_nonpromotable": policy.get("oracle_nonpromotable", False),
             "pin_count_per_layer": policy.get("pin_count_per_layer", ""),
             "policy": policy["policy"],
@@ -1401,6 +1641,7 @@ def analyze(trace: Trace, observed_capacity: int,
                 "requested_batch_residency_violations"],
             "training_steps": policy.get("training_steps", ""),
             "warmup_pin_misses": policy.get("warmup_pin_misses", ""),
+            "window_capacity": policy.get("window_capacity", ""),
         })
 
     initial_occupancies = [len(values) for values in trace.initial_lru]

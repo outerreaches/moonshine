@@ -30,10 +30,12 @@ Semantic Versioning once its first research-preview tag is published.
   masks, provenance-safe expansion, and cache/ledger/route identity before
   reporting fixed-capacity counterfactuals.
 - A deterministic standard-library offline cache analyzer with uniform and
-  per-layer marginal curves, exact fixed-memory allocation, experimental online
-  frequency retention, explicitly nonpromotable full-trace oracles, and a
-  prefix-trained cold-suffix bound. Private reports include stable input hashes
-  and never embed absolute host paths or raw routes.
+  per-layer marginal curves, exact fixed-memory allocation, experimental
+  frequency retention, second-touch/2Q/windowed-TinyLFU admission screens,
+  explicitly nonpromotable full-trace oracles, and a prefix-trained cold-suffix
+  bound. Strict ledgers accept both aligned raw and compressed physical-byte
+  accounting. Private reports include stable input hashes and never embed
+  absolute host paths or raw routes.
 - Planner-driven chunked replacement prefill when a monolithic position-zero
   range cannot fit one cache-backed workspace loan. Each bounded range releases
   transient workspace before the next, reports whole-prompt progress, aggregates
@@ -55,8 +57,8 @@ Semantic Versioning once its first research-preview tag is published.
   independently verifies all 82,432 experts, records sidecar SHA-256 values,
   and atomically publishes 1,171.084 GiB at 13.0674105% reduction. Engine
   hello improves about 10.6%, selected prefill 11.6%, and live 128K/30
-  11.7--12.8%, with exact outputs. MZG2 remains absolute-path opt-in while raw
-  SafeTensors remain the production default.
+  11.7--12.8%, with exact outputs. The qualified K3 deployment now selects it
+  through `MOONSHINE_MZG2_STORE`; raw SafeTensors remain the rollback path.
 - A model-free exact prefix checkpoint catalog core. It owns immutable token
   sequences and state paths, filters on state format/context/model/static-tier
   identity, chooses the longest byte-exact eligible prefix, preserves the

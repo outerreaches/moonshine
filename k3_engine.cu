@@ -808,7 +808,7 @@ extern "C" bool k3_engine_create(
     }
     if (engine->mzg2_store && experts_per_layer < K3_ENGINE_TOP_K) {
         engine_error(error, error_size,
-                     "MZG2 experiment requires at least top-k cache slots");
+                     "MZG2 requires at least top-k cache slots");
         k3_engine_destroy(engine);
         return false;
     }
@@ -1018,7 +1018,7 @@ extern "C" bool k3_engine_create(
                 K3_ENGINE_EXPERT_BYTES :
             0u);
     measured.mzg_expert_store = engine->mzg_store != NULL;
-    measured.mzg2_experiment_store = engine->mzg2_store != NULL;
+    measured.mzg2_store = engine->mzg2_store != NULL;
     measured.startup_seconds =
         elapsed_seconds(startup_start, startup_end);
     engine->causal_state_valid = true;

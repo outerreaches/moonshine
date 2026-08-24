@@ -323,6 +323,29 @@ class StrictTraceAndReportTest(unittest.TestCase):
                                     "physical bytes with no reads"):
             analyzer.load_trace(self.run, 1, 24)
 
+    def test_compressed_physical_bytes_below_logical_are_accepted(self) -> None:
+        ledger = self.run / "decode.ledger.csv"
+        with ledger.open(newline="") as fh:
+            rows = list(csv.reader(fh))
+        scope = rows[0].index("scope")
+        physical = rows[0].index("physical_read_bytes")
+        logical = rows[0].index("logical_expert_bytes")
+        compressed_total = 0
+        for row in rows[1:]:
+            if row[scope] != "layer":
+                continue
+            compressed = max(1, int(row[logical]) // 2)
+            row[physical] = str(compressed)
+            compressed_total += compressed
+        summary = next(row for row in rows[1:] if row[scope] == "summary")
+        summary[physical] = str(compressed_total)
+        _write_csv(ledger, rows[0], rows[1:])
+        trace = analyzer.load_trace(self.run, 1, 18)
+        self.assertLess(
+            int(trace.ledger_summary["physical_read_bytes"]),
+            int(trace.ledger_summary["logical_expert_bytes"]),
+        )
+
     def test_strict_schema_rejected(self) -> None:
         ledger = self.run / "decode.ledger.csv"
         with ledger.open(newline="") as fh:
@@ -386,6 +409,19 @@ class StrictTraceAndReportTest(unittest.TestCase):
         )
         self.assertEqual(frequency["accesses"], trace_accesses)
         self.assertIn("not canonical", frequency["deployability_label"])
+        scan_policies = [
+            policy for policy in analysis["policies"]
+            if policy["policy"].startswith("scan_")
+        ]
+        self.assertEqual(len(scan_policies), 19)
+        self.assertTrue(all(
+            policy["accesses"] == trace_accesses and
+            policy["hits"] + policy["misses"] == trace_accesses and
+            not policy["future_data_leakage"] and
+            not policy["mandatory_requested_batch_residency"] and
+            "held-out replay required" in policy["deployability_label"]
+            for policy in scan_policies
+        ))
         oracle = next(policy for policy in analysis["policies"]
                       if policy["policy"] == "oracle_pinned_lru")
         self.assertTrue(oracle["oracle_nonpromotable"])

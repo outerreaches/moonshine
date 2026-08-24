@@ -22,7 +22,7 @@ typedef struct {
     uint32_t cache_slots;
     uint32_t staging_slots;
     bool     mzg_expert_store;
-    bool     mzg2_experiment_store;
+    bool     mzg2_store;
     double   startup_seconds;
     double   mla_pack_seconds;
 } k3_engine_stats;

@@ -391,11 +391,11 @@ extern "C" bool k3_mzg2_store_open_optional(
         set_error(error, error_size, "invalid MZG2 store output");
         return false;
     }
-    const char *path = getenv("MOONSHINE_MZG2_EXPERIMENT");
+    const char *path = getenv("MOONSHINE_MZG2_STORE");
     if (!path || path[0] == '\0' || strcmp(path, "off") == 0) return true;
     if (path[0] != '/') {
         set_error(error, error_size,
-                  "MOONSHINE_MZG2_EXPERIMENT must be off or absolute");
+                  "MOONSHINE_MZG2_STORE must be off or absolute");
         return false;
     }
     struct stat root_status{};

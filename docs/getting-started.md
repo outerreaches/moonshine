@@ -111,12 +111,13 @@ MOONSHINE_EXPERT_STORE=auto \
   ./tests/test_k3_mzg_store /path/to/moonshotai__Kimi-K3
 ```
 
-Unset or `MOONSHINE_EXPERT_STORE=off` is the qualified raw default.
-`MOONSHINE_EXPERT_STORE=auto` selects the standard subdirectory; an absolute
-value selects a nondefault store. Startup reports `experts=mzg1` when selected.
-A selected incomplete/corrupt store fails closed.
+Unset or `MOONSHINE_EXPERT_STORE=off` disables legacy MZG1.
+`MOONSHINE_EXPERT_STORE=auto` selects its standard subdirectory; an absolute
+value selects a nondefault MZG1 store. Startup reports `experts=mzg1` when
+selected. A selected incomplete/corrupt store fails closed. When both MZG1 and
+MZG2 selectors are unset/`off`, the engine uses raw SafeTensor experts.
 
-### Optional: MZG2 full GPU decoder
+### MZG2 production GPU decoder
 
 MZG2 keeps the official SafeTensors authoritative and adds a fully verified
 derived expert store. The qualified store reduces routed bytes by 13.0674105%
@@ -131,7 +132,7 @@ make tools/transcode_mzg2_layer
   --jobs 24
 
 MOONSHINE_EXPERT_STORE=off \
-MOONSHINE_MZG2_EXPERIMENT=/path/to/moonshotai__Kimi-K3/expert-store-mzg2 \
+MOONSHINE_MZG2_STORE=/path/to/moonshotai__Kimi-K3/expert-store-mzg2 \
   make test-engine-hello MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3
 ```
 
@@ -140,9 +141,9 @@ publishes verified per-layer sidecars, records SHA-256 identities for
 resumption, independently decodes every stored expert against canonicalized
 SafeTensors, and renames the root only after all 82,432 experts pass.
 Interrupted runs rehash completed sidecars before continuing. Startup reports
-`experts=mzg2-experiment`. The selector must be `off`, unset, or an absolute
-sidecar/directory path; MZG1 and MZG2 selection together fails closed. Raw
-SafeTensors remain the production launch default.
+`experts=mzg2`. The selector must be `off`, unset, or an absolute
+sidecar/directory path; MZG1 and MZG2 selection together fails closed.
+Unset/`off` retains raw SafeTensors as the rollback path.
 
 ### Offline static-Q8 compression screen
 
