@@ -386,7 +386,7 @@ ordering is not safe for a no-retry agent client: a completion POST sent 32 ms
 after response delivery received HTTP 503, and publication completed 2.127
 seconds after the response log. Production was rolled back.
 
-The latency-preserving candidate keeps response-first publication but adds an
+The candidate implementation keeps response-first publication and adds an
 explicit `checkpoint_export` slot phase. Immediately before the response
 becomes terminal, the worker marks that phase. The control thread may then
 transfer exactly one authenticated completion into the existing pending slot;
@@ -404,6 +404,12 @@ bytes, cached-token accounting, and all four state digests. Prefix restoration
 improved **65.77×** (63.008 s inferred evaluation versus 0.958 s import), and
 total prompt wall improved **2.87×** (95.174 → 33.124 s). These results qualify
 the checkpoint mechanism, not the current production response ordering.
+
+The implementation uses a small server-only state machine with phases `idle`,
+`inference`, `checkpoint_export`, and `stopping`. The phase, pending ownership,
+and handoff transition share `runtime.mutex`; the existing request body/FD slot
+remains the sole queue allocation. Queue capacity is one 8 MiB-bounded request
+and adds no causal-state or GPU allocation.
 
 ## Decode schedule
 

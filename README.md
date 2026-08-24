@@ -482,8 +482,9 @@ memory, and pass criteria are documented in `docs/qualification-*.md` and
   violate the CMA-plus-4-GiB safety reserve on a later request.
 - Runtime state is 0.920 GiB at 8K, 1.566 GiB at 32K, and 4.150 GiB at 128K.
 - The server has one inference slot. Health/model discovery remain responsive
-  while it is occupied; a competing completion receives HTTP 503 instead of
-  waiting in the listener backlog.
+  while it is occupied. Inference rejects competing completions with HTTP 503;
+  the checkpoint-handoff candidate admits exactly one next completion during
+  terminal checkpoint export and rejects further contenders.
 - The source ceiling is 65,536 output tokens, but the effective limit is
   clamped to configured and remaining context. A continuous 64K decode has not
   been qualified and would take many hours.
@@ -524,15 +525,15 @@ of routed-stream wall. Event scheduling is parked rather than promoted.
 
 Checkpoint next steps:
 
-1. Add an explicit `checkpoint_export` slot phase with capacity for one queued
-   completion. Open that queue immediately before the current response becomes
-   terminal, preserve response latency, and start the queued request only after
+1. The candidate now implements an explicit `checkpoint_export` slot phase and
+   reuses the existing pending slot for one bounded next-turn request. It opens
+   the queue before terminal response bytes and executes the request only after
    export releases causal state.
-2. Add immediate-next and two-contender regression gates: the first follow-up
-   must wait rather than receive HTTP 503; the second must still be rejected,
-   preserving the bounded one-slot contract.
+2. Run the staged immediate-next/two-contender qualification: first follow-up
+   waits rather than receiving HTTP 503; second contender is still rejected;
+   health/model discovery remain responsive.
 3. Repeat displacement, restart, response/digest, queue-latency, shutdown,
-   disconnect, permission, and storage qualification.
+   disconnect, permission, and storage qualification before another rollout.
 4. After the production queue gate passes, capture one private Prime-Agent
    request immediately before and after natural compaction and measure its
    exact K3 token boundary.

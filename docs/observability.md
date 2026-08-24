@@ -24,7 +24,7 @@ disable terminal color explicitly.
 |---|---|
 | `server.load.start` | Effective model path and memory/scheduling configuration before engine creation. |
 | `server.ready` | Listener, version, context/output ceilings, load time, and memory tiers after successful startup. |
-| `request.start` | Validated request envelope. It records counts and policy, never message content. |
+| `request.start` | Validated request envelope plus queue wait/origin. It records counts and policy, never message content. |
 | `request.prefill.start` | Exact prompt accounting and reuse decision before reset, workspace admission, or inference. |
 | `request.prefix.miss` | A retained state existed but the candidate was not an exact extension; includes retained/matched/candidate token counts. |
 | `request.prefill.progress` | At most one terminal update per minute during long prefill. SSE clients independently retain their ten-second comment keepalives. |
@@ -34,13 +34,20 @@ disable terminal color explicitly.
 | `request.decode.progress` | A heartbeat every 64 model-produced tokens, including the current region and decode elapsed time. |
 | `request.state.digest` | Non-cryptographic causal-state comparison fingerprints emitted only with `--decode-state-digest`; expensive and intended for paired qualification. |
 | `request.decode.io` | Per-request decode I/O/timing aggregate emitted only when decode diagnostics are enabled. |
-| `request.complete` | Final prompt/decode/total timing, finish reason, forced-trailer count, output byte counts, tool-call count, client state, and cache counters. |
-| `request.reject` / `request.failed` | Admission or inference failure with an HTTP/inference stage and bounded diagnostic; post-decode failures include the diagnostic capture ID. A busy completion is rejected with status 503 and `reason=busy`. |
+| `request.complete` | Final prompt/decode/total and separate queue timing, finish reason, forced-trailer count, output byte counts, tool-call count, client state, and cache counters. |
+| `request.queued` / `request.dequeue` | One completion was transferred during terminal checkpoint export, then handed to inference after export; records only peer, phase, occupancy, and wait. |
+| `request.queue.cancelled` | A client disconnected while waiting during checkpoint export; no inference or causal mutation began. |
+| `request.reject` / `request.failed` | Admission or inference failure with an HTTP/inference stage and bounded diagnostic; post-decode failures include the diagnostic capture ID. Busy rejection includes slot phase and queue occupancy. |
 | `request.client_disconnect` | The client disappeared before the initial SSE event could be established. |
 | `request.cancelled` | A started request stopped at a safe token/layer boundary because the peer disconnected or the server began shutdown. Includes reason, phase, generated-token count, and wall time; semantic state is reset before the slot releases. |
 | `request.prefix.checkpoint.hit` | Durable exact-prefix state was imported; records cached tokens, suffix tokens, and import wall time. |
 | `checkpoint.publish` | A post-response durable state/metadata/manifest publication completed; records token count, state GiB, entry count, and export time. |
 | `checkpoint.failed` | Import/export/publication failed with a bounded stage and diagnostic; never logs checkpoint paths or token content. |
+
+Checkpoint-enabled health adds `slot_phase`, `queued_completions`, and
+`checkpoint_queue_capacity`. `busy` remains true and `available_slots` remains
+zero during both inference and checkpoint export; one queued completion is a
+handoff, not a second inference slot.
 
 The `request.prefill.start` event is intentionally emitted before a divergent
 request can reset retained causal state. Operators can therefore distinguish a

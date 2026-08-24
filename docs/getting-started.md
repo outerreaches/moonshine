@@ -635,6 +635,20 @@ exact displacement/restart recovery but an immediate follow-up received HTTP
 seconds. A new candidate must admit one bounded next-turn request during
 terminal checkpoint export and pass immediate-next/two-contender queue gates.
 
+The staged handoff gate uses a private request and output directory:
+
+```sh
+MOONSHINE_API_KEY='<private>' \
+  tools/qualify_checkpoint_handoff.py \
+  --request /private/handoff-request.json \
+  --output /private/handoff-result
+```
+
+The first immediate completion must wait and return normal validation rather
+than HTTP 503. A second contender must receive `server_busy`; the script also
+requires responsive health and an idle final state. It stores the model
+response privately but emits only content-free measurements in `result.json`.
+
 ## Troubleshooting
 
 ### Residency preflight rejects the run

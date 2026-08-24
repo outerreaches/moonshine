@@ -59,7 +59,8 @@ PORTABLE_CPU_TESTS := \
 	tests/test_k3_prefill_timeline \
 	tests/test_k3_q8_codec \
 	tests/test_k3_json \
-	tests/test_k3_openai
+	tests/test_k3_openai \
+	tests/test_k3_server_slot
 
 MODEL_CPU_TESTS := \
 	tests/test_k3_prefill_plan \
@@ -198,8 +199,9 @@ k3_prefill_route_index.o: k3_prefill_route_index.c \
 	k3_prefill_route_index.h
 k3_prefix_reuse.o: k3_prefix_reuse.c k3_prefix_reuse.h
 k3_chat_cli.o: k3_chat_cli.c k3_chat.h k3_engine.h moonshine_version.h
-k3_server.o: k3_server.c k3_chat.h k3_json.h k3_openai.h \
+k3_server.o: k3_server.c k3_server_slot.h k3_chat.h k3_json.h k3_openai.h \
 	moonshine_version.h
+k3_server_slot.o: k3_server_slot.c k3_server_slot.h
 k3_prefill.o: k3_prefill.c k3_prefill.h k3_safetensors.h
 k3_static_store.o: k3_static_store.cu k3_static_store.h \
 	k3_rocm_ops.h k3_safetensors.h
@@ -219,6 +221,7 @@ tests/test_k3_chat_session.o: tests/test_k3_chat_session.c k3_chat.h
 tests/test_k3_long_context.o: tests/test_k3_long_context.c k3_chat.h
 tests/test_k3_openai.o: tests/test_k3_openai.c k3_openai.h k3_chat.h
 tests/test_k3_prefix_checkpoint.o: tests/test_k3_prefix_checkpoint.c k3_chat.h
+tests/test_k3_server_slot.o: tests/test_k3_server_slot.c k3_server_slot.h
 tests/test_k3_mzg_store.o: tests/test_k3_mzg_store.c k3_mzg.h k3_safetensors.h
 tests/test_k3_prefix_reuse.o: tests/test_k3_prefix_reuse.c k3_prefix_reuse.h
 tests/test_k3_prefix_catalog.o: tests/test_k3_prefix_catalog.c \
@@ -258,6 +261,8 @@ tests/test_k3_prefix_bundle: tests/test_k3_prefix_bundle.o \
 tests/test_k3_prefix_catalog: tests/test_k3_prefix_catalog.o \
 		k3_prefix_catalog.o k3_prefix_reuse.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_k3_server_slot: tests/test_k3_server_slot.o k3_server_slot.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 tests/test_k3_prefill_route_index: tests/test_k3_prefill_route_index.o \
 		k3_prefill_route_index.o
@@ -287,8 +292,8 @@ moonshine-chat: k3_chat_cli.o libmoonshine.a
 	$(HIPCC) $(HIPFLAGS) -o $@ k3_chat_cli.o libmoonshine.a \
 		$(ROCM_LDLIBS) $(ICU_LDLIBS)
 
-moonshine-server: k3_server.o libmoonshine.a
-	$(HIPCC) $(HIPFLAGS) -o $@ k3_server.o libmoonshine.a \
+moonshine-server: k3_server.o k3_server_slot.o libmoonshine.a
+	$(HIPCC) $(HIPFLAGS) -o $@ k3_server.o k3_server_slot.o libmoonshine.a \
 		$(ROCM_LDLIBS) $(ICU_LDLIBS)
 
 $(ROCM_TESTS): %: %.o libmoonshine.a
@@ -328,6 +333,7 @@ test-cpu: $(PORTABLE_CPU_TESTS) test-cache-analyzer \
 	./tests/test_k3_q8_codec
 	./tests/test_k3_json
 	./tests/test_k3_openai
+	./tests/test_k3_server_slot
 
 test-decode-cache-replay: tests/test_k3_expert_cache
 	@test -n "$(MOONSHINE_DECODE_TRACE)" || \
@@ -485,7 +491,7 @@ test-reduction-qualification: check-model \
 
 clean:
 	rm -f libmoonshine.a moonshine-chat moonshine-server \
-		k3_chat_cli.o k3_server.o k3_q8_codec.o \
+		k3_chat_cli.o k3_server.o k3_server_slot.o k3_q8_codec.o \
 		tools/transcode_mzg2_layer tools/transcode_mzg2_layer.o \
 		tools/screen_static_q8 tools/screen_static_q8.o \
 		$(K3_OBJS) tests/*.o $(ALL_TESTS)

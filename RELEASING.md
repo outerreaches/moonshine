@@ -74,6 +74,8 @@ regression in the preceding response's terminal latency and require queued
 wait to remain bounded by publication time plus scheduling noise. The disabled
 profile must perform no checkpoint I/O; a pre-feature rollback binary may omit
 checkpoint health metadata rather than reporting `enabled:false`.
+Run `tools/qualify_checkpoint_handoff.py` with a mode-`0600` private request
+and mode-`0700` output directory as the immediate-next/two-contender gate.
 
 For a persistent 128K service on the qualified 128 GB host, use
 `--experts 30` and complete at least two independent prefills in the same

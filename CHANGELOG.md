@@ -98,6 +98,13 @@ Semantic Versioning once its first research-preview tag is published.
   2.097 seconds. Production was rolled back to the checkpoint-disabled binary.
   Activation now requires a bounded one-request handoff during terminal
   checkpoint export plus immediate-next and two-contender queue gates.
+- A latency-preserving checkpoint-handoff candidate. A mutex-protected
+  `idle`/`inference`/`checkpoint_export`/`stopping` state machine admits one
+  authenticated completion into the existing pending slot after terminal
+  response begins and before synchronous export. The worker executes it only
+  after export; a second contender remains HTTP 503. Health, lifecycle logs,
+  response headers, disconnect, publication-failure, and shutdown paths expose
+  bounded queue state without logging request content.
 - A model-free exact-anchor recovery analyzer. The recorded 60% universal edit
   gate is a **NO-GO even under ideal anchor placement**: historical deep Hermes
   compaction preserved only 8/29,630 tokens (0.027%), and the observability

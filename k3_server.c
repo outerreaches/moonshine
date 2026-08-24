@@ -1,6 +1,7 @@
 #include "k3_chat.h"
 #include "k3_json.h"
 #include "k3_openai.h"
+#include "k3_server_slot.h"
 #include "moonshine_version.h"
 
 #include <arpa/inet.h>
@@ -101,6 +102,8 @@ typedef struct {
     struct timespec decode_start;
     struct timespec last_prefill_log;
     const char     *decode_phase;
+    double          queue_seconds;
+    bool            queued_during_checkpoint;
     uint32_t        max_output_tokens;
     bool            thinking;
     bool            clear_expert_cache;
@@ -115,9 +118,10 @@ typedef struct {
     int             pending_fd;
     http_request    pending_request;
     char            pending_peer[NI_MAXHOST];
-    bool            busy;
+    struct timespec pending_accepted;
+    k3_server_slot_state slot;
     bool            pending;
-    bool            stopping;
+    bool            pending_from_checkpoint;
     bool            control_started;
     bool            mutex_initialized;
     bool            condition_initialized;
@@ -228,6 +232,23 @@ static void server_log(server_log_level level,
     do {
         written = write(STDERR_FILENO, line, line_size);
     } while (written < 0 && errno == EINTR);
+}
+
+static bool begin_checkpoint_export(server_runtime *runtime,
+                                    const char *completion_id) {
+    (void)pthread_mutex_lock(&runtime->mutex);
+    const bool ok =
+        k3_server_slot_begin_checkpoint_export(&runtime->slot);
+    const k3_server_slot_phase phase = runtime->slot.phase;
+    (void)pthread_mutex_unlock(&runtime->mutex);
+    if (!ok) {
+        server_log(
+            SERVER_LOG_ERROR, "server.slot.invalid",
+            completion_id,
+            "action=begin_checkpoint_export phase=%s",
+            k3_server_slot_phase_name(phase));
+    }
+    return ok;
 }
 
 static const char *prefill_strategy_name(
@@ -1766,6 +1787,7 @@ static void log_result(const request_observer *observer,
         observer->completion_id,
         "prompt=%u evaluated=%u reused=%u prefill=%.3fs "
         "generated=%u decode=%.3fs rate=%.3f_tok/s total=%.3fs "
+        "queue=%.3fs queued=%s "
         "finish=%s forced_trailer=%u tool_calls=%zu "
         "reasoning_bytes=%zu content_bytes=%zu "
         "stream=%s client=%s cache=%llu/%llu cache_total=%llu/%llu",
@@ -1776,6 +1798,8 @@ static void log_result(const request_observer *observer,
         result->generated_tokens, result->decode_seconds,
         result->tokens_per_second,
         elapsed_seconds(observer->request_start, now),
+        observer->queue_seconds,
+        observer->queued_during_checkpoint ? "yes" : "no",
         result->finish_reason == K3_CHAT_FINISH_TOOL_CALLS ?
             "tool_calls" :
             (result->finish_reason ==
@@ -1812,20 +1836,27 @@ static void log_cancellation(
 
 static void handle_chat_completion(int fd, k3_chat_session *session,
                                    const http_request *http,
-                                   const server_config *config,
-                                   const char *peer) {
+                                   server_runtime *runtime,
+                                   const char *peer,
+                                   struct timespec accepted,
+                                   bool queued_during_checkpoint) {
+    const server_config *config = runtime->config;
     char error[1024];
     const time_t created = time(NULL);
     char completion_id[128];
     make_completion_id(completion_id, sizeof(completion_id), created);
+    struct timespec handler_start;
+    clock_gettime(CLOCK_MONOTONIC, &handler_start);
     request_observer observer = {
         .completion_id = completion_id,
         .peer = peer,
         .fd = fd,
+        .request_start = accepted,
+        .queue_seconds = elapsed_seconds(accepted, handler_start),
+        .queued_during_checkpoint = queued_during_checkpoint,
         .clear_expert_cache =
             config->clear_expert_cache_per_request,
     };
-    clock_gettime(CLOCK_MONOTONIC, &observer.request_start);
     k3_openai_chat_request request;
     memset(&request, 0, sizeof(request));
     if (!k3_openai_parse_chat_request(
@@ -1858,17 +1889,21 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
     server_log(
         SERVER_LOG_INFO, "request.start", completion_id,
         "peer=%s stream=%s messages=%zu max_output=%u reasoning=%s "
-        "tools=%zu tool_choice=%s parallel_tools=%s format=%s",
+        "tools=%zu tool_choice=%s parallel_tools=%s format=%s "
+        "queue=%.3fs queued=%s",
         peer, request.stream ? "yes" : "no",
         request.message_count, request.max_tokens,
         request.reasoning_effort,
         request.tool_count, tool_choice_name(request.tool_choice),
         request.parallel_tool_calls ? "yes" : "no",
-        response_format_name(request.response_format));
+        response_format_name(request.response_format),
+        observer.queue_seconds,
+        observer.queued_during_checkpoint ? "yes" : "no");
     k3_chat_turn_result result;
     memset(&result, 0, sizeof(result));
     bool ok;
     bool response_delivered = false;
+    bool checkpoint_phase = false;
     if (request.stream) {
         stream_state stream = {
             .fd = fd,
@@ -1925,6 +1960,11 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
                 &request, &result, error, sizeof(error));
         }
         if (ok) {
+            if (!stream.failed && !stop_requested &&
+                k3_chat_session_checkpoint_enabled(session)) {
+                checkpoint_phase = begin_checkpoint_export(
+                    runtime, completion_id);
+            }
             stream_end(&stream, &result);
             log_result(&observer, &result, true, !stream.failed);
             response_delivered = !stream.failed;
@@ -2006,16 +2046,23 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
                 char metrics[512];
                 snprintf(
                     metrics, sizeof(metrics),
+                    "X-Moonshine-Queue-Seconds: %.6f\r\n"
                     "X-Moonshine-Prompt-Seconds: %.6f\r\n"
                     "X-Moonshine-Prompt-Evaluated-Tokens: %u\r\n"
                     "X-Moonshine-Prompt-Reused-Tokens: %u\r\n"
                     "X-Moonshine-Decode-Seconds: %.6f\r\n"
                     "X-Moonshine-Decode-Tokens-Per-Second: %.6f\r\n",
+                    observer.queue_seconds,
                     result.prompt_seconds,
                     result.prompt_evaluated_tokens,
                     result.prompt_reused_tokens,
                     result.decode_seconds,
                     result.tokens_per_second);
+                if (!stop_requested &&
+                    k3_chat_session_checkpoint_enabled(session)) {
+                    checkpoint_phase = begin_checkpoint_export(
+                        runtime, completion_id);
+                }
                 const bool client_ok = send_response(
                     fd, 200, "application/json",
                     json, json_size, metrics);
@@ -2025,8 +2072,7 @@ static void handle_chat_completion(int fd, k3_chat_session *session,
             }
         }
     }
-    if (response_delivered && !stop_requested &&
-        k3_chat_session_checkpoint_enabled(session)) {
+    if (checkpoint_phase && response_delivered && !stop_requested) {
         k3_chat_checkpoint_result checkpoint;
         char checkpoint_error[512];
         if (!k3_chat_session_publish_checkpoint(
@@ -2067,7 +2113,9 @@ static bool send_busy_response(int fd) {
 
 static void send_health_response(int fd, server_runtime *runtime) {
     (void)pthread_mutex_lock(&runtime->mutex);
-    const bool busy = runtime->busy;
+    const k3_server_slot_phase phase = runtime->slot.phase;
+    const bool queued = runtime->slot.queued;
+    const bool busy = k3_server_slot_busy(&runtime->slot);
     (void)pthread_mutex_unlock(&runtime->mutex);
     char body[768];
     const bool checkpoints =
@@ -2083,7 +2131,9 @@ static void send_health_response(int fd, server_runtime *runtime) {
     const int body_size = snprintf(
         body, sizeof(body),
         "{\"status\":\"ok\",\"ready\":true,"
-        "\"busy\":%s,"
+        "\"busy\":%s,\"slot_phase\":\"%s\","
+        "\"queued_completions\":%u,"
+        "\"checkpoint_queue_capacity\":%u,"
         "\"model\":\"" MOONSHINE_MODEL_ID "\","
         "\"engine\":\"" MOONSHINE_NAME "\","
         "\"version\":\"" MOONSHINE_VERSION "\","
@@ -2095,6 +2145,9 @@ static void send_health_response(int fd, server_runtime *runtime) {
         "\"max_output_tokens\":%u,"
         "\"slots\":1,\"available_slots\":%u}",
         busy ? "true" : "false",
+        k3_server_slot_phase_name(phase),
+        queued ? 1u : 0u,
+        checkpoints ? 1u : 0u,
         checkpoints ? "true" : "false",
         checkpoint_entries,
         (unsigned long long)checkpoint_bytes,
@@ -2201,26 +2254,46 @@ static bool handle_control_request(server_runtime *runtime,
     }
 
     (void)pthread_mutex_lock(&runtime->mutex);
-    if (runtime->busy || runtime->stopping) {
+    const k3_server_slot_admission admission = runtime->pending ?
+        K3_SERVER_SLOT_REJECT_BUSY :
+        k3_server_slot_admit(&runtime->slot);
+    const k3_server_slot_phase phase = runtime->slot.phase;
+    const bool queue_occupied = runtime->slot.queued;
+    if (admission == K3_SERVER_SLOT_ADMIT_DIRECT ||
+        admission == K3_SERVER_SLOT_ADMIT_QUEUED) {
+        runtime->pending = true;
+        runtime->pending_fd = fd;
+        runtime->pending_request = request;
+        memset(&request, 0, sizeof(request));
+        snprintf(
+            runtime->pending_peer, sizeof(runtime->pending_peer),
+            "%s", peer);
+        clock_gettime(
+            CLOCK_MONOTONIC, &runtime->pending_accepted);
+        runtime->pending_from_checkpoint =
+            admission == K3_SERVER_SLOT_ADMIT_QUEUED;
+        (void)pthread_cond_signal(&runtime->pending_ready);
         (void)pthread_mutex_unlock(&runtime->mutex);
-        server_log(
-            SERVER_LOG_WARN, "request.reject", NULL,
-            "peer=%s status=503 reason=busy", peer);
-        (void)send_busy_response(fd);
-        http_request_free(&request);
-        return false;
+        if (admission == K3_SERVER_SLOT_ADMIT_QUEUED) {
+            server_log(
+                SERVER_LOG_INFO, "request.queued", NULL,
+                "peer=%s phase=checkpoint_export queued=1",
+                peer);
+        }
+        return true;
     }
-    runtime->busy = true;
-    runtime->pending = true;
-    runtime->pending_fd = fd;
-    runtime->pending_request = request;
-    memset(&request, 0, sizeof(request));
-    snprintf(
-        runtime->pending_peer, sizeof(runtime->pending_peer),
-        "%s", peer);
-    (void)pthread_cond_signal(&runtime->pending_ready);
     (void)pthread_mutex_unlock(&runtime->mutex);
-    return true;
+    server_log(
+        SERVER_LOG_WARN, "request.reject", NULL,
+        "peer=%s status=503 reason=%s phase=%s queued=%u",
+        peer,
+        admission == K3_SERVER_SLOT_REJECT_STOPPING ?
+            "stopping" : "busy",
+        k3_server_slot_phase_name(phase),
+        queue_occupied ? 1u : 0u);
+    (void)send_busy_response(fd);
+    http_request_free(&request);
+    return false;
 }
 
 static void *server_control_main(void *user_data) {
@@ -2254,7 +2327,7 @@ static void *server_control_main(void *user_data) {
         }
     }
     (void)pthread_mutex_lock(&runtime->mutex);
-    runtime->stopping = true;
+    k3_server_slot_stop(&runtime->slot);
     (void)pthread_cond_broadcast(&runtime->pending_ready);
     (void)pthread_mutex_unlock(&runtime->mutex);
     return NULL;
@@ -2348,6 +2421,7 @@ int main(int argc, char **argv) {
         .listener = listener,
         .pending_fd = -1,
     };
+    k3_server_slot_init(&runtime.slot);
     if (pthread_mutex_init(&runtime.mutex, NULL) != 0) {
         server_log(
             SERVER_LOG_ERROR, "server.control.failed", NULL,
@@ -2418,7 +2492,8 @@ int main(int argc, char **argv) {
 
     for (;;) {
         (void)pthread_mutex_lock(&runtime.mutex);
-        while (!runtime.pending && !runtime.stopping) {
+        while (!runtime.pending &&
+               runtime.slot.phase != K3_SERVER_SLOT_STOPPING) {
             (void)pthread_cond_wait(
                 &runtime.pending_ready, &runtime.mutex);
         }
@@ -2433,27 +2508,87 @@ int main(int argc, char **argv) {
                sizeof(runtime.pending_request));
         char peer[NI_MAXHOST];
         snprintf(peer, sizeof(peer), "%s", runtime.pending_peer);
+        const struct timespec accepted = runtime.pending_accepted;
+        const bool queued_during_checkpoint =
+            runtime.pending_from_checkpoint;
         runtime.pending = false;
-        const bool discard = runtime.stopping || stop_requested;
+        runtime.pending_from_checkpoint = false;
+        const bool discard =
+            runtime.slot.phase == K3_SERVER_SLOT_STOPPING ||
+            stop_requested;
         (void)pthread_mutex_unlock(&runtime.mutex);
 
-        if (!discard) {
+        struct timespec dequeued;
+        clock_gettime(CLOCK_MONOTONIC, &dequeued);
+        const double queue_seconds =
+            elapsed_seconds(accepted, dequeued);
+        const bool queued_disconnected =
+            queued_during_checkpoint && peer_disconnected(client);
+        if (queued_during_checkpoint) {
+            server_log(
+                queued_disconnected ?
+                    SERVER_LOG_WARN : SERVER_LOG_INFO,
+                queued_disconnected ?
+                    "request.queue.cancelled" : "request.dequeue",
+                NULL,
+                "peer=%s wait=%.3fs%s",
+                peer, queue_seconds,
+                queued_disconnected ?
+                    " reason=client_disconnect" : "");
+        }
+        if (discard) {
+            server_log(
+                SERVER_LOG_WARN, "request.reject", NULL,
+                "peer=%s status=503 reason=stopping phase=stopping",
+                peer);
+            (void)send_json_error(
+                client, 503, "server is shutting down");
+        } else if (!queued_disconnected) {
             handle_chat_completion(
-                client, session, &request, &config, peer);
+                client, session, &request, &runtime, peer,
+                accepted, queued_during_checkpoint);
         }
         http_request_free(&request);
         close(client);
 
         (void)pthread_mutex_lock(&runtime.mutex);
-        runtime.busy = false;
+        const bool stopping =
+            stop_requested ||
+            runtime.slot.phase == K3_SERVER_SLOT_STOPPING;
+        const bool run_queued =
+            k3_server_slot_finish_current(
+                &runtime.slot, stopping);
+        const bool pending_snapshot = runtime.pending;
+        const bool pending_from_checkpoint_snapshot =
+            runtime.pending_from_checkpoint;
+        const bool expected_queued =
+            pending_snapshot &&
+            pending_from_checkpoint_snapshot;
+        const bool slot_valid =
+            stopping || run_queued == expected_queued;
+        if (!slot_valid) {
+            k3_server_slot_stop(&runtime.slot);
+        }
+        const k3_server_slot_phase phase =
+            runtime.slot.phase;
         (void)pthread_mutex_unlock(&runtime.mutex);
-        if (discard || stop_requested) {
+        if (!slot_valid) {
+            server_log(
+                SERVER_LOG_ERROR, "server.slot.invalid", NULL,
+                "action=finish_current phase=%s pending=%u queued=%u",
+                k3_server_slot_phase_name(phase),
+                pending_snapshot ? 1u : 0u,
+                pending_from_checkpoint_snapshot ? 1u : 0u);
+            stop_requested = 1;
+            break;
+        }
+        if (stopping) {
             break;
         }
     }
 
     (void)pthread_mutex_lock(&runtime.mutex);
-    runtime.stopping = true;
+    k3_server_slot_stop(&runtime.slot);
     (void)pthread_cond_broadcast(&runtime.pending_ready);
     (void)pthread_mutex_unlock(&runtime.mutex);
     if (active_listener >= 0) {
@@ -2464,10 +2599,21 @@ int main(int argc, char **argv) {
         (void)pthread_join(runtime.control_thread, NULL);
     }
     if (runtime.pending) {
+        server_log(
+            SERVER_LOG_WARN, "request.reject", NULL,
+            "peer=%s status=503 reason=stopping phase=stopping",
+            runtime.pending_peer);
+        if (runtime.pending_fd >= 0) {
+            (void)send_json_error(
+                runtime.pending_fd, 503,
+                "server is shutting down");
+        }
         http_request_free(&runtime.pending_request);
         if (runtime.pending_fd >= 0) {
             close(runtime.pending_fd);
         }
+        runtime.pending = false;
+        runtime.pending_fd = -1;
     }
     server_log(SERVER_LOG_INFO, "server.stop", NULL,
                "reason=signal_or_listener_close");
