@@ -81,6 +81,12 @@ matching SSE terminal gate. Candidate `999d6e8` passed both gates, the
 model-backed fixture, and live/displaced/restart recovery; production was
 rolled back after qualification and remains disabled.
 
+Run `tools/qualify_checkpoint_negative.py` in all three modes from a fresh
+private root: `disconnect`, `publication-failure`, and `shutdown`. The
+candidate passed all three. This qualification does not activate production;
+perform the 24-hour/ten-publication observation only after an explicit opt-in
+launch review.
+
 For a persistent 128K service on the qualified 128 GB host, use
 `--experts 30` and complete at least two independent prefills in the same
 process. The Q8/32 128K configured-capacity fixture covers one cold request;

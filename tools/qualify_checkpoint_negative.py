@@ -89,7 +89,7 @@ def open_raw(host: str, port: int, key: str, body: bytes) -> socket.socket:
         + f"Host: {host}:{port}\r\n".encode()
         + f"Authorization: Bearer {key}\r\n".encode()
         + b"Content-Type: application/json\r\n"
-        + f"Content-Length: {len(body)}\r\n"
+        + f"Content-Length: {len(body)}\r\n".encode()
         + b"Connection: close\r\n\r\n"
         + body
     )
@@ -176,7 +176,7 @@ def main() -> int:
             post, args.host, args.port, key, body, args.timeout
         )
         observed, phase_samples = wait_phase(
-            args.host, args.port, key, "checkpoint_export", None, 30.0
+            args.host, args.port, key, "checkpoint_export", None, args.timeout
         )
         samples.extend(phase_samples)
         result["export_phase_observed"] = observed
@@ -205,19 +205,19 @@ def main() -> int:
                 result["queued_client_closed"] = True
 
         first = first_future.result(timeout=args.timeout)
-        if queued_socket is not None:
-            result["queued_status"] = raw_status(queued_socket, 60.0)
-    if args.mode == "publication-failure":
-        os.chmod(args.checkpoint_root, 0o700)
-        result["root_mode_after_export"] = 0o700
-    if first is not None:
         result["first_status"] = first["status"]
         result["first_seconds"] = first["elapsed_seconds"]
-    result["max_health_seconds"] = max(
-        (float(sample.get("probe_seconds", 0.0)) for sample in samples),
-        default=0.0,
-    )
+        if queued_socket is not None:
+            result["queued_status"] = raw_status(queued_socket, 60.0)
     if args.mode != "shutdown":
+        idle, idle_samples = wait_phase(
+            args.host, args.port, key, "idle", 0, 30.0
+        )
+        samples.extend(idle_samples)
+        result["final_idle_observed"] = idle
+        if args.mode == "publication-failure":
+            os.chmod(args.checkpoint_root, 0o700)
+            result["root_mode_after_export"] = 0o700
         final = health(args.host, args.port, key)
         result["final_health"] = {
             "ready": final.get("ready"),

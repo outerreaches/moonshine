@@ -661,6 +661,21 @@ HTTP 503, a second contender to receive `server_busy`, responsive health, and
 an idle final state. They store responses privately and emit only
 content-free measurements in `result.json`.
 
+The full negative-path release harness is:
+
+```sh
+MOONSHINE_API_KEY='<private>' \
+  tools/qualify_checkpoint_negative.py \
+  --mode disconnect|publication-failure|shutdown \
+  --request /private/request.json \
+  --output /private/result \
+  --checkpoint-root /private/checkpoints
+```
+
+The qualified candidate passed all three modes. A fresh-root activation review
+and the post-activation observation window remain separate from this release
+qualification.
+
 ## Troubleshooting
 
 ### Residency preflight rejects the run

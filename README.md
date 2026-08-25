@@ -523,30 +523,31 @@ so the former 5% event-scheduler gate is unresolvable under the required
 three-times-noise rule and no ABBA was run. QD2 was fully empty for only 0.216%
 of routed-stream wall. Event scheduling is parked rather than promoted.
 
-Checkpoint handoff qualification status:
+Checkpoint release qualification status:
 
 1. Candidate `999d6e8` passed the model-backed durable checkpoint fixture.
 2. Non-streaming handoff passed: the first immediate completion waited and
    returned HTTP 400 after the export phase; the second contender received
-   HTTP 503; health probes remained responsive.
+   HTTP 503; health/model discovery remained responsive.
 3. Live, displaced, and restart checkpoint recovery remained exact.
-4. Streaming handoff passed with the same bounded queue behavior and `[DONE]`
-   delivery. The candidate was rolled back after qualification; production
-   remains checkpoint-disabled.
+4. Streaming handoff passed with `[DONE]` delivery and the same bounded queue
+   behavior.
+5. Negative paths passed:
+   - queued client disconnect;
+   - forced publication failure with a successful model response and
+     `checkpoint.failed`;
+   - SIGTERM during export with queued work rejected cleanly.
+6. The candidate was rolled back after qualification. Production remains
+   checkpoint-disabled pending explicit activation review.
 
-Next implementation gates:
+Next implementation/release steps:
 
-1. Preserve the candidate source and qualification artifacts; add any missing
-   shutdown, disconnect, and publication-failure regressions.
-2. Repeat the full release gate from a fresh private root before production
-   activation.
-3. After production activation passes, capture one private Prime-Agent
+1. Preserve the candidate and fresh-root result artifacts.
+2. Review the release logs and decide whether to activate the opt-in root.
+3. If activated, observe at least 24 hours and ten successful publications,
+   including one real displacement or restart hit.
+4. Only after production activation is stable, capture one private Prime-Agent
    pre/post-compaction request and measure its exact K3 token boundary.
-4. If Prime's summary-first context breaks before a useful boundary, preserve
-   one immutable complete turn before the summary and repeat exact-token and
-   output-equivalence gates.
-5. Add hot in-memory recurrent anchors only after the Prime gate identifies
-   useful boundaries; keep low-match edits on ordinary fallback.
 
 Other open work:
 
