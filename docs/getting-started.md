@@ -629,13 +629,15 @@ limits:
   --prefix-checkpoint-bytes 21474836480
 ```
 
-Do not enable this path in production yet. The first production canary passed
-exact displacement/restart recovery but an immediate follow-up received HTTP
-503 while post-response checkpoint export retained the request slot for 2.097
-seconds. A new candidate must admit one bounded next-turn request during
-terminal checkpoint export and pass immediate-next/two-contender queue gates.
+The first production canary passed exact displacement/restart recovery but an
+immediate follow-up received HTTP 503 while post-response checkpoint export
+retained the request slot for 2.097 seconds. Candidate `999d6e8` now admits
+one bounded next-turn request during terminal checkpoint export. Its
+model-backed fixture, non-streaming handoff gate, live/displaced/restart
+recovery, and streaming handoff gate passed. Production remains disabled until
+the full fresh-root release gate is repeated.
 
-The staged handoff gate uses a private request and output directory:
+The non-streaming handoff gate uses:
 
 ```sh
 MOONSHINE_API_KEY='<private>' \
@@ -644,10 +646,20 @@ MOONSHINE_API_KEY='<private>' \
   --output /private/handoff-result
 ```
 
-The first immediate completion must wait and return normal validation rather
-than HTTP 503. A second contender must receive `server_busy`; the script also
-requires responsive health and an idle final state. It stores the model
-response privately but emits only content-free measurements in `result.json`.
+The streaming handoff gate uses the same private request/output contract with
+`stream:true`:
+
+```sh
+MOONSHINE_API_KEY='<private>' \
+  tools/qualify_checkpoint_stream_handoff.py \
+  --request /private/stream-handoff-request.json \
+  --output /private/stream-handoff-result
+```
+
+Both gates require the first immediate completion to wait rather than receive
+HTTP 503, a second contender to receive `server_busy`, responsive health, and
+an idle final state. They store responses privately and emit only
+content-free measurements in `result.json`.
 
 ## Troubleshooting
 

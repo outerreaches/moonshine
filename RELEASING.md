@@ -76,6 +76,10 @@ profile must perform no checkpoint I/O; a pre-feature rollback binary may omit
 checkpoint health metadata rather than reporting `enabled:false`.
 Run `tools/qualify_checkpoint_handoff.py` with a mode-`0600` private request
 and mode-`0700` output directory as the immediate-next/two-contender gate.
+Run `tools/qualify_checkpoint_stream_handoff.py` with `stream:true` as the
+matching SSE terminal gate. Candidate `999d6e8` passed both gates, the
+model-backed fixture, and live/displaced/restart recovery; production was
+rolled back after qualification and remains disabled.
 
 For a persistent 128K service on the qualified 128 GB host, use
 `--experts 30` and complete at least two independent prefills in the same
