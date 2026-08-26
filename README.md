@@ -537,8 +537,14 @@ Checkpoint release qualification status:
    - forced publication failure with a successful model response and
      `checkpoint.failed`;
    - SIGTERM during export with queued work rejected cleanly.
-6. The candidate was rolled back after qualification. Production remains
-   checkpoint-disabled pending explicit activation review.
+6. A 24-hour production observation window reached 7 publications, then an
+   automatic idle-triggered restart reloaded all four checkpoint entries.
+7. The next Prime request went cold after a Prime local refinement changed the
+   injected system-prompt prefix; Moonshine correctly declined checkpoint
+   import and is running a cold 57K prefill.
+8. A second content-free monitor is active while the current decode completes.
+9. Production remains checkpoint-active only inside the observation window;
+   it is not yet the canonical default.
 
 Next implementation/release steps:
 
@@ -557,7 +563,9 @@ Other open work:
 - filled-128K workload characterization.
 
 See [CHANGELOG.md](CHANGELOG.md) for implemented changes and
-[RELEASING.md](RELEASING.md) for release gates.
+[RELEASING.md](RELEASING.md) for release gates. Publication remains local until
+the active observation window closes and a maintainer approves pushing the
+current candidate history.
 
 ## Documentation
 
