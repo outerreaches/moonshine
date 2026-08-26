@@ -77,6 +77,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--duration", default=86400.0, type=float)
     parser.add_argument("--interval", default=5.0, type=float)
     parser.add_argument("--storage-interval", default=900.0, type=float)
+    parser.add_argument("--events-name", default="events.jsonl")
+    parser.add_argument("--summary-name", default="summary.json")
     return parser.parse_args()
 
 
@@ -88,8 +90,8 @@ def main() -> int:
     private_dir(args.output)
     if not args.checkpoint_root.is_dir():
         raise SystemExit("checkpoint root does not exist")
-    events = args.output / "events.jsonl"
-    summary = args.output / "summary.json"
+    events = args.output / args.events_name
+    summary = args.output / args.summary_name
     started = time.time()
     deadline = time.monotonic() + args.duration
     next_storage = 0.0
