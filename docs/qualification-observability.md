@@ -18,8 +18,7 @@ scheduling are unchanged.
   expert slots for the live gates; 131,072 context, 30 expert slots, and a
   65,536 output ceiling for the deployment-profile smoke
 - one model process and no competing model transfer
-- staged harness: `/home/alex/Workspace/moonshine-obs-gates-20260809`
-  (host-local qualification tooling, not part of the public tree)
+- staged harness: private detached worktree outside the public checkout.
 
 ## Model-free gates
 

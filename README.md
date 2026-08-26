@@ -363,9 +363,13 @@ The complete verified store contains all 82,432 routed experts:
 |---|---:|
 | Canonical routed-expert bytes | 1,446,456,066,048 B |
 | MZG2 stored block bytes | 1,257,439,830,016 B |
-| Published store size | 1,171.084 GiB |
+| Final verified store size | 1,171.084 GiB |
 | Reduction | 13.0674105% |
 | Tile size | 16 KiB |
+
+The store is derived locally and is not distributed with Moonshine. Budget the
+official roughly 1.45 TiB checkpoint, about 1.18 TiB for the final MZG2 store,
+and temporary headroom while sidecars are verified and published.
 
 Build a derived store without modifying the official checkpoint:
 
@@ -507,53 +511,26 @@ MZG2 is promoted for the qualified K3 deployment. Decisive screens closed
 scan-resistant admission and compressed-resident cache slots. The route-index
 engine integration is also closed by its 0.148% direct wall-time ceiling.
 
-The exact durable checkpoint path passes correctness and performance gates:
-displaced-session and post-restart response bytes, cached-token accounting, and
-all four state digests matched. Prefix restoration improved **65.77×** (63.008
-s inferred evaluation versus 0.958 s import), while total prompt wall improved
-**2.87×** (95.174 → 33.124 s). A production canary was rolled back because
-synchronous post-response export kept the one request slot busy and rejected
-an immediate follow-up with HTTP 503. The production launch profile remains
-checkpoint-disabled.
+The durable-checkpoint mechanism and its bounded one-request export handoff
+pass model-backed, live/displaced/restart, streaming, disconnect,
+publication-failure, and shutdown gates. An opt-in production observation is
+active; checkpoints are not yet the canonical default. Exact admission remains
+strict: a Prime local refinement changed injected system-prompt material, so
+Moonshine correctly declined a post-restart checkpoint and performed a cold
+prefill.
 
-The opt-in routed-prefill harness is functionally qualified: exact output and
-I/O, private 92-layer captures, deterministic commands, and QD2 occupancy all
-passed. Four consecutive 512-position arms had 4.766% expert-pipeline spread,
-so the former 5% event-scheduler gate is unresolvable under the required
-three-times-noise rule and no ABBA was run. QD2 was fully empty for only 0.216%
-of routed-stream wall. Event scheduling is parked rather than promoted.
+The opt-in routed-prefill harness is functionally qualified, but its measured
+noise floor leaves the former event-scheduler gate unresolved. Event scheduling
+is parked.
 
-Checkpoint release qualification status:
+Current release work:
 
-1. Candidate `999d6e8` passed the model-backed durable checkpoint fixture.
-2. Non-streaming handoff passed: the first immediate completion waited and
-   returned HTTP 400 after the export phase; the second contender received
-   HTTP 503; health/model discovery remained responsive.
-3. Live, displaced, and restart checkpoint recovery remained exact.
-4. Streaming handoff passed with `[DONE]` delivery and the same bounded queue
-   behavior.
-5. Negative paths passed:
-   - queued client disconnect;
-   - forced publication failure with a successful model response and
-     `checkpoint.failed`;
-   - SIGTERM during export with queued work rejected cleanly.
-6. A 24-hour production observation window reached 7 publications, then an
-   automatic idle-triggered restart reloaded all four checkpoint entries.
-7. The next Prime request went cold after a Prime local refinement changed the
-   injected system-prompt prefix; Moonshine correctly declined checkpoint
-   import and is running a cold 57K prefill.
-8. A second content-free monitor is active while the current decode completes.
-9. Production remains checkpoint-active only inside the observation window;
-   it is not yet the canonical default.
-
-Next implementation/release steps:
-
-1. Preserve the candidate and fresh-root result artifacts.
-2. Review the release logs and decide whether to activate the opt-in root.
-3. If activated, observe at least 24 hours and ten successful publications,
-   including one real displacement or restart hit.
-4. Only after production activation is stable, capture one private Prime-Agent
-   pre/post-compaction request and measure its exact K3 token boundary.
+1. Finish and review the active checkpoint observation.
+2. Run the exact-head clean-checkout release suite and final secret/path audit.
+3. Publish the linear local history only after maintainer approval; do not tag
+   or distribute model weights or derived stores.
+4. After stable checkpoint activation, measure Prime pre/post-compaction token
+   boundaries before considering hot in-memory anchors.
 
 Other open work:
 
@@ -564,8 +541,8 @@ Other open work:
 
 See [CHANGELOG.md](CHANGELOG.md) for implemented changes and
 [RELEASING.md](RELEASING.md) for release gates. Publication remains local until
-the active observation window closes and a maintainer approves pushing the
-current candidate history.
+the active observation closes and a maintainer approves pushing the candidate
+history.
 
 ## Documentation
 
