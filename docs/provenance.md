@@ -121,6 +121,14 @@ GPU ANS design. The Moonshine implementation is independent K3-specific
 HIP/wave32 code; no DietGPU source is vendored or copied into this repository.
 DietGPU is design prior art, not a runtime dependency.
 
+The standalone MZG2 bundle is a derived representation of the pinned official
+Kimi K3 weights: non-routed language tensors retain exact source BF16/F32 bytes,
+while routed experts retain the qualified MZG2 canonicalization of redundant
+MXFP4 negative zero. Generated bundles are governed by the Kimi K3 License and
+are not part of this repository's MIT-licensed source distribution. Bundle
+manifests preserve the official revision, source-manifest identity, and original
+model-layout CRC.
+
 ## Platform dependencies
 
 The runtime directly uses:

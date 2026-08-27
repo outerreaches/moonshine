@@ -383,19 +383,18 @@ bool load_file(StoreImpl *store,
 
 struct k3_mzg2_store : StoreImpl {};
 
-extern "C" bool k3_mzg2_store_open_optional(
-        k3_mzg2_store **out, char *error, size_t error_size) {
+extern "C" bool k3_mzg2_store_open_path(
+        k3_mzg2_store **out, const char *path,
+        char *error, size_t error_size) {
     if (out) *out = nullptr;
     if (error && error_size) error[0] = '\0';
     if (!out) {
         set_error(error, error_size, "invalid MZG2 store output");
         return false;
     }
-    const char *path = getenv("MOONSHINE_MZG2_STORE");
-    if (!path || path[0] == '\0' || strcmp(path, "off") == 0) return true;
-    if (path[0] != '/') {
+    if (!path || path[0] != '/') {
         set_error(error, error_size,
-                  "MOONSHINE_MZG2_STORE must be off or absolute");
+                  "MZG2 store path must be absolute");
         return false;
     }
     struct stat root_status{};
@@ -457,6 +456,19 @@ extern "C" bool k3_mzg2_store_open_optional(
     }
     *out = store;
     return true;
+}
+
+extern "C" bool k3_mzg2_store_open_optional(
+        k3_mzg2_store **out, char *error, size_t error_size) {
+    if (out) *out = nullptr;
+    if (error && error_size) error[0] = '\0';
+    if (!out) {
+        set_error(error, error_size, "invalid MZG2 store output");
+        return false;
+    }
+    const char *path = getenv("MOONSHINE_MZG2_STORE");
+    if (!path || path[0] == '\0' || strcmp(path, "off") == 0) return true;
+    return k3_mzg2_store_open_path(out, path, error, error_size);
 }
 
 extern "C" void k3_mzg2_store_destroy(k3_mzg2_store *store) {

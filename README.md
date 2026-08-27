@@ -407,10 +407,56 @@ was reverted.
 See [MZG2 architecture and deployment](docs/architecture.md) and the
 [MZG2 transcoding instructions](docs/getting-started.md#mzg2-production-gpu-decoder).
 
+### Standalone MZG2 bundle — in development
+
+The standalone bundle removes the runtime dependency on the 96 official
+SafeTensor shards. It keeps the 2,460 non-routed language tensors at source
+precision in one deterministic `model-static.safetensors` file and stores
+routed experts only as MZG2:
+
+```text
+model-static.safetensors   ~105.7 GiB
+expert-store-mzg2          1,171.084 GiB
+total                      ~1.247 TiB
+```
+
+This format is under implementation and is not yet the published/default model
+layout. Until its clean-machine qualification passes, use the official
+SafeTensors plus MZG2 path above.
+
+Users who already have the pinned official SafeTensors will be able to build
+the same standalone bundle locally:
+
+```sh
+make tools/transcode_mzg2_layer
+./tools/build_mzg2_bundle.py build \
+  --model /path/to/moonshotai__Kimi-K3 \
+  --out /path/to/Kimi-K3-Moonshine-MZG2 \
+  --jobs 24
+```
+
+If a complete verified MZG2 store already exists on the same filesystem, reuse
+it without another 1.17 TiB copy:
+
+```sh
+./tools/build_mzg2_bundle.py build \
+  --model /path/to/moonshotai__Kimi-K3 \
+  --reuse-mzg2 /path/to/expert-store-mzg2 \
+  --out /path/to/Kimi-K3-Moonshine-MZG2
+```
+
+The reuse path creates hard links and therefore requires one filesystem. The
+builder validates the pinned source manifest, writes through resumable partial
+state, verifies static tensors and MZG2 sidecars, copies tokenizer/config/license
+files, and atomically publishes only a complete bundle. The final public bundle
+will be Moonshine-only; it will not be directly loadable by Transformers,
+vLLM, or SGLang.
+
 ## Measured checkpoint
 
 Results below are engineering fixtures on an AMD Ryzen AI Max+ 395 / Radeon
 8060S (`gfx1151`), Ubuntu 24.04, Linux 7.0, ROCm 7.2, and a Samsung 990 PRO.
+
 They are not cross-project benchmark claims.
 
 | workload | result |

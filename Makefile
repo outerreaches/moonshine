@@ -32,6 +32,7 @@ MOONSHINE_CACHE_ANALYZER_GOLDEN_RUN ?=
 
 K3_OBJS := \
 	k3_chat.o \
+	k3_bundle.o \
 	k3_engine.o \
 	k3_prefill.o \
 	k3_static_store.o \
@@ -52,6 +53,7 @@ K3_OBJS := \
 
 PORTABLE_CPU_TESTS := \
 	tests/test_k3_expert_cache \
+	tests/test_k3_bundle \
 	tests/test_k3_prefix_reuse \
 	tests/test_k3_prefix_bundle \
 	tests/test_k3_prefix_catalog \
@@ -60,7 +62,8 @@ PORTABLE_CPU_TESTS := \
 	tests/test_k3_q8_codec \
 	tests/test_k3_json \
 	tests/test_k3_openai \
-	tests/test_k3_server_slot
+	tests/test_k3_server_slot \
+	tests/test_k3_safetensors_file
 
 MODEL_CPU_TESTS := \
 	tests/test_k3_prefill_plan \
@@ -117,8 +120,8 @@ ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS)
 	test-mla-batch-determinism test-mla-batch-kernels \
 	test-moe-tail-profile test-decode-cache-replay test-cache-analyzer \
 	test-prefill-screen-analyzer test-anchor-recovery-analyzer \
-	test-static-q8-screen test-mzg-transcoder test-reduction-qualification \
-	test-openai-sdk clean
+	test-static-q8-screen test-mzg-transcoder test-mzg2-bundle \
+	test-reduction-qualification test-openai-sdk clean
 
 all: libmoonshine.a moonshine-chat moonshine-server
 
@@ -187,8 +190,8 @@ tests: $(ALL_TESTS)
 	$(HIPCC) $(HIPFLAGS) -I. -c -o $@ $<
 
 k3_engine.o: k3_engine.cu k3_engine_state.inc k3_engine_prefill.inc k3_engine.h \
-	k3_prefill.h k3_static_store.h k3_expert_cache.h k3_io_uring.h \
-	k3_mzg.h k3_mzg2.h k3_rocm_ops.h k3_safetensors.h
+	k3_bundle.h k3_prefill.h k3_static_store.h k3_expert_cache.h \
+	k3_io_uring.h k3_mzg.h k3_mzg2.h k3_rocm_ops.h k3_safetensors.h
 k3_prefix_bundle.o: k3_prefix_bundle.c k3_prefix_bundle.h \
 	k3_engine.h k3_tokenizer.h
 k3_chat.o: k3_chat.c k3_chat.h k3_engine.h k3_tokenizer.h \
@@ -197,6 +200,7 @@ k3_prefix_catalog.o: k3_prefix_catalog.c k3_prefix_catalog.h \
 	k3_engine.h k3_prefix_reuse.h
 k3_prefill_route_index.o: k3_prefill_route_index.c \
 	k3_prefill_route_index.h
+k3_bundle.o: k3_bundle.c k3_bundle.h k3_json.h
 k3_prefix_reuse.o: k3_prefix_reuse.c k3_prefix_reuse.h
 k3_chat_cli.o: k3_chat_cli.c k3_chat.h k3_engine.h moonshine_version.h
 k3_server.o: k3_server.c k3_server_slot.h k3_chat.h k3_json.h k3_openai.h \
@@ -217,11 +221,14 @@ k3_openai.o: k3_openai.c k3_openai.h k3_json.h k3_chat.h
 k3_rocm_ops.o: k3_rocm_ops.cu k3_rocm_ops.h
 k3_safetensors.o: k3_safetensors.c k3_safetensors.h
 k3_tokenizer.o: k3_tokenizer.c k3_tokenizer.h
+tests/test_k3_bundle.o: tests/test_k3_bundle.c k3_bundle.h
 tests/test_k3_chat_session.o: tests/test_k3_chat_session.c k3_chat.h
 tests/test_k3_long_context.o: tests/test_k3_long_context.c k3_chat.h
 tests/test_k3_openai.o: tests/test_k3_openai.c k3_openai.h k3_chat.h
 tests/test_k3_prefix_checkpoint.o: tests/test_k3_prefix_checkpoint.c k3_chat.h
 tests/test_k3_server_slot.o: tests/test_k3_server_slot.c k3_server_slot.h
+tests/test_k3_safetensors_file.o: tests/test_k3_safetensors_file.c \
+	k3_safetensors.h
 tests/test_k3_mzg_store.o: tests/test_k3_mzg_store.c k3_mzg.h k3_safetensors.h
 tests/test_k3_prefix_reuse.o: tests/test_k3_prefix_reuse.c k3_prefix_reuse.h
 tests/test_k3_prefix_catalog.o: tests/test_k3_prefix_catalog.c \
@@ -245,6 +252,8 @@ tools/screen_static_q8: tools/screen_static_q8.o k3_q8_codec.o \
 		k3_static_layout.o k3_safetensors.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
+tests/test_k3_bundle: tests/test_k3_bundle.o k3_bundle.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 tests/test_k3_expert_cache: tests/test_k3_expert_cache.o k3_expert_cache.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
@@ -262,6 +271,9 @@ tests/test_k3_prefix_catalog: tests/test_k3_prefix_catalog.o \
 		k3_prefix_catalog.o k3_prefix_reuse.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 tests/test_k3_server_slot: tests/test_k3_server_slot.o k3_server_slot.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_k3_safetensors_file: tests/test_k3_safetensors_file.o \
+		k3_safetensors.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 tests/test_k3_prefill_route_index: tests/test_k3_prefill_route_index.o \
@@ -322,8 +334,13 @@ test-mzg-transcoder:
 	PYTHONDONTWRITEBYTECODE=1 \
 		$(PYTHON) -m unittest -v tests/test_transcode_mzg.py
 
+test-mzg2-bundle:
+	PYTHONDONTWRITEBYTECODE=1 \
+		$(PYTHON) -m unittest -v tests/test_build_mzg2_bundle.py
+
 test-cpu: $(PORTABLE_CPU_TESTS) test-cache-analyzer \
-	test-prefill-screen-analyzer test-anchor-recovery-analyzer
+	test-prefill-screen-analyzer test-anchor-recovery-analyzer \
+	test-mzg2-bundle
 	./tests/test_k3_expert_cache
 	./tests/test_k3_prefix_bundle
 	./tests/test_k3_prefix_reuse

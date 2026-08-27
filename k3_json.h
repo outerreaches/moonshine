@@ -69,6 +69,10 @@ bool k3_json_u32(const k3_json_document *document,
                  int32_t                 token,
                  uint32_t               *value);
 
+
+bool k3_json_u64(const k3_json_document *document,
+                 int32_t                 token,
+                 uint64_t               *value);
 bool k3_json_bool(const k3_json_document *document,
                   int32_t                 token,
                   bool                   *value);

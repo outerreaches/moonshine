@@ -145,6 +145,47 @@ Interrupted runs rehash completed sidecars before continuing. Startup reports
 sidecar/directory path; MZG1 and MZG2 selection together fails closed.
 Unset/`off` retains raw SafeTensors as the rollback path.
 
+### Standalone MZG2 bundle — in development
+
+The standalone bundle combines one source-precision static SafeTensors file
+with MZG2 routed experts. Its target size is approximately 1.247 TiB, compared
+with 2.563 TiB for official shards plus MZG2.
+
+Users with the pinned official model can build it locally:
+
+```sh
+make tools/transcode_mzg2_layer
+./tools/build_mzg2_bundle.py build \
+  --model /path/to/moonshotai__Kimi-K3 \
+  --out /path/to/Kimi-K3-Moonshine-MZG2 \
+  --jobs 24
+```
+
+Reuse a verified same-filesystem MZG2 store with hard links:
+
+```sh
+./tools/build_mzg2_bundle.py build \
+  --model /path/to/moonshotai__Kimi-K3 \
+  --reuse-mzg2 /path/to/expert-store-mzg2 \
+  --out /path/to/Kimi-K3-Moonshine-MZG2
+```
+
+Inspect the pinned source without copying payloads:
+
+```sh
+./tools/build_mzg2_bundle.py inspect \
+  --model /path/to/moonshotai__Kimi-K3
+```
+
+The expected result is 2,460 tensors, 113,509,540,864 payload bytes, source
+layout CRC64 `d17f7f2aad23c9c9`, and the pinned source-manifest SHA-256. The
+builder revalidates completed work before resume and performs a second static
+tensor/MZG2 verification before atomic publication.
+
+Do not delete or archive the official shards until dense-versus-bundle and
+clean-machine model-backed qualification passes. Bundle mode is Moonshine-only
+and rejects raw or MZG1 routed execution.
+
 ### Offline static-Q8 compression screen
 
 The model-free codec tests and CLI self-test do not open weights or use ROCm:

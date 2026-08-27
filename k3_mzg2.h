@@ -108,6 +108,11 @@ typedef struct {
  * sidecar directory. Unset/off leaves the qualified SafeTensor fallback
  * unchanged. MZG2 and MZG1 selection remain mutually exclusive.
  */
+bool k3_mzg2_store_open_path(k3_mzg2_store **out,
+                             const char *path,
+                             char *error,
+                             size_t error_size);
+
 bool k3_mzg2_store_open_optional(k3_mzg2_store **out,
                                  char *error,
                                  size_t error_size);

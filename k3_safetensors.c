@@ -416,16 +416,10 @@ static uint64_t k3_load_le64(const uint8_t bytes[8]) {
     return value;
 }
 
-bool k3_st_model_open(k3_st_model *model,
-                      const char *root,
-                      size_t shard_count,
-                      char *error,
-                      size_t error_size) {
-    if (error && error_size) error[0] = '\0';
-    if (!model || !root || shard_count == 0 || shard_count > UINT16_MAX) {
-        k3_set_error(error, error_size, "invalid model-open arguments");
-        return false;
-    }
+static bool k3_st_model_prepare(k3_st_model *model,
+                                size_t shard_count,
+                                char *error,
+                                size_t error_size) {
     memset(model, 0, sizeof(*model));
     model->shards = calloc(shard_count, sizeof(*model->shards));
     if (!model->shards) {
@@ -437,71 +431,78 @@ bool k3_st_model_open(k3_st_model *model,
         model->shards[i].fd = -1;
         model->shards[i].direct_fd = -1;
     }
+    return true;
+}
 
-    for (size_t i = 0; i < shard_count; i++) {
-        size_t path_bytes = strlen(root) + 64u;
-        char *path = malloc(path_bytes);
-        if (!path) {
-            k3_set_error(error, error_size, "out of memory allocating path");
-            goto fail;
-        }
-        snprintf(path, path_bytes, "%s/model-%05zu-of-%06zu.safetensors",
-                 root, i + 1u, shard_count);
-        k3_st_shard *shard = &model->shards[i];
-        shard->path = path;
-        shard->fd = open(path, O_RDONLY | O_CLOEXEC);
-        if (shard->fd < 0) {
-            k3_set_error(error, error_size, "open %s: %s",
-                         path, strerror(errno));
-            goto fail;
-        }
-        struct stat st;
-        if (fstat(shard->fd, &st) != 0 || st.st_size < 8) {
-            k3_set_error(error, error_size, "stat %s: %s",
-                         path, strerror(errno));
-            goto fail;
-        }
-        shard->file_bytes = (uint64_t)st.st_size;
-
-        uint8_t prefix[8];
-        if (!k3_read_full(shard->fd, prefix, sizeof(prefix), 0)) {
-            k3_set_error(error, error_size, "read header prefix %s: %s",
-                         path, strerror(errno));
-            goto fail;
-        }
-        uint64_t header_bytes = k3_load_le64(prefix);
-        if (header_bytes == 0 || header_bytes > shard->file_bytes - 8u ||
-            header_bytes > SIZE_MAX - 1u) {
-            k3_set_error(error, error_size,
-                         "%s: invalid header length %" PRIu64,
-                         path, header_bytes);
-            goto fail;
-        }
-        shard->data_offset = 8u + header_bytes;
-        char *header = malloc((size_t)header_bytes + 1u);
-        if (!header) {
-            k3_set_error(error, error_size,
-                         "out of memory reading %" PRIu64 "-byte header",
-                         header_bytes);
-            goto fail;
-        }
-        if (!k3_read_full(shard->fd, header, header_bytes, 8u)) {
-            free(header);
-            k3_set_error(error, error_size, "read header %s: %s",
-                         path, strerror(errno));
-            goto fail;
-        }
-        header[header_bytes] = '\0';
-        bool parsed = k3_parse_header(model, (uint16_t)i, header,
-                                      header_bytes, error, error_size);
-        free(header);
-        if (!parsed) goto fail;
-
-        if (O_DIRECT != 0) {
-            shard->direct_fd = open(path, O_RDONLY | O_CLOEXEC | O_DIRECT);
-        }
+static bool k3_st_model_open_shard(k3_st_model *model,
+                                   size_t index,
+                                   const char *source_path,
+                                   char *error,
+                                   size_t error_size) {
+    if (!model || index >= model->shard_count || !source_path) return false;
+    char *path = strdup(source_path);
+    if (!path) {
+        k3_set_error(error, error_size, "out of memory allocating path");
+        return false;
     }
+    k3_st_shard *shard = &model->shards[index];
+    shard->path = path;
+    shard->fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (shard->fd < 0) {
+        k3_set_error(error, error_size, "open %s: %s",
+                     path, strerror(errno));
+        return false;
+    }
+    struct stat st;
+    if (fstat(shard->fd, &st) != 0 || st.st_size < 8) {
+        k3_set_error(error, error_size, "stat %s: %s",
+                     path, strerror(errno));
+        return false;
+    }
+    shard->file_bytes = (uint64_t)st.st_size;
 
+    uint8_t prefix[8];
+    if (!k3_read_full(shard->fd, prefix, sizeof(prefix), 0)) {
+        k3_set_error(error, error_size, "read header prefix %s: %s",
+                     path, strerror(errno));
+        return false;
+    }
+    uint64_t header_bytes = k3_load_le64(prefix);
+    if (header_bytes == 0 || header_bytes > shard->file_bytes - 8u ||
+        header_bytes > SIZE_MAX - 1u) {
+        k3_set_error(error, error_size,
+                     "%s: invalid header length %" PRIu64,
+                     path, header_bytes);
+        return false;
+    }
+    shard->data_offset = 8u + header_bytes;
+    char *header = malloc((size_t)header_bytes + 1u);
+    if (!header) {
+        k3_set_error(error, error_size,
+                     "out of memory reading %" PRIu64 "-byte header",
+                     header_bytes);
+        return false;
+    }
+    if (!k3_read_full(shard->fd, header, header_bytes, 8u)) {
+        free(header);
+        k3_set_error(error, error_size, "read header %s: %s",
+                     path, strerror(errno));
+        return false;
+    }
+    header[header_bytes] = '\0';
+    const bool parsed = k3_parse_header(
+        model, (uint16_t)index, header, header_bytes, error, error_size);
+    free(header);
+    if (!parsed) return false;
+    if (O_DIRECT != 0) {
+        shard->direct_fd = open(path, O_RDONLY | O_CLOEXEC | O_DIRECT);
+    }
+    return true;
+}
+
+static bool k3_st_model_finish_open(k3_st_model *model,
+                                    char *error,
+                                    size_t error_size) {
     qsort(model->tensors, model->tensor_count,
           sizeof(*model->tensors), k3_tensor_compare);
     for (size_t i = 1; i < model->tensor_count; i++) {
@@ -509,14 +510,64 @@ bool k3_st_model_open(k3_st_model *model,
                    model->tensors[i].name) == 0) {
             k3_set_error(error, error_size, "duplicate tensor name: %s",
                          model->tensors[i].name);
-            goto fail;
+            return false;
         }
     }
+    return true;
+}
+
+bool k3_st_model_open(k3_st_model *model,
+                      const char *root,
+                      size_t shard_count,
+                      char *error,
+                      size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (!model || !root || shard_count == 0 || shard_count > UINT16_MAX) {
+        k3_set_error(error, error_size, "invalid model-open arguments");
+        return false;
+    }
+    if (!k3_st_model_prepare(model, shard_count, error, error_size)) {
+        return false;
+    }
+    for (size_t i = 0; i < shard_count; i++) {
+        const size_t path_bytes = strlen(root) + 64u;
+        char *path = malloc(path_bytes);
+        if (!path) {
+            k3_set_error(error, error_size, "out of memory allocating path");
+            goto fail;
+        }
+        snprintf(path, path_bytes, "%s/model-%05zu-of-%06zu.safetensors",
+                 root, i + 1u, shard_count);
+        const bool opened = k3_st_model_open_shard(
+            model, i, path, error, error_size);
+        free(path);
+        if (!opened) goto fail;
+    }
+    if (!k3_st_model_finish_open(model, error, error_size)) goto fail;
     return true;
 
 fail:
     k3_st_model_close(model);
     return false;
+}
+
+bool k3_st_model_open_file(k3_st_model *model,
+                           const char *path,
+                           char *error,
+                           size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (!model || !path || path[0] == '\0') {
+        k3_set_error(error, error_size,
+                     "invalid single-file model-open arguments");
+        return false;
+    }
+    if (!k3_st_model_prepare(model, 1u, error, error_size) ||
+        !k3_st_model_open_shard(model, 0u, path, error, error_size) ||
+        !k3_st_model_finish_open(model, error, error_size)) {
+        k3_st_model_close(model);
+        return false;
+    }
+    return true;
 }
 
 void k3_st_model_close(k3_st_model *model) {

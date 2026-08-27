@@ -1,4 +1,5 @@
 #include "k3_engine.h"
+#include "k3_bundle.h"
 
 #include "k3_expert_cache.h"
 #include "k3_io_uring.h"
@@ -180,6 +181,8 @@ typedef struct {
 } k3_prefill_layer_diagnostics;
 struct k3_engine {
     k3_st_model model;
+    k3_bundle bundle;
+    bool bundle_mode;
     bool model_open;
     k3_mzg_store *mzg_store;
     k3_mzg2_store *mzg2_store;
@@ -260,6 +263,50 @@ static void engine_error(char *error,
     va_start(arguments, format);
     vsnprintf(error, error_size, format, arguments);
     va_end(arguments);
+}
+
+static bool validate_bundle_static_model(
+        const k3_engine *engine,
+        char *error,
+        size_t error_size) {
+    if (!engine || engine->model.shard_count != 1u ||
+        engine->model.tensor_count != K3_BUNDLE_STATIC_TENSORS ||
+        engine->model.shards[0].file_bytes !=
+            engine->bundle.static_file_bytes) {
+        engine_error(error, error_size,
+                     "standalone bundle static model dimensions mismatch");
+        return false;
+    }
+    uint64_t payload_bytes = 0u;
+    uint32_t embeddings = 0u;
+    for (size_t index = 0u;
+         index < engine->model.tensor_count; index++) {
+        const k3_st_tensor *tensor = &engine->model.tensors[index];
+        const bool embedding = strcmp(
+            tensor->name,
+            "language_model.model.embed_tokens.weight") == 0;
+        if (!embedding && !k3_static_weight_is_text_tensor(tensor)) {
+            engine_error(error, error_size,
+                         "standalone bundle contains invalid tensor %s",
+                         tensor->name);
+            return false;
+        }
+        if (embedding) embeddings++;
+        if (payload_bytes > UINT64_MAX - tensor->byte_length) {
+            engine_error(error, error_size,
+                         "standalone bundle payload overflow");
+            return false;
+        }
+        payload_bytes += tensor->byte_length;
+    }
+    if (embeddings != 1u ||
+        payload_bytes != K3_BUNDLE_STATIC_PAYLOAD_BYTES ||
+        payload_bytes != engine->bundle.static_payload_bytes) {
+        engine_error(error, error_size,
+                     "standalone bundle static payload mismatch");
+        return false;
+    }
+    return true;
 }
 
 static double elapsed_seconds(struct timespec start,
@@ -832,23 +879,66 @@ extern "C" bool k3_engine_create(
     engine->mla_cache_bytes = mla_cache_bytes;
     engine->workspace_bytes = workspace_bytes;
     engine->q8_projections = q8_projections;
-    if (!k3_st_model_open(
-            &engine->model, model_root, K3_ENGINE_SHARDS,
-            error, error_size)) {
+    bool bundle_present = false;
+    if (!k3_bundle_detect(
+            model_root, &bundle_present, error, error_size)) {
         k3_engine_destroy(engine);
         return false;
     }
-    engine->model_open = true;
-    engine->model_layout_crc64 =
-        engine_model_layout_crc64(&engine->model);
-    if (!k3_mzg_store_open_optional(
-            &engine->mzg_store, model_root,
-            K3_ENGINE_MOE_LAYERS, K3_ENGINE_EXPERTS,
-            error, error_size) ||
-        !k3_mzg2_store_open_optional(
-            &engine->mzg2_store, error, error_size)) {
-        k3_engine_destroy(engine);
-        return false;
+    if (bundle_present) {
+        if (!k3_bundle_load(
+                &engine->bundle, model_root, error, error_size) ||
+            !k3_st_model_open_file(
+                &engine->model, engine->bundle.static_path,
+                error, error_size)) {
+            k3_engine_destroy(engine);
+            return false;
+        }
+        engine->model_open = true;
+        if (!validate_bundle_static_model(engine, error, error_size)) {
+            k3_engine_destroy(engine);
+            return false;
+        }
+        engine->bundle_mode = true;
+        engine->model_layout_crc64 =
+            engine->bundle.source_model_layout_crc64;
+        const char *legacy = getenv("MOONSHINE_EXPERT_STORE");
+        const char *override = getenv("MOONSHINE_MZG2_STORE");
+        if ((legacy && legacy[0] != '\0' &&
+             strcmp(legacy, "off") != 0) ||
+            (override && override[0] != '\0' &&
+             strcmp(override, "off") != 0)) {
+            engine_error(
+                error, error_size,
+                "standalone bundle forbids external expert-store selectors");
+            k3_engine_destroy(engine);
+            return false;
+        }
+        if (!k3_mzg2_store_open_path(
+                &engine->mzg2_store, engine->bundle.mzg2_path,
+                error, error_size)) {
+            k3_engine_destroy(engine);
+            return false;
+        }
+    } else {
+        if (!k3_st_model_open(
+                &engine->model, model_root, K3_ENGINE_SHARDS,
+                error, error_size)) {
+            k3_engine_destroy(engine);
+            return false;
+        }
+        engine->model_open = true;
+        engine->model_layout_crc64 =
+            engine_model_layout_crc64(&engine->model);
+        if (!k3_mzg_store_open_optional(
+                &engine->mzg_store, model_root,
+                K3_ENGINE_MOE_LAYERS, K3_ENGINE_EXPERTS,
+                error, error_size) ||
+            !k3_mzg2_store_open_optional(
+                &engine->mzg2_store, error, error_size)) {
+            k3_engine_destroy(engine);
+            return false;
+        }
     }
     if (engine->mzg_store && engine->mzg2_store) {
         engine_error(error, error_size,
@@ -1080,6 +1170,7 @@ extern "C" bool k3_engine_create(
             0u);
     measured.mzg_expert_store = engine->mzg_store != NULL;
     measured.mzg2_store = engine->mzg2_store != NULL;
+    measured.standalone_bundle = engine->bundle_mode;
     measured.startup_seconds =
         elapsed_seconds(startup_start, startup_end);
     engine->causal_state_valid = true;
@@ -1167,6 +1258,40 @@ static bool find_expert_layout(
         "w2.weight_packed", "w2.weight_scale",
         "w3.weight_packed", "w3.weight_scale",
     };
+    static const uint64_t bundle_relative[K3_ENGINE_EXPERT_TENSOR_COUNT] = {
+        UINT64_C(0), UINT64_C(5505024), UINT64_C(5849088),
+        UINT64_C(11354112), UINT64_C(11698176), UINT64_C(17203200),
+    };
+    if (engine->bundle_mode) {
+        if (!engine->mzg2_store) {
+            engine_error(error, error_size,
+                         "standalone bundle requires MZG2");
+            return false;
+        }
+        k3_mzg2_span span;
+        if (!k3_mzg2_store_span(
+                engine->mzg2_store, layer, expert, &span) ||
+            span.bytes > K3_ENGINE_STAGING_BYTES) {
+            engine_error(error, error_size,
+                         "missing/oversized bundle MZG2 layer-%u expert-%u",
+                         layer, expert);
+            return false;
+        }
+        memset(layout, 0, sizeof(*layout));
+        layout->codec = K3_ENGINE_EXPERT_MZG2;
+        layout->read_fd = span.direct_fd;
+        layout->read_offset = span.offset;
+        layout->read_bytes = span.bytes;
+        layout->shard = (uint16_t)(layer - 1u);
+        layout->physical_start = span.offset;
+        layout->aligned_start = span.offset;
+        layout->aligned_bytes = span.bytes;
+        for (uint32_t index = 0u;
+             index < K3_ENGINE_EXPERT_TENSOR_COUNT; index++) {
+            layout->relative[index] = bundle_relative[index];
+        }
+        return true;
+    }
     const k3_st_tensor *tensor[K3_ENGINE_EXPERT_TENSOR_COUNT];
     char name[256];
     memset(layout, 0, sizeof(*layout));

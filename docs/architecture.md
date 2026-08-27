@@ -250,6 +250,27 @@ about 10.6%, selected prefill 11.6%, and live 128K/30 11.7--12.8%, with exact
 outputs. An absolute `MOONSHINE_MZG2_STORE` directory selects it and is mutually
 exclusive with MZG1. Unset/`off` retains raw SafeTensors as the rollback path.
 
+### Standalone source-precision MZG2 bundle
+
+The in-development standalone layout removes the 96-shard runtime dependency.
+It stores exactly 2,460 non-routed `language_model.*` tensors in one
+4 KiB-aligned SafeTensors file (113,509,540,864 payload bytes) and retains
+routed experts only in MZG2. Bundle mode is selected only by a validated
+`moonshine-bundle.json`; external raw/MZG1/MZG2 selectors are rejected.
+
+The static file retains original BF16/F32 bytes, so the current runtime Q8
+conversion and BF16 exclusions remain unchanged. Embedding rows are read from
+the same one-file SafeTensors model. Routed expert offsets use the fixed K3
+17,547,264-byte decoded layout and `k3_mzg2_store_span()` rather than the
+494,592 expert tensor entries in the official headers.
+
+The bundle manifest pins the official base revision, source manifest, exact
+static tensor/file sizes and SHA-256, MZG2 inventory, tokenizer/config/license
+hashes, and original dense-source model-layout CRC64. After every component
+validates, the engine retains that original CRC as its state/checkpoint identity.
+This allows dense-source and standalone-bundle checkpoints to remain compatible
+without treating the compact tensor directory as a new model.
+
 ## Attention and state
 
 KDA retains recurrent matrix state and causal convolution history per layer.

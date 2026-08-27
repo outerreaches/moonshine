@@ -72,6 +72,15 @@ bool k3_st_model_open(k3_st_model *model,
                       char        *error,
                       size_t       error_size);
 
+/*
+ * Open one deterministic SafeTensors file as a one-shard model. This is the
+ * source-precision static tier used by standalone MZG2 bundles.
+ */
+bool k3_st_model_open_file(k3_st_model *model,
+                           const char  *path,
+                           char        *error,
+                           size_t       error_size);
+
 void k3_st_model_close(k3_st_model *model);
 
 const k3_st_tensor *k3_st_find(const k3_st_model *model, const char *name);

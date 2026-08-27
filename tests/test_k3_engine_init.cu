@@ -129,6 +129,8 @@ int main(int argc, char **argv) {
           "engine staging byte ledger");
     CHECK(!(stats.mzg_expert_store && stats.mzg2_store),
           "compressed expert stores are mutually exclusive");
+    CHECK(!stats.standalone_bundle,
+          "dense source reported standalone bundle");
     CHECK(k3_engine_find_weight(
               engine,
               "language_model.model.layers.0."

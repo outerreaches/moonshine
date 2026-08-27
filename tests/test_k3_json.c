@@ -23,6 +23,8 @@ int main(void) {
         "{\"role\":\"user\",\"content\":\"Hi \\u4f60\\u597d "
         "\\ud83d\\udc4b\"}],"
         "\"max_tokens\":32,"
+        "\"large\":18446744073709551615,"
+        "\"negative\":-1,"
         "\"stream\":false"
         "}";
     k3_json_document document;
@@ -67,6 +69,20 @@ int main(void) {
               &max_tokens) &&
           max_tokens == 32u,
           "unsigned integer");
+    uint64_t large = 0u;
+    CHECK(k3_json_u64(
+              &document,
+              k3_json_object_get(
+                  &document, document.root, "large"),
+              &large) &&
+          large == UINT64_MAX,
+          "unsigned 64-bit integer");
+    CHECK(!k3_json_u64(
+              &document,
+              k3_json_object_get(
+                  &document, document.root, "negative"),
+              &large),
+          "negative unsigned integer accepted");
     bool stream = true;
     CHECK(k3_json_bool(
               &document,

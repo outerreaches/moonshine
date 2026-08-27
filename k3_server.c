@@ -2473,7 +2473,7 @@ int main(int argc, char **argv) {
         "listen=http://%s:%u model=%s version=%s context=%u "
         "max_output=%u load=%.3fs static=%.3f_GiB cache=%.3f_GiB "
         "state=%.3f_GiB slots=1 auth=%s range_backend=%s experts=%s "
-        "checkpoints=%s checkpoint_entries=%zu",
+        "model_source=%s checkpoints=%s checkpoint_entries=%zu",
         config.host, config.port, MOONSHINE_MODEL_ID,
         MOONSHINE_VERSION, config.context,
         effective_max_output_tokens(&config),
@@ -2487,6 +2487,7 @@ int main(int argc, char **argv) {
             "default" : "kda-blas",
         stats.mzg2_store ? "mzg2" :
             stats.mzg_expert_store ? "mzg1" : "safetensors",
+        stats.standalone_bundle ? "bundle" : "safetensors",
         k3_chat_session_checkpoint_enabled(session) ? "on" : "off",
         k3_chat_session_checkpoint_count(session));
 

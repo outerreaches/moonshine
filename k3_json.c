@@ -924,6 +924,30 @@ bool k3_json_u32(const k3_json_document *document,
     return true;
 }
 
+bool k3_json_u64(const k3_json_document *document,
+                 int32_t token,
+                 uint64_t *value) {
+    if (!token_valid(document, token) ||
+        document->tokens[token].type != K3_JSON_NUMBER ||
+        value == NULL) {
+        return false;
+    }
+    const k3_json_token selected = document->tokens[token];
+    const size_t size = selected.end - selected.start;
+    if (size == 0u || size >= 32u ||
+        document->source[selected.start] < '0' ||
+        document->source[selected.start] > '9') return false;
+    char text[32];
+    memcpy(text, document->source + selected.start, size);
+    text[size] = '\0';
+    char *end = NULL;
+    errno = 0;
+    const unsigned long long parsed = strtoull(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0') return false;
+    *value = (uint64_t)parsed;
+    return true;
+}
+
 bool k3_json_bool(const k3_json_document *document,
                   int32_t token,
                   bool *value) {

@@ -59,6 +59,18 @@ identity, gate on the mechanism's subphase, and use aggregate phase wall only
 as a no-regression guard. Record NVMe temperature/throttle state externally
 for every arm.
 
+For a standalone MZG2 bundle, first run `make test-mzg2-bundle` and the
+single-file SafeTensors/bundle-manifest portable tests. Build from the pinned
+96-shard source in a private root, require exactly 2,460 static tensors and
+113,509,540,864 payload bytes, validate all source/MZG2/auxiliary hashes, and
+publish atomically. Qualify dense-source+MZG2 against bundle-only+MZG2 for
+identical engine ledgers, model-layout identity, output values/bytes, cache
+counters, all four state digests, live/displaced/restart checkpoints, tool and
+structured output, and 128K/30 startup. The final clean-machine gate must have
+no official shards available. Archive source shards only after remote hashes
+and a sample restore pass. Never publish model/bundle payloads in the Moonshine
+Git repository.
+
 For durable exact-prefix checkpoints, first run
 `make test-prefix-checkpoint`. Then qualify the server with a fresh private
 root: publish one turn, record an uninterrupted exact continuation, displace
