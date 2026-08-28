@@ -407,7 +407,7 @@ was reverted.
 See [MZG2 architecture and deployment](docs/architecture.md) and the
 [MZG2 transcoding instructions](docs/getting-started.md#mzg2-production-gpu-decoder).
 
-### Standalone MZG2 bundle — in development
+### Standalone MZG2 bundle — core qualification passed
 
 The standalone bundle removes the runtime dependency on the 96 official
 SafeTensor shards. It keeps the 2,460 non-routed language tensors at source
@@ -420,12 +420,20 @@ expert-store-mzg2          1,171.084 GiB
 total                      ~1.247 TiB
 ```
 
-This format is under implementation and is not yet the published/default model
-layout. Until its clean-machine qualification passes, use the official
-SafeTensors plus MZG2 path above.
+A local production-size bundle now exists. At commit `f38a1ce`, a detached
+clean build, model-free suite, dense/bundle engine hello and chat comparison,
+tokenizer, state-checkpoint, and reset/displaced/restart durable-prefix gates
+pass. Generated IDs, selected values, the static ledger, cache counters, and
+recorded response bytes are exact across the paired core fixtures.
 
-Users who already have the pinned official SafeTensors will be able to build
-the same standalone bundle locally:
+Qualification is still open for the explicit full-bundle verify receipt,
+model-backed bundle negative paths, 128K/30 and live server compatibility, and
+the decisive shard-unavailable clean-machine gate. The bundle is not the
+default or release-qualified; retain the official SafeTensors as the
+source/rollback path and do not delete them.
+
+Users who have the pinned official SafeTensors can build the same standalone
+bundle locally:
 
 ```sh
 make tools/transcode_mzg2_layer

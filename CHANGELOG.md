@@ -84,17 +84,19 @@ Semantic Versioning once its first research-preview tag is published.
   hello improves about 10.6%, selected prefill 11.6%, and live 128K/30
   11.7--12.8%, with exact outputs. The qualified K3 deployment now selects it
   through `MOONSHINE_MZG2_STORE`; raw SafeTensors remain the rollback path.
-- An in-development standalone MZG2 bundle. A deterministic resumable builder
+- A locally built standalone MZG2 bundle. A deterministic resumable builder
   extracts exactly 2,460 source-precision non-routed language tensors into one
   4 KiB-aligned SafeTensors file, reuses/builds and independently verifies the
   complete MZG2 store, copies tokenizer/config/license provenance, and
   atomically publishes a manifest-bound bundle. Bundle mode opens the one-file
   static model, uses fixed decoded-expert offsets with MZG2 spans, rejects
   external raw/MZG1/MZG2 selectors, and preserves the pinned dense-source
-  model-layout CRC for state/checkpoint compatibility. Model-free builder,
-  parser, single-file loader, corruption, traversal, and identity gates pass;
-  production pack generation and dense-versus-bundle qualification await a
-  model window.
+  model-layout CRC for state/checkpoint compatibility. At `f38a1ce`, a detached
+  clean build and model-free suite pass, and core dense/bundle engine-hello,
+  tokenizer, chat, state-checkpoint, and durable-prefix gates pass with exact
+  paired outputs and ledgers. Clean-machine, 128K/live, additional negative,
+  archive/cutover, and publication gates remain open; the bundle is non-default
+  and the official shards remain the source/rollback path.
 - An opt-in durable exact-prefix checkpoint path for displaced or restarted
   sessions. Model-backed response bytes, cached-token accounting, all four
   causal-state digests, manifest reload, and server publication/restart
