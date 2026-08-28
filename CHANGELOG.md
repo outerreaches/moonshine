@@ -149,6 +149,9 @@ Semantic Versioning once its first research-preview tag is published.
 
 ### Fixed
 
+- Model standalone-bundle routed-prefill reads from embedded MZG2 spans and
+  preserve a decoded-layout ordering key, allowing reset and durable-prefix
+  prefill without requiring the omitted source expert tensor directory.
 - Restrict router-logits capture to an active decode-diagnostics transaction so
   prompt/prefill data remains outside the capture and rollback boundary.
 - Fail closed when an explicitly selected MZG1 store is absent, and validate

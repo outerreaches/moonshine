@@ -35,6 +35,14 @@ typedef struct {
     uint64_t  file_bytes;
     uint64_t  data_offset;
 } k3_st_shard;
+typedef bool (*k3_st_routed_span_fn)(
+        const void *context,
+        uint32_t layer,
+        uint32_t expert,
+        uint16_t *shard,
+        uint64_t *start,
+        uint64_t *end,
+        uint64_t *file_bytes);
 
 typedef struct {
     k3_st_shard  *shards;
@@ -42,6 +50,8 @@ typedef struct {
     k3_st_tensor *tensors;
     size_t        tensor_count;
     size_t        tensor_capacity;
+    k3_st_routed_span_fn routed_span;
+    const void          *routed_span_context;
 } k3_st_model;
 
 typedef struct {

@@ -308,6 +308,29 @@ static bool validate_bundle_static_model(
     }
     return true;
 }
+static bool bundle_prefill_routed_span(
+        const void *context,
+        uint32_t layer,
+        uint32_t expert,
+        uint16_t *shard,
+        uint64_t *start,
+        uint64_t *end,
+        uint64_t *file_bytes) {
+    const auto *store =
+        static_cast<const k3_mzg2_store *>(context);
+    k3_mzg2_span span;
+    if (!store || layer == 0u || layer > K3_ENGINE_MOE_LAYERS ||
+        expert >= K3_ENGINE_EXPERTS ||
+        !k3_mzg2_store_span(store, layer, expert, &span) ||
+        span.offset > UINT64_MAX - span.bytes) {
+        return false;
+    }
+    *shard = static_cast<uint16_t>(layer - 1u);
+    *start = span.offset;
+    *end = span.offset + span.bytes;
+    *file_bytes = *end;
+    return true;
+}
 
 static double elapsed_seconds(struct timespec start,
                               struct timespec end) {
@@ -920,6 +943,8 @@ extern "C" bool k3_engine_create(
             k3_engine_destroy(engine);
             return false;
         }
+        engine->model.routed_span = bundle_prefill_routed_span;
+        engine->model.routed_span_context = engine->mzg2_store;
     } else {
         if (!k3_st_model_open(
                 &engine->model, model_root, K3_ENGINE_SHARDS,
@@ -1283,7 +1308,8 @@ static bool find_expert_layout(
         layout->read_offset = span.offset;
         layout->read_bytes = span.bytes;
         layout->shard = (uint16_t)(layer - 1u);
-        layout->physical_start = span.offset;
+        layout->physical_start =
+            (uint64_t)expert * K3_ENGINE_EXPERT_BYTES;
         layout->aligned_start = span.offset;
         layout->aligned_bytes = span.bytes;
         for (uint32_t index = 0u;

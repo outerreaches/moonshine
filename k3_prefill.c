@@ -117,8 +117,20 @@ static bool expert_span(
         uint16_t *shard,
         uint64_t *start,
         uint64_t *end,
+        uint64_t *file_bytes,
         char *error,
         size_t error_size) {
+    if (model->routed_span != NULL) {
+        if (!model->routed_span(
+                model->routed_span_context, layer, expert,
+                shard, start, end, file_bytes)) {
+            prefill_error(error, error_size,
+                          "missing routed span for layer-%u expert-%u",
+                          layer, expert);
+            return false;
+        }
+        return true;
+    }
     static const char *suffix[K3_PREFILL_EXPERT_TENSORS] = {
         "w1.weight_packed", "w1.weight_scale",
         "w2.weight_packed", "w2.weight_scale",
@@ -162,13 +174,15 @@ static bool expert_span(
     *end =
         tensor[K3_PREFILL_EXPERT_TENSORS - 1u]->physical_offset +
         tensor[K3_PREFILL_EXPERT_TENSORS - 1u]->byte_length;
-    if (*end < *start ||
+    if (*shard >= model->shard_count ||
+        *end < *start ||
         *end - *start != K3_PREFILL_EXPERT_BYTES) {
         prefill_error(error, error_size,
                       "layer-%u expert-%u physical span is invalid",
                       layer, expert);
         return false;
     }
+    *file_bytes = model->shards[*shard].file_bytes;
     return true;
 }
 
@@ -339,15 +353,10 @@ bool k3_prefill_plan_build_with_aux_workspace(
             uint16_t shard = 0u;
             uint64_t start = 0u;
             uint64_t end = 0u;
+            uint64_t file_bytes = 0u;
             if (!expert_span(
                     model, layer, expert, &shard, &start, &end,
-                    error, error_size)) {
-                return false;
-            }
-            if (shard >= model->shard_count) {
-                prefill_error(error, error_size,
-                              "layer-%u expert-%u has invalid shard %u",
-                              layer, expert, shard);
+                    &file_bytes, error, error_size)) {
                 return false;
             }
             spans[expert].shard = shard;
@@ -358,10 +367,7 @@ bool k3_prefill_plan_build_with_aux_workspace(
             const uint64_t aligned_end =
                 (end + UINT64_C(4095)) & ~UINT64_C(4095);
             const uint64_t physical_end =
-                aligned_end >
-                    model->shards[shard].file_bytes ?
-                model->shards[shard].file_bytes :
-                aligned_end;
+                aligned_end > file_bytes ? file_bytes : aligned_end;
             if (aligned_end < aligned_start ||
                 physical_end < end ||
                 aligned_end - aligned_start >
@@ -372,7 +378,7 @@ bool k3_prefill_plan_build_with_aux_workspace(
                 !add_u64(
                     &plan->routed_store_physical_read_bytes,
                     physical_end - aligned_start) ||
-                !add_u64(&layer_bytes, end - start)) {
+                !add_u64(&layer_bytes, K3_PREFILL_EXPERT_BYTES)) {
                 prefill_error(error, error_size,
                               "layer-%u expert-%u read ledger overflow",
                               layer, expert);
