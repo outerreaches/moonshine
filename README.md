@@ -424,9 +424,9 @@ bytes are exact across the paired core fixtures.
 The independent full-bundle verifier passed before the 2026-08-30 cutover. The
 128K/30 production service then started with `model_source=bundle`; an
 authenticated request returned HTTP 200, natural stop, and exact content
-`standalone bundle ready`. Its process held one static-pack descriptor and 92
-bundle MZG2 layer descriptors, with zero descriptors below the official source
-root.
+`standalone bundle ready`. After the smoke, its process held normal and direct
+descriptors for 93 unique bundle paths—the static pack and 92 MZG2 layers—with
+zero descriptors below the official source root.
 
 Clean-machine, archive-restore, and publication qualification remain open.
 Retain the official SafeTensors as source and rollback material until those
