@@ -41,9 +41,10 @@ selector. The bundle contains the source-precision static tier and its own
 verified MZG2 routed store.
 
 The 2026-08-30 production cutover passed the 128K/30 startup profile and an
-authenticated completion with an exact natural-stop response. The running
-process held 93 bundle file descriptors—one static pack and 92 MZG2 layer
-files—and zero descriptors below the official 96-shard source root.
+authenticated completion with an exact natural-stop response. After the smoke,
+the running process held two descriptors for each of 93 unique bundle paths
+(`model-static.safetensors` plus 92 MZG2 layer files) and zero descriptors
+below the official 96-shard source root.
 
 Keep the official shards as build, archive, and rollback material until the
 remaining clean-machine and archive-restore gates pass. They are no longer a
