@@ -33,6 +33,22 @@ process. The new ceiling is a maximum request budget, not evidence of a
 continuous 64K decode or filled-128K prompt. Exact evidence is in
 [64K output and medium-reasoning qualification](qualification-output-64k.md).
 
+## Default weight source
+
+The qualified 128 GB Beelink deployment now defaults to the standalone MZG2
+bundle. Pass the bundle root as `MODEL`; do not set an external MZG1 or MZG2
+selector. The bundle contains the source-precision static tier and its own
+verified MZG2 routed store.
+
+The 2026-08-30 production cutover passed the 128K/30 startup profile and an
+authenticated completion with an exact natural-stop response. The running
+process held 93 bundle file descriptors—one static pack and 92 MZG2 layer
+files—and zero descriptors below the official 96-shard source root.
+
+Keep the official shards as build, archive, and rollback material until the
+remaining clean-machine and archive-restore gates pass. They are no longer a
+runtime dependency for the default Beelink service.
+
 ## Server commands
 
 Use an API key whenever the service binds beyond loopback.
@@ -57,15 +73,19 @@ Qualified 32K profile:
   --max-output-tokens 32768
 ```
 
-Persistent 128K-capacity 0.2.0 profile:
+Persistent 128K-capacity default profile:
 
 ```sh
-./moonshine-server "$MOONSHINE_MODEL" \
+MOONSHINE_BUNDLE=/path/to/Kimi-K3-Moonshine-MZG2
+./moonshine-server "$MOONSHINE_BUNDLE" \
   --host 0.0.0.0 --port 8080 \
   --api-key "$MOONSHINE_API_KEY" \
   --context 131072 --experts 30 \
   --max-output-tokens 65536
 ```
+
+Bundle mode reports `model_source=bundle` and rejects non-`off` external
+`MOONSHINE_EXPERT_STORE` or `MOONSHINE_MZG2_STORE` selectors.
 
 ## Pi Agent compatibility
 

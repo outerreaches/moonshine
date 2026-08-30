@@ -145,11 +145,13 @@ Interrupted runs rehash completed sidecars before continuing. Startup reports
 sidecar/directory path; MZG1 and MZG2 selection together fails closed.
 Unset/`off` retains raw SafeTensors as the rollback path.
 
-### Standalone MZG2 bundle — in development
+### Standalone MZG2 bundle — default Beelink deployment
 
 The standalone bundle combines one source-precision static SafeTensors file
-with MZG2 routed experts. Its target size is approximately 1.247 TiB, compared
-with 2.563 TiB for official shards plus MZG2.
+with MZG2 routed experts. It is the qualified default weight source on the
+128 GB Beelink host and removes the running service's dependency on the 96
+official source shards. Its size is approximately 1.247 TiB, compared with
+2.563 TiB for official shards plus MZG2.
 
 Users with the pinned official model can build it locally:
 
@@ -182,9 +184,35 @@ layout CRC64 `d17f7f2aad23c9c9`, and the pinned source-manifest SHA-256. The
 builder revalidates completed work before resume and performs a second static
 tensor/MZG2 verification before atomic publication.
 
-Do not delete or archive the official shards until dense-versus-bundle and
-clean-machine model-backed qualification passes. Bundle mode is Moonshine-only
-and rejects raw or MZG1 routed execution.
+Perform the independent deployment verification before cutover:
+
+```sh
+./tools/build_mzg2_bundle.py verify \
+  --bundle /path/to/Kimi-K3-Moonshine-MZG2 \
+  --model /path/to/moonshotai__Kimi-K3
+```
+
+Launch the bundle root directly. Bundle mode selects its embedded MZG2 store
+and rejects external expert-store selectors:
+
+```sh
+./moonshine-server /path/to/Kimi-K3-Moonshine-MZG2 \
+  --host 0.0.0.0 --port 8080 \
+  --api-key "$MOONSHINE_API_KEY" \
+  --context 131072 --experts 30 \
+  --max-output-tokens 65536
+```
+
+The 2026-08-30 cutover passed independent full-bundle verification,
+dense-versus-bundle output comparison, durable-prefix restart, and an
+authenticated production-profile completion. Startup must report
+`model_source=bundle`. The qualified process held the static bundle file and 92
+embedded MZG2 layer files with no descriptor below the official source root.
+
+Keep the official shards until clean-machine qualification, remote archive
+hash verification, and a scratch restore pass. They remain the build and
+rollback source even though the default running service no longer reads them.
+Bundle mode is Moonshine-only and rejects raw or MZG1 routed execution.
 
 ### Offline static-Q8 compression screen
 
