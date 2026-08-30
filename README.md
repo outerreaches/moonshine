@@ -208,29 +208,23 @@ and `--load` options, for exact causal-state checkpoints.
 
 ### OpenAI-compatible server
 
-A loopback 128K service using raw SafeTensor experts can be started directly:
+The qualified 128K Beelink service runs from the standalone bundle by default:
 
 ```sh
-./moonshine-server /path/to/moonshotai__Kimi-K3 \
-  --host 127.0.0.1 \
+./moonshine-server /path/to/Kimi-K3-Moonshine-MZG2 \
+  --host 0.0.0.0 \
   --port 8080 \
+  --api-key "$MOONSHINE_API_KEY" \
   --context 131072 \
   --experts 30 \
   --max-output-tokens 65536
 ```
 
-The qualified K3 deployment selects MZG2 explicitly:
-
-```sh
-MOONSHINE_EXPERT_STORE=off \
-MOONSHINE_MZG2_STORE=/path/to/moonshotai__Kimi-K3/expert-store-mzg2 \
-./moonshine-server /path/to/moonshotai__Kimi-K3 \
-  --host 127.0.0.1 \
-  --port 8080 \
-  --context 131072 \
-  --experts 30 \
-  --max-output-tokens 65536
-```
+Bundle startup reports `model_source=bundle` and selects its embedded MZG2
+store. Do not set an external expert-store selector. The official SafeTensor
+root remains the build/archive/rollback source, but is not read by the default
+running service. Passing the official model root with an explicit external
+MZG2 selector remains available as a rollback and comparison profile.
 
 The server exposes:
 
@@ -407,7 +401,7 @@ was reverted.
 See [MZG2 architecture and deployment](docs/architecture.md) and the
 [MZG2 transcoding instructions](docs/getting-started.md#mzg2-production-gpu-decoder).
 
-### Standalone MZG2 bundle — core qualification passed
+### Standalone MZG2 bundle — default Beelink deployment
 
 The standalone bundle removes the runtime dependency on the 96 official
 SafeTensor shards. It keeps the 2,460 non-routed language tensors at source
@@ -420,17 +414,23 @@ expert-store-mzg2          1,171.084 GiB
 total                      ~1.247 TiB
 ```
 
-A local production-size bundle now exists. At commit `f38a1ce`, a detached
-clean build, model-free suite, dense/bundle engine hello and chat comparison,
-tokenizer, state-checkpoint, and reset/displaced/restart durable-prefix gates
-pass. Generated IDs, selected values, the static ledger, cache counters, and
-recorded response bytes are exact across the paired core fixtures.
+A local production-size bundle is now the default weight source on the
+qualified Beelink host. At commit `f38a1ce`, the model-free suite,
+dense-versus-bundle engine hello and chat comparison, tokenizer, state
+checkpoint, and reset/displaced/restart durable-prefix gates pass. Generated
+IDs, selected values, the static ledger, cache counters, and recorded response
+bytes are exact across the paired core fixtures.
 
-Qualification is still open for the explicit full-bundle verify receipt,
-model-backed bundle negative paths, 128K/30 and live server compatibility, and
-the decisive shard-unavailable clean-machine gate. The bundle is not the
-default or release-qualified; retain the official SafeTensors as the
-source/rollback path and do not delete them.
+The independent full-bundle verifier passed before the 2026-08-30 cutover. The
+128K/30 production service then started with `model_source=bundle`; an
+authenticated request returned HTTP 200, natural stop, and exact content
+`standalone bundle ready`. Its process held one static-pack descriptor and 92
+bundle MZG2 layer descriptors, with zero descriptors below the official source
+root.
+
+Clean-machine, archive-restore, and publication qualification remain open.
+Retain the official SafeTensors as source and rollback material until those
+gates pass; the default running service no longer depends on them.
 
 Users who have the pinned official SafeTensors can build the same standalone
 bundle locally:
