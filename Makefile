@@ -30,6 +30,21 @@ MOONSHINE_DECODE_CACHE_FRESH_EMPTY_SOURCE ?= 0
 MOONSHINE_DECODE_CACHE_CAPACITIES ?= 24 26 28 30 31 32 34 36 40
 MOONSHINE_CACHE_ANALYZER_GOLDEN_RUN ?=
 
+GLM53_OBJS := \
+	glm53_expert_plan.o \
+	glm53_fp8_oracle.o \
+	glm53_manifest.o \
+	glm53_residency.o \
+	glm53_rocm_ops.o
+
+GLM53_CPU_TESTS := \
+	tests/test_glm53_expert_plan \
+	tests/test_glm53_fp8_oracle \
+	tests/test_glm53_manifest \
+	tests/test_glm53_residency
+
+GLM53_ROCM_TESTS := tests/test_glm53_rocm_ops
+
 K3_OBJS := \
 	k3_chat.o \
 	k3_bundle.o \
@@ -108,7 +123,8 @@ CHAT_TESTS := \
 	tests/test_k3_prefix_checkpoint \
 	tests/test_k3_long_context
 
-ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS)
+ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS) \
+	$(GLM53_CPU_TESTS) $(GLM53_ROCM_TESTS)
 
 .PHONY: all help tests test test-cpu check-model \
 	test-model-layout test-model-components test-engine-init \
@@ -121,7 +137,8 @@ ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS)
 	test-moe-tail-profile test-decode-cache-replay test-cache-analyzer \
 	test-prefill-screen-analyzer test-anchor-recovery-analyzer \
 	test-static-q8-screen test-mzg-transcoder test-mzg2-bundle \
-	test-reduction-qualification test-openai-sdk clean
+	test-reduction-qualification test-openai-sdk \
+	test-glm53-phase2 test-glm53-phase3 clean
 
 all: libmoonshine.a moonshine-chat moonshine-server
 
@@ -178,7 +195,7 @@ help:
 	@echo "                               Run the MXFP4 reduction-change gate bundle"
 	@echo "  make clean                  Remove local build products"
 
-libmoonshine.a: $(K3_OBJS)
+libmoonshine.a: $(K3_OBJS) $(GLM53_OBJS)
 	$(AR) rcs $@ $^
 
 tests: $(ALL_TESTS)
@@ -221,6 +238,24 @@ k3_openai.o: k3_openai.c k3_openai.h k3_json.h k3_chat.h
 k3_rocm_ops.o: k3_rocm_ops.cu k3_rocm_ops.h
 k3_safetensors.o: k3_safetensors.c k3_safetensors.h
 k3_tokenizer.o: k3_tokenizer.c k3_tokenizer.h
+glm53_expert_plan.o: glm53_expert_plan.c glm53_expert_plan.h k3_safetensors.h
+glm53_fp8_oracle.o: glm53_fp8_oracle.c glm53_fp8_oracle.h
+glm53_fp8_oracle.o: CFLAGS += -fno-fast-math
+glm53_manifest.o: glm53_manifest.c glm53_manifest.h k3_json.h \
+	k3_safetensors.h
+glm53_residency.o: glm53_residency.c glm53_residency.h
+glm53_rocm_ops.o: glm53_rocm_ops.cu glm53_rocm_ops.h
+glm53_rocm_ops.o tests/test_glm53_rocm_ops.o: HIPFLAGS += -fno-fast-math
+
+tests/test_glm53_expert_plan.o: tests/test_glm53_expert_plan.c \
+	glm53_expert_plan.h
+tests/test_glm53_fp8_oracle.o: tests/test_glm53_fp8_oracle.c \
+	glm53_fp8_oracle.h
+tests/test_glm53_manifest.o: tests/test_glm53_manifest.c glm53_manifest.h
+tests/test_glm53_residency.o: tests/test_glm53_residency.c glm53_residency.h
+tests/test_glm53_rocm_ops.o: tests/test_glm53_rocm_ops.cu \
+	glm53_rocm_ops.h glm53_fp8_oracle.h k3_rocm_ops.h
+
 tests/test_k3_bundle.o: tests/test_k3_bundle.c k3_bundle.h
 tests/test_k3_chat_session.o: tests/test_k3_chat_session.c k3_chat.h
 tests/test_k3_long_context.o: tests/test_k3_long_context.c k3_chat.h
@@ -251,6 +286,21 @@ tools/transcode_mzg2_layer: tools/transcode_mzg2_layer.o k3_safetensors.o
 tools/screen_static_q8: tools/screen_static_q8.o k3_q8_codec.o \
 		k3_static_layout.o k3_safetensors.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+tests/test_glm53_expert_plan: tests/test_glm53_expert_plan.o \
+		glm53_expert_plan.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_fp8_oracle: tests/test_glm53_fp8_oracle.o \
+		glm53_fp8_oracle.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_manifest: tests/test_glm53_manifest.o glm53_manifest.o \
+		k3_json.o k3_safetensors.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_residency: tests/test_glm53_residency.o glm53_residency.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_rocm_ops: tests/test_glm53_rocm_ops.o glm53_rocm_ops.o \
+		glm53_fp8_oracle.o k3_rocm_ops.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
 
 tests/test_k3_bundle: tests/test_k3_bundle.o k3_bundle.o k3_json.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
@@ -310,6 +360,15 @@ moonshine-server: k3_server.o k3_server_slot.o libmoonshine.a
 
 $(ROCM_TESTS): %: %.o libmoonshine.a
 	$(HIPCC) $(HIPFLAGS) -o $@ $< libmoonshine.a $(ROCM_LDLIBS)
+
+test-glm53-phase2: $(GLM53_CPU_TESTS)
+	./tests/test_glm53_manifest
+	./tests/test_glm53_expert_plan
+	./tests/test_glm53_residency
+
+test-glm53-phase3: tests/test_glm53_fp8_oracle $(GLM53_ROCM_TESTS)
+	./tests/test_glm53_fp8_oracle
+	./tests/test_glm53_rocm_ops
 
 test-cache-analyzer:
 	PYTHONDONTWRITEBYTECODE=1 \
@@ -511,4 +570,4 @@ clean:
 		k3_chat_cli.o k3_server.o k3_server_slot.o k3_q8_codec.o \
 		tools/transcode_mzg2_layer tools/transcode_mzg2_layer.o \
 		tools/screen_static_q8 tools/screen_static_q8.o \
-		$(K3_OBJS) tests/*.o $(ALL_TESTS)
+		$(K3_OBJS) $(GLM53_OBJS) tests/*.o $(ALL_TESTS)

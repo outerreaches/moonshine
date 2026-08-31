@@ -215,6 +215,7 @@ static k3_st_dtype k3_dtype_parse(const char *dtype) {
     if (strcmp(dtype, "BF16") == 0) return K3_ST_DTYPE_BF16;
     if (strcmp(dtype, "F32") == 0) return K3_ST_DTYPE_F32;
     if (strcmp(dtype, "U8") == 0) return K3_ST_DTYPE_U8;
+    if (strcmp(dtype, "F8_E4M3") == 0) return K3_ST_DTYPE_F8_E4M3;
     return K3_ST_DTYPE_UNKNOWN;
 }
 
@@ -223,6 +224,7 @@ static uint64_t k3_dtype_bytes(k3_st_dtype dtype) {
     case K3_ST_DTYPE_BF16: return 2;
     case K3_ST_DTYPE_F32: return 4;
     case K3_ST_DTYPE_U8: return 1;
+    case K3_ST_DTYPE_F8_E4M3: return 1;
     default: return 0;
     }
 }
@@ -516,13 +518,15 @@ static bool k3_st_model_finish_open(k3_st_model *model,
     return true;
 }
 
-bool k3_st_model_open(k3_st_model *model,
-                      const char *root,
-                      size_t shard_count,
-                      char *error,
-                      size_t error_size) {
+static bool k3_st_model_open_numbered(k3_st_model *model,
+                                      const char *root,
+                                      size_t shard_count,
+                                      unsigned total_digits,
+                                      char *error,
+                                      size_t error_size) {
     if (error && error_size) error[0] = '\0';
-    if (!model || !root || shard_count == 0 || shard_count > UINT16_MAX) {
+    if (!model || !root || shard_count == 0 || shard_count > UINT16_MAX ||
+        (total_digits != 5u && total_digits != 6u)) {
         k3_set_error(error, error_size, "invalid model-open arguments");
         return false;
     }
@@ -536,8 +540,15 @@ bool k3_st_model_open(k3_st_model *model,
             k3_set_error(error, error_size, "out of memory allocating path");
             goto fail;
         }
-        snprintf(path, path_bytes, "%s/model-%05zu-of-%06zu.safetensors",
-                 root, i + 1u, shard_count);
+        if (total_digits == 5u) {
+            snprintf(path, path_bytes,
+                     "%s/model-%05zu-of-%05zu.safetensors",
+                     root, i + 1u, shard_count);
+        } else {
+            snprintf(path, path_bytes,
+                     "%s/model-%05zu-of-%06zu.safetensors",
+                     root, i + 1u, shard_count);
+        }
         const bool opened = k3_st_model_open_shard(
             model, i, path, error, error_size);
         free(path);
@@ -549,6 +560,24 @@ bool k3_st_model_open(k3_st_model *model,
 fail:
     k3_st_model_close(model);
     return false;
+}
+
+bool k3_st_model_open(k3_st_model *model,
+                      const char *root,
+                      size_t shard_count,
+                      char *error,
+                      size_t error_size) {
+    return k3_st_model_open_numbered(
+        model, root, shard_count, 6u, error, error_size);
+}
+
+bool k3_st_model_open_5digit_total(k3_st_model *model,
+                                    const char *root,
+                                    size_t shard_count,
+                                    char *error,
+                                    size_t error_size) {
+    return k3_st_model_open_numbered(
+        model, root, shard_count, 5u, error, error_size);
 }
 
 bool k3_st_model_open_file(k3_st_model *model,

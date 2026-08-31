@@ -16,6 +16,7 @@ typedef enum {
     K3_ST_DTYPE_BF16,
     K3_ST_DTYPE_F32,
     K3_ST_DTYPE_U8,
+    K3_ST_DTYPE_F8_E4M3,
 } k3_st_dtype;
 
 typedef struct {
@@ -81,6 +82,17 @@ bool k3_st_model_open(k3_st_model *model,
                       size_t       shard_count,
                       char        *error,
                       size_t       error_size);
+
+/*
+ * Open the same numbered shard family with a five-digit total field:
+ * model-NNNNN-of-NNNNN.safetensors. The existing API intentionally retains
+ * K3's six-digit total field.
+ */
+bool k3_st_model_open_5digit_total(k3_st_model *model,
+                                    const char  *root,
+                                    size_t       shard_count,
+                                    char        *error,
+                                    size_t       error_size);
 
 /*
  * Open one deterministic SafeTensors file as a one-shard model. This is the

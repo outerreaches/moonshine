@@ -10,6 +10,9 @@ core.*
 tests/test_k3_*
 !tests/test_k3_*.c
 !tests/test_k3_*.cu
+tests/test_glm53_*
+!tests/test_glm53_*.c
+!tests/test_glm53_*.cu
 __pycache__/
 *.pyc
 .venv-sdk/
