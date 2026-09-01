@@ -1,0 +1,221 @@
+{
+  "fixture_bytes": 143928,
+  "fixture_file": "glm53_phase4_kda_v1.bin",
+  "fixture_format": {
+    "array_order": [
+      {
+        "f32_sha256": "4ae4597afe7c69835a8d8e4bf3dbe5aa91cf7111a41bad18e6330594fb689bfb",
+        "name": "q",
+        "shape": [
+          5,
+          128
+        ]
+      },
+      {
+        "f32_sha256": "e6fbaf6464e595d26d4e77023684ab2470ed6822bb6e708b28e4b27a461d705b",
+        "name": "k",
+        "shape": [
+          5,
+          128
+        ]
+      },
+      {
+        "f32_sha256": "bc551e40732c3a07fd581fc1c08ed7faf6142b661603ec7969800bd377b31e09",
+        "name": "v",
+        "shape": [
+          5,
+          128
+        ]
+      },
+      {
+        "f32_sha256": "2e225360d3869b551ea221f3e5aa4d04224715d3df5b41b2939d9f3e8a511490",
+        "name": "g",
+        "shape": [
+          5,
+          128
+        ]
+      },
+      {
+        "f32_sha256": "c24690490dcce53c33f4f32125f6036b9333bdc05a362ccfb869aaae3451f26c",
+        "name": "beta",
+        "shape": [
+          5
+        ]
+      },
+      {
+        "f32_sha256": "027521e32f14c694c7363b3cea7a22c5ece7ef4d12aae074cb0ed74afaee50a2",
+        "name": "initial_state",
+        "shape": [
+          128,
+          128
+        ]
+      },
+      {
+        "f32_sha256": "8b8e5d5dc2dcd12e59f8690fbf80708673cad82162aea1080706c5ab7210bdbf",
+        "name": "expected_output",
+        "shape": [
+          5,
+          128
+        ]
+      },
+      {
+        "f32_sha256": "dfc1f9d1a9da56c2bdf4bfcc97f14a5215525f101f59de2a87ddf8c1ba813eac",
+        "name": "expected_final_state",
+        "shape": [
+          128,
+          128
+        ]
+      }
+    ],
+    "byte_order": "little",
+    "header_struct": "<8s7I",
+    "magic": "G53KDA4",
+    "version": 1
+  },
+  "fixture_sha256": "bcf56361b7166b202d4f3dd70fbdaafad4951eef07909c69c54a550335b8477c",
+  "generation": {
+    "device": "cpu",
+    "note": "Expected recurrence uses explicit left-to-right F32 reductions matching glm53_state_oracle.c.",
+    "torch_version": "2.6.0+rocm6.1"
+  },
+  "initial_state": {
+    "dtype": "F32",
+    "formula": "state[i,j] = (((13*i + 7*j) % 29) - 14) / 4096",
+    "shape": [
+      128,
+      128
+    ]
+  },
+  "input": {
+    "dtype": "BF16",
+    "formula": "hidden[t,c] = (((37*t + 17*c) % 61) - 30) / 64",
+    "shape": [
+      5,
+      4096
+    ]
+  },
+  "official": {
+    "config_sha256": "bb8f01c42cb92a52ca72e65afb4d5bd8d11aef083cd210e8de25dfb904f23e9f",
+    "index_sha256": "3c3f40366a53c3fd7974b4eab7881a365a98c2a4329150befebab99fe7c18b05",
+    "repository": "zai-org/GLM-5.3-Flash",
+    "revision": "04c4e9e95c5da8862dced7e5056455116f83a7e0"
+  },
+  "schema_version": 1,
+  "tensors_consumed": {
+    "model.language_model.layers.0.self_attn.A_log": {
+      "dtype": "F32",
+      "logical_payload_bytes": 256,
+      "logical_payload_sha256": "07f6daa6804ea4747f3e0e5804b6aead1d1161aaab22d44a58e37beb6bbcb797",
+      "shape": [
+        64
+      ],
+      "shard": "model-00002-of-00062.safetensors"
+    },
+    "model.language_model.layers.0.self_attn.b_proj.weight": {
+      "dtype": "BF16",
+      "logical_payload_bytes": 524288,
+      "logical_payload_sha256": "70839d19b1443bbb87dbcd6b067137505306bd58060b82bf4e17f430c4b90320",
+      "shape": [
+        64,
+        4096
+      ],
+      "shard": "model-00002-of-00062.safetensors"
+    },
+    "model.language_model.layers.0.self_attn.dt_bias": {
+      "dtype": "F32",
+      "logical_payload_bytes": 32768,
+      "logical_payload_sha256": "6acb4588a9ec1c2f8e936c4b003860adbdc09aebf9f015114f4f9888473ddb64",
+      "shape": [
+        8192
+      ],
+      "shard": "model-00002-of-00062.safetensors"
+    },
+    "model.language_model.layers.0.self_attn.f_a_proj.weight": {
+      "dtype": "BF16",
+      "logical_payload_bytes": 1048576,
+      "logical_payload_sha256": "c6e74274834dbee17fab44cd6e860bad62ea5cd6234d25f1a7dad09bfe30c52c",
+      "shape": [
+        128,
+        4096
+      ],
+      "shard": "model-00002-of-00062.safetensors"
+    },
+    "model.language_model.layers.0.self_attn.f_b_proj.weight": {
+      "dtype": "BF16",
+      "logical_payload_bytes": 2097152,
+      "logical_payload_sha256": "b6203a3b332479c8579403d766019f17d1438883dceaee39ebe3e0cfd7e971a5",
+      "shape": [
+        8192,
+        128
+      ],
+      "shard": "model-00002-of-00062.safetensors"
+    },
+    "model.language_model.layers.0.self_attn.k_conv1d.weight": {
+      "dtype": "BF16",
+      "logical_payload_bytes": 65536,
+      "logical_payload_sha256": "81a666b5a7f4a6211101de40cab8dd69841d967143e0426fa7fcd1d092a4f528",
+      "shape": [
+        8192,
+        1,
+        4
+      ],
+      "shard": "model-00002-of-00062.safetensors"
+    },
+    "model.language_model.layers.0.self_attn.k_proj.weight": {
+      "dtype": "BF16",
+      "logical_payload_bytes": 67108864,
+      "logical_payload_sha256": "3bfdbdb581e82262e4bd36aa43210a732c8a3a7f41dd158e9f08f734c16bf24b",
+      "shape": [
+        8192,
+        4096
+      ],
+      "shard": "model-00002-of-00062.safetensors"
+    },
+    "model.language_model.layers.0.self_attn.q_conv1d.weight": {
+      "dtype": "BF16",
+      "logical_payload_bytes": 65536,
+      "logical_payload_sha256": "714fbd54ce53f7ef926b4c26bb67b22bee38758862625a46f4af0db05f9f4381",
+      "shape": [
+        8192,
+        1,
+        4
+      ],
+      "shard": "model-00002-of-00062.safetensors"
+    },
+    "model.language_model.layers.0.self_attn.q_proj.weight": {
+      "dtype": "BF16",
+      "logical_payload_bytes": 67108864,
+      "logical_payload_sha256": "62ed60e7f0740168f300a6fe01f0dd7b69c912adbdfc147044d7a1a2886e0408",
+      "shape": [
+        8192,
+        4096
+      ],
+      "shard": "model-00002-of-00062.safetensors"
+    },
+    "model.language_model.layers.0.self_attn.v_conv1d.weight": {
+      "dtype": "BF16",
+      "logical_payload_bytes": 65536,
+      "logical_payload_sha256": "c3d2ce7063c7bfddc66bbcd4707ab0e1884f5c48a863534f8ebd10fa6496746c",
+      "shape": [
+        8192,
+        1,
+        4
+      ],
+      "shard": "model-00002-of-00062.safetensors"
+    },
+    "model.language_model.layers.0.self_attn.v_proj.weight": {
+      "dtype": "BF16",
+      "logical_payload_bytes": 67108864,
+      "logical_payload_sha256": "4acd00990461eea5e0eeed908c0d30ca18ff78965ba1bfd3f150c6952257bf38",
+      "shape": [
+        8192,
+        4096
+      ],
+      "shard": "model-00002-of-00062.safetensors"
+    }
+  },
+  "transformers": {
+    "commit": "eb4d9e2a64a013bec12289288b85d0b1210ba0aa",
+    "semantics": "BF16 q/k/v projection; causal depthwise conv+SiLU; F32 forget gate with lower bound -5; BF16 sigmoid beta; F32 recurrent KDA with q/k l2norm"
+  }
+}

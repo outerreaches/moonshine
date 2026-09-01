@@ -29,21 +29,36 @@ MOONSHINE_DECODE_CACHE_SOURCE_CAPACITY ?=
 MOONSHINE_DECODE_CACHE_FRESH_EMPTY_SOURCE ?= 0
 MOONSHINE_DECODE_CACHE_CAPACITIES ?= 24 26 28 30 31 32 34 36 40
 MOONSHINE_CACHE_ANALYZER_GOLDEN_RUN ?=
+GLM53_OFFICIAL_ROOT ?=
 
 GLM53_OBJS := \
+	glm53_arch_math.o \
+	glm53_architecture.o \
 	glm53_expert_plan.o \
 	glm53_fp8_oracle.o \
 	glm53_manifest.o \
+	glm53_official_tensor.o \
 	glm53_residency.o \
-	glm53_rocm_ops.o
+	glm53_rocm_ops.o \
+	glm53_state_oracle.o
 
 GLM53_CPU_TESTS := \
+	tests/test_glm53_arch_math \
+	tests/test_glm53_architecture \
 	tests/test_glm53_expert_plan \
 	tests/test_glm53_fp8_oracle \
 	tests/test_glm53_manifest \
-	tests/test_glm53_residency
+	tests/test_glm53_official_tensor \
+	tests/test_glm53_residency \
+	tests/test_glm53_state_oracle
 
 GLM53_ROCM_TESTS := tests/test_glm53_rocm_ops
+
+GLM53_OFFICIAL_TESTS := \
+	tests/test_glm53_architecture_official \
+	tests/test_glm53_official_components \
+	tests/test_glm53_official_kda \
+	tests/test_glm53_official_projection
 
 K3_OBJS := \
 	k3_chat.o \
@@ -124,7 +139,7 @@ CHAT_TESTS := \
 	tests/test_k3_long_context
 
 ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS) \
-	$(GLM53_CPU_TESTS) $(GLM53_ROCM_TESTS)
+	$(GLM53_CPU_TESTS) $(GLM53_ROCM_TESTS) $(GLM53_OFFICIAL_TESTS)
 
 .PHONY: all help tests test test-cpu check-model \
 	test-model-layout test-model-components test-engine-init \
@@ -138,7 +153,8 @@ ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS) \
 	test-prefill-screen-analyzer test-anchor-recovery-analyzer \
 	test-static-q8-screen test-mzg-transcoder test-mzg2-bundle \
 	test-reduction-qualification test-openai-sdk \
-	test-glm53-phase2 test-glm53-phase3 clean
+	test-glm53-phase2 test-glm53-phase3 test-glm53-phase4 \
+	test-glm53-phase4-official clean
 
 all: libmoonshine.a moonshine-chat moonshine-server
 
@@ -238,20 +254,46 @@ k3_openai.o: k3_openai.c k3_openai.h k3_json.h k3_chat.h
 k3_rocm_ops.o: k3_rocm_ops.cu k3_rocm_ops.h
 k3_safetensors.o: k3_safetensors.c k3_safetensors.h
 k3_tokenizer.o: k3_tokenizer.c k3_tokenizer.h
+glm53_arch_math.o: glm53_arch_math.c glm53_arch_math.h
+glm53_arch_math.o: CFLAGS += -fno-fast-math
+glm53_architecture.o: glm53_architecture.c glm53_architecture.h \
+	k3_safetensors.h
 glm53_expert_plan.o: glm53_expert_plan.c glm53_expert_plan.h k3_safetensors.h
 glm53_fp8_oracle.o: glm53_fp8_oracle.c glm53_fp8_oracle.h
 glm53_fp8_oracle.o: CFLAGS += -fno-fast-math
 glm53_manifest.o: glm53_manifest.c glm53_manifest.h k3_json.h \
 	k3_safetensors.h
+glm53_official_tensor.o: glm53_official_tensor.c glm53_official_tensor.h \
+	k3_safetensors.h
 glm53_residency.o: glm53_residency.c glm53_residency.h
 glm53_rocm_ops.o: glm53_rocm_ops.cu glm53_rocm_ops.h
-glm53_rocm_ops.o tests/test_glm53_rocm_ops.o: HIPFLAGS += -fno-fast-math
+glm53_rocm_ops.o tests/test_glm53_rocm_ops.o \
+	tests/test_glm53_official_projection.o: HIPFLAGS += -fno-fast-math
+glm53_state_oracle.o: glm53_state_oracle.c glm53_state_oracle.h
+glm53_state_oracle.o: CFLAGS += -fno-fast-math
 
+tests/test_glm53_arch_math.o: tests/test_glm53_arch_math.c glm53_arch_math.h
+tests/test_glm53_architecture.o: tests/test_glm53_architecture.c \
+	glm53_architecture.h
+tests/test_glm53_architecture_official.o: \
+	tests/test_glm53_architecture_official.c glm53_architecture.h \
+	glm53_manifest.h k3_safetensors.h
 tests/test_glm53_expert_plan.o: tests/test_glm53_expert_plan.c \
 	glm53_expert_plan.h
 tests/test_glm53_fp8_oracle.o: tests/test_glm53_fp8_oracle.c \
 	glm53_fp8_oracle.h
 tests/test_glm53_manifest.o: tests/test_glm53_manifest.c glm53_manifest.h
+tests/test_glm53_official_components.o: \
+	tests/test_glm53_official_components.c glm53_arch_math.h
+tests/test_glm53_official_kda.o: tests/test_glm53_official_kda.c \
+	glm53_state_oracle.h
+tests/test_glm53_official_projection.o: \
+	tests/test_glm53_official_projection.cu glm53_fp8_oracle.h \
+	glm53_manifest.h glm53_official_tensor.h glm53_rocm_ops.h k3_safetensors.h
+tests/test_glm53_official_tensor.o: tests/test_glm53_official_tensor.c \
+	glm53_official_tensor.h
+tests/test_glm53_state_oracle.o: tests/test_glm53_state_oracle.c \
+	glm53_state_oracle.h
 tests/test_glm53_residency.o: tests/test_glm53_residency.c glm53_residency.h
 tests/test_glm53_rocm_ops.o: tests/test_glm53_rocm_ops.cu \
 	glm53_rocm_ops.h glm53_fp8_oracle.h k3_rocm_ops.h
@@ -287,6 +329,15 @@ tools/screen_static_q8: tools/screen_static_q8.o k3_q8_codec.o \
 		k3_static_layout.o k3_safetensors.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
+tests/test_glm53_arch_math: tests/test_glm53_arch_math.o glm53_arch_math.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_architecture: tests/test_glm53_architecture.o \
+		glm53_architecture.o k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_architecture_official: \
+		tests/test_glm53_architecture_official.o glm53_architecture.o \
+		glm53_manifest.o k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 tests/test_glm53_expert_plan: tests/test_glm53_expert_plan.o \
 		glm53_expert_plan.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
@@ -296,10 +347,27 @@ tests/test_glm53_fp8_oracle: tests/test_glm53_fp8_oracle.o \
 tests/test_glm53_manifest: tests/test_glm53_manifest.o glm53_manifest.o \
 		k3_json.o k3_safetensors.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_official_tensor: tests/test_glm53_official_tensor.o \
+		glm53_official_tensor.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 tests/test_glm53_residency: tests/test_glm53_residency.o glm53_residency.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_state_oracle: tests/test_glm53_state_oracle.o \
+		glm53_state_oracle.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 tests/test_glm53_rocm_ops: tests/test_glm53_rocm_ops.o glm53_rocm_ops.o \
 		glm53_fp8_oracle.o k3_rocm_ops.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_glm53_official_components: \
+		tests/test_glm53_official_components.o glm53_arch_math.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_official_kda: tests/test_glm53_official_kda.o \
+		glm53_state_oracle.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_official_projection: \
+		tests/test_glm53_official_projection.o glm53_rocm_ops.o \
+		glm53_fp8_oracle.o glm53_official_tensor.o glm53_manifest.o \
+		k3_safetensors.o k3_json.o
 	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
 
 tests/test_k3_bundle: tests/test_k3_bundle.o k3_bundle.o k3_json.o
@@ -370,6 +438,42 @@ test-glm53-phase3: tests/test_glm53_fp8_oracle $(GLM53_ROCM_TESTS)
 	./tests/test_glm53_fp8_oracle
 	./tests/test_glm53_rocm_ops
 
+test-glm53-phase4: tests/test_glm53_arch_math \
+		tests/test_glm53_architecture tests/test_glm53_official_tensor \
+		tests/test_glm53_state_oracle
+	./tests/test_glm53_arch_math
+	./tests/test_glm53_architecture
+	./tests/test_glm53_official_tensor
+	./tests/test_glm53_state_oracle
+
+test-glm53-phase4-official: tests/test_glm53_architecture_official \
+		tests/test_glm53_official_components tests/test_glm53_official_kda \
+		tests/test_glm53_official_projection \
+		tests/verify_glm53_phase4_reference.py \
+		tests/fixtures/glm53_phase4_reference.json \
+		tests/fixtures/glm53_official_projection_f32.bin \
+		tests/fixtures/glm53_phase4_kda_v1.json \
+		tests/fixtures/glm53_phase4_kda_v1.bin \
+		tests/fixtures/glm53_phase4_components.json \
+		tests/fixtures/glm53_phase4_components.bin
+	@test -n "$(GLM53_OFFICIAL_ROOT)" || \
+		(echo "set GLM53_OFFICIAL_ROOT to the verified official artifact" >&2; exit 2)
+	$(PYTHON) tests/verify_glm53_phase4_reference.py \
+		"$(GLM53_OFFICIAL_ROOT)" \
+		tests/fixtures/glm53_phase4_reference.json \
+		tests/fixtures/glm53_official_projection_f32.bin \
+		tests/fixtures/glm53_phase4_kda_v1.json \
+		tests/fixtures/glm53_phase4_kda_v1.bin \
+		tests/fixtures/glm53_phase4_components.json \
+		tests/fixtures/glm53_phase4_components.bin
+	./tests/test_glm53_architecture_official "$(GLM53_OFFICIAL_ROOT)"
+	./tests/test_glm53_official_components \
+		tests/fixtures/glm53_phase4_components.bin
+	./tests/test_glm53_official_kda \
+		tests/fixtures/glm53_phase4_kda_v1.bin
+	./tests/test_glm53_official_projection "$(GLM53_OFFICIAL_ROOT)" \
+		tests/fixtures/glm53_official_projection_f32.bin
+
 test-cache-analyzer:
 	PYTHONDONTWRITEBYTECODE=1 \
 		MOONSHINE_CACHE_ANALYZER_GOLDEN_RUN="$(MOONSHINE_CACHE_ANALYZER_GOLDEN_RUN)" \
@@ -397,7 +501,7 @@ test-mzg2-bundle:
 	PYTHONDONTWRITEBYTECODE=1 \
 		$(PYTHON) -m unittest -v tests/test_build_mzg2_bundle.py
 
-test-cpu: $(PORTABLE_CPU_TESTS) test-cache-analyzer \
+test-cpu: $(PORTABLE_CPU_TESTS) test-glm53-phase4 test-cache-analyzer \
 	test-prefill-screen-analyzer test-anchor-recovery-analyzer \
 	test-mzg2-bundle
 	./tests/test_k3_expert_cache
@@ -443,6 +547,7 @@ test-decode-cache-replay: tests/test_k3_expert_cache
 		{ echo "error: capacity sweep must include source capacity"; exit 2; }
 
 test: \
+	test-glm53-phase4 \
 	tests/test_k3_expert_cache \
 	tests/test_k3_prefix_reuse \
 	tests/test_k3_json \

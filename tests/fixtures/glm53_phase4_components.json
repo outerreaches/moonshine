@@ -1,0 +1,152 @@
+{
+  "binary_format": {
+    "bytes": 207756,
+    "endianness": "little",
+    "layout": "fixed; see generator and C reader",
+    "magic": "G53P4CMP",
+    "sha256": "9dcea68012182ebc49757903bf30508f3e6e069ad28781e5bccac149c48a8e31",
+    "version": 1
+  },
+  "consumed_tensors": {
+    "model.language_model.layers.0.hc_attn_base": {
+      "dtype": "float32",
+      "logical_nbytes": 96,
+      "logical_payload_sha256": "a2b04183e857d67954da49658f141f9d7546487ce0da3a86ea10292398c157d8",
+      "shape": [
+        24
+      ],
+      "shard": "model-00002-of-00062.safetensors"
+    },
+    "model.language_model.layers.0.hc_attn_fn": {
+      "dtype": "bfloat16",
+      "logical_nbytes": 786432,
+      "logical_payload_sha256": "ced298d9ac5f1d3ff25507129c35335cffb45fae14197df6ec2be4cf647b0301",
+      "shape": [
+        24,
+        16384
+      ],
+      "shard": "model-00002-of-00062.safetensors"
+    },
+    "model.language_model.layers.0.hc_attn_scale": {
+      "dtype": "float32",
+      "logical_nbytes": 12,
+      "logical_payload_sha256": "d098b90c82c458eaac09c2bd3a167234056ba9c83f0fa219ecfa337dcd22c79d",
+      "shape": [
+        3
+      ],
+      "shard": "model-00002-of-00062.safetensors"
+    },
+    "model.language_model.layers.3.mlp.experts.0.gate_proj.weight": {
+      "dtype": "float8_e4m3fn",
+      "logical_nbytes": 8388608,
+      "logical_payload_sha256": "a5dd1163f18f95582383da060b7e024f24c016f5972b8ba29452ff9a51a74ccf",
+      "shape": [
+        2048,
+        4096
+      ],
+      "shard": "model-00031-of-00062.safetensors"
+    },
+    "model.language_model.layers.3.mlp.experts.0.gate_proj.weight_scale_inv": {
+      "dtype": "float32",
+      "logical_nbytes": 2048,
+      "logical_payload_sha256": "46e585353c6cb94ee40911aad72bf1554d21e944ad287ab5a1547b5d01997cd3",
+      "shape": [
+        16,
+        32
+      ],
+      "shard": "model-00031-of-00062.safetensors"
+    },
+    "model.language_model.layers.3.mlp.experts.0.up_proj.weight": {
+      "dtype": "float8_e4m3fn",
+      "logical_nbytes": 8388608,
+      "logical_payload_sha256": "42af22dfc9fdcec299b15edda6caea2d55b5385f632c79cbf62d5145b22b70a8",
+      "shape": [
+        2048,
+        4096
+      ],
+      "shard": "model-00031-of-00062.safetensors"
+    },
+    "model.language_model.layers.3.mlp.experts.0.up_proj.weight_scale_inv": {
+      "dtype": "float32",
+      "logical_nbytes": 2048,
+      "logical_payload_sha256": "f3b3b7a93507d76f0cb26d2ef661c601daddd1da36bdad0436a2a1d86a8af8e8",
+      "shape": [
+        16,
+        32
+      ],
+      "shard": "model-00031-of-00062.safetensors"
+    },
+    "model.language_model.layers.3.mlp.gate.e_score_correction_bias": {
+      "dtype": "float32",
+      "logical_nbytes": 1152,
+      "logical_payload_sha256": "cad2f175acdabf61327e2c60bc609df9df81b21f7a8bc166d367b57ca13b78e7",
+      "shape": [
+        288
+      ],
+      "shard": "model-00032-of-00062.safetensors"
+    },
+    "model.language_model.layers.3.mlp.gate.weight": {
+      "dtype": "bfloat16",
+      "logical_nbytes": 2359296,
+      "logical_payload_sha256": "d9b073de20e23bca95c0110f8d131a655e27b8dd1ec9370943b78734b189e86e",
+      "shape": [
+        288,
+        4096
+      ],
+      "shard": "model-00032-of-00062.safetensors"
+    }
+  },
+  "inputs": {
+    "branch_formula": "BF16-exact branch[d]=(((29*d)%61)-30)/32",
+    "mhc_stream_formula": "BF16-exact stream[s,d]=(((37*d+11*s)%127)-63)/64; hc_attn_fn input is unweighted F32 RMSNorm over flattened [4*4096], eps=1e-6",
+    "router_and_expert_formula": "BF16-exact x[d]=(((17*d)%31)-15)/32"
+  },
+  "official": {
+    "config_sha256": "bb8f01c42cb92a52ca72e65afb4d5bd8d11aef083cd210e8de25dfb904f23e9f",
+    "index_sha256": "3c3f40366a53c3fd7974b4eab7881a365a98c2a4329150befebab99fe7c18b05",
+    "repository": "zai-org/GLM-5.3-Flash",
+    "revision": "04c4e9e95c5da8862dced7e5056455116f83a7e0"
+  },
+  "parameters": {
+    "down_projection_included": false,
+    "expert": 0,
+    "expert_intermediate": 2048,
+    "mhc_eps": 1e-06,
+    "mhc_layer": 0,
+    "mhc_rms_norm_axis": "flattened_4x4096",
+    "mhc_rms_norm_eps": 1e-06,
+    "mhc_rms_norm_weighted": false,
+    "n_group": 1,
+    "norm_topk_prob": true,
+    "routed_scaling_factor": 2.5,
+    "router_layer": 3,
+    "swiglu_limit": 10.0,
+    "top_k": 8
+  },
+  "references": {
+    "equations": "Transformers GLM support at eb4d9e2",
+    "llama_cpp_commit": "a771613af20f3dc60247e4b6a3d11516f0664673",
+    "transformers_commit": "eb4d9e2a64a013bec12289288b85d0b1210ba0aa"
+  },
+  "router": {
+    "boundary_tie": false,
+    "selection_boundary_margin": 0.017457008361816406,
+    "top8": [
+      103,
+      124,
+      96,
+      83,
+      236,
+      25,
+      166,
+      279
+    ]
+  },
+  "schema_version": 1,
+  "tolerances": {
+    "mhc_apply_abs": 3e-05,
+    "mhc_weights_abs": 8e-06,
+    "router_weights_abs": 2e-06,
+    "swiglu_abs": 3e-05
+  }
+}
