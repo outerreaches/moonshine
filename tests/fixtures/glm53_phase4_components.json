@@ -4,7 +4,7 @@
     "endianness": "little",
     "layout": "fixed; see generator and C reader",
     "magic": "G53P4CMP",
-    "sha256": "9dcea68012182ebc49757903bf30508f3e6e069ad28781e5bccac149c48a8e31",
+    "sha256": "28f945b653469fc01b272a94d6a1dcfbdf6ce80d4e70dc6e6253d150a9f7bef3",
     "version": 1
   },
   "consumed_tensors": {
@@ -98,7 +98,7 @@
   },
   "inputs": {
     "branch_formula": "BF16-exact branch[d]=(((29*d)%61)-30)/32",
-    "mhc_stream_formula": "BF16-exact stream[s,d]=(((37*d+11*s)%127)-63)/64; hc_attn_fn input is unweighted F32 RMSNorm over flattened [4*4096], eps=1e-6",
+    "mhc_stream_formula": "BF16-exact stream[s,d]=(((37*d+11*s)%127)-63)/64; hc_attn_fn input is unweighted F32 RMSNorm over flattened [4*4096], eps=official text_config.rms_norm_eps (required 1e-5)",
     "router_and_expert_formula": "BF16-exact x[d]=(((17*d)%31)-15)/32"
   },
   "official": {
@@ -114,7 +114,7 @@
     "mhc_eps": 1e-06,
     "mhc_layer": 0,
     "mhc_rms_norm_axis": "flattened_4x4096",
-    "mhc_rms_norm_eps": 1e-06,
+    "mhc_rms_norm_eps": 1e-05,
     "mhc_rms_norm_weighted": false,
     "n_group": 1,
     "norm_topk_prob": true,

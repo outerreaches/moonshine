@@ -45,8 +45,9 @@ int main(int argc,char **argv){
  READ(want_router_indices,8); READ(want_router_weights,8); READ(gatev,2048); READ(upv,2048); READ(want_activation,2048);
  extra=fgetc(f); CHECK(extra==EOF);
  /* Actual official projections are fixture inputs. mHC fn projection includes
-  * pinned unweighted flattened F32 RMSNorm (eps=1e-6). Anchors catch drift. */
- CHECK(close_abs(mixv[0],5.26120520f,1e-6f) && close_abs(mixv[23],3.05740142f,1e-6f));
+  * pinned unweighted flattened F32 RMSNorm (config eps=1e-5). This is
+  * distinct from the mHC/Sinkhorn eps=1e-6 below. Anchors catch drift. */
+ CHECK(close_abs(mixv[0],5.26113224f,1e-6f) && close_abs(mixv[23],3.05736780f,1e-6f));
  CHECK(close_abs(logits[0],0.144367993f,1e-7f) && close_abs(logits[287],-0.423026234f,1e-7f));
  CHECK(close_abs(gatev[0],-0.218653336f,1e-7f) && close_abs(upv[2047],0.359194845f,1e-7f));
  CHECK(glm53_mhc_weights4_f32(got_pre,got_post,got_comb,mixv,basev,scalev,1e-6f)==GLM53_ARCH_MATH_OK);

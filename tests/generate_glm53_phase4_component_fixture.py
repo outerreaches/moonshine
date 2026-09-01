@@ -90,6 +90,9 @@ def main():
     if file_sha(root/"config.json") != CONFIG_SHA256 or file_sha(root/"model.safetensors.index.json") != INDEX_SHA256:
         raise SystemExit("official config/index digest does not match pin")
     config=json.loads((root/"config.json").read_text())["text_config"]
+    rms_norm_eps=float(config["rms_norm_eps"])
+    if rms_norm_eps != 1e-5:
+        raise SystemExit(f"unexpected official text_config.rms_norm_eps: {rms_norm_eps!r}")
     index=json.loads((root/"model.safetensors.index.json").read_text())["weight_map"]
     records={}
     mhc_fn=load(root,index,NAMES["mhc_fn"],records)
@@ -101,7 +104,7 @@ def main():
     # Pinned MHC computes its unweighted RMSNorm over the flattened H*D axis
     # before hc_attn_fn (Transformers eb4d9e2, eps=config.rms_norm_eps).
     mhc_norm=torch.nn.functional.rms_norm(streams.reshape(-1), (4*4096,),
-                                           weight=None, eps=1e-6)
+                                           weight=None, eps=rms_norm_eps)
     mix=torch.mv(mhc_fn.float(),mhc_norm)
     pre,post,comb=mhc_weights(mix,base,scale)
     collapsed=(pre[:,None]*streams).sum(0)
@@ -134,8 +137,8 @@ def main():
     prov={"schema_version":1,"binary_format":{"magic":MAGIC.decode(),"version":VERSION,"endianness":"little","layout":"fixed; see generator and C reader","sha256":hashlib.sha256(payload).hexdigest(),"bytes":len(payload)},
       "official":{"repository":REPOSITORY,"revision":REVISION,"config_sha256":CONFIG_SHA256,"index_sha256":INDEX_SHA256},
       "references":{"transformers_commit":TRANSFORMERS_COMMIT,"llama_cpp_commit":LLAMA_COMMIT,"equations":"Transformers GLM support at eb4d9e2"},
-      "inputs":{"mhc_stream_formula":"BF16-exact stream[s,d]=(((37*d+11*s)%127)-63)/64; hc_attn_fn input is unweighted F32 RMSNorm over flattened [4*4096], eps=1e-6","router_and_expert_formula":"BF16-exact x[d]=(((17*d)%31)-15)/32","branch_formula":"BF16-exact branch[d]=(((29*d)%61)-30)/32"},
-      "parameters":{"mhc_layer":0,"mhc_rms_norm_eps":1e-6,"mhc_rms_norm_weighted":False,"mhc_rms_norm_axis":"flattened_4x4096","mhc_eps":1e-6,"router_layer":3,"n_group":1,"top_k":8,"norm_topk_prob":True,"routed_scaling_factor":2.5,"expert":0,"swiglu_limit":10.0,"expert_intermediate":2048,"down_projection_included":False},
+      "inputs":{"mhc_stream_formula":"BF16-exact stream[s,d]=(((37*d+11*s)%127)-63)/64; hc_attn_fn input is unweighted F32 RMSNorm over flattened [4*4096], eps=official text_config.rms_norm_eps (required 1e-5)","router_and_expert_formula":"BF16-exact x[d]=(((17*d)%31)-15)/32","branch_formula":"BF16-exact branch[d]=(((29*d)%61)-30)/32"},
+      "parameters":{"mhc_layer":0,"mhc_rms_norm_eps":rms_norm_eps,"mhc_rms_norm_weighted":False,"mhc_rms_norm_axis":"flattened_4x4096","mhc_eps":1e-6,"router_layer":3,"n_group":1,"top_k":8,"norm_topk_prob":True,"routed_scaling_factor":2.5,"expert":0,"swiglu_limit":10.0,"expert_intermediate":2048,"down_projection_included":False},
       "router":{"top8":[int(v) for v in top],"selection_boundary_margin":margin,"boundary_tie":False},
       "tolerances":{"mhc_weights_abs":8e-6,"mhc_apply_abs":3e-5,"router_weights_abs":2e-6,"swiglu_abs":3e-5},"consumed_tensors":records}
     a.provenance_json.write_text(json.dumps(prov,indent=2,sort_keys=True)+"\n")
