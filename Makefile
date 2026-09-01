@@ -34,17 +34,22 @@ GLM53_OFFICIAL_ROOT ?=
 GLM53_OBJS := \
 	glm53_arch_math.o \
 	glm53_architecture.o \
+	glm53_dense_ops.o \
 	glm53_engine_plan.o \
 	glm53_expert_plan.o \
 	glm53_expert_stream.o \
 	glm53_fp8_dynamic.o \
 	glm53_fp8_oracle.o \
 	glm53_manifest.o \
+	glm53_mhc_ops.o \
 	glm53_official_tensor.o \
+	glm53_phase5c.o \
 	glm53_process_memory.o \
 	glm53_residency.o \
 	glm53_rocm_ops.o \
 	glm53_state_oracle.o \
+	glm53_vector_ops.o \
+	glm53_static_bindings.o \
 	glm53_static_layout.o \
 	glm53_static_loader.o \
 	glm53_weights.o
@@ -62,13 +67,18 @@ GLM53_CPU_TESTS := \
 	tests/test_glm53_process_memory \
 	tests/test_glm53_residency \
 	tests/test_glm53_state_oracle \
+	tests/test_glm53_static_bindings \
 	tests/test_glm53_static_layout \
 	tests/test_glm53_weights
 
 GLM53_ROCM_TESTS := \
+	tests/test_glm53_dense_ops \
 	tests/test_glm53_fp8_dynamic_rocm \
+	tests/test_glm53_mhc_ops \
+	tests/test_glm53_phase5c \
 	tests/test_glm53_rocm_ops \
-	tests/test_glm53_static_loader
+	tests/test_glm53_static_loader \
+	tests/test_glm53_vector_ops
 
 GLM53_OFFICIAL_TESTS := \
 	tests/test_glm53_architecture_official \
@@ -77,7 +87,8 @@ GLM53_OFFICIAL_TESTS := \
 	tests/test_glm53_official_projection \
 	tests/test_glm53_phase5a_official \
 	tests/test_glm53_phase5b_expert_official \
-	tests/test_glm53_phase5b_loader_official
+	tests/test_glm53_phase5b_loader_official \
+	tests/test_glm53_phase5c_mhc_official
 
 K3_OBJS := \
 	k3_chat.o \
@@ -175,7 +186,8 @@ ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS) \
 	test-glm53-phase2 test-glm53-phase3 test-glm53-phase4 \
 	test-glm53-phase4-official test-glm53-phase5a \
 	test-glm53-phase5a-official test-glm53-phase5b \
-	test-glm53-phase5b-official test-glm53-phase5b-full clean
+	test-glm53-phase5b-official test-glm53-phase5b-full \
+	test-glm53-phase5c test-glm53-phase5c-official clean
 
 all: libmoonshine.a moonshine-chat moonshine-server
 
@@ -344,15 +356,28 @@ tests/test_glm53_static_layout.o: tests/test_glm53_static_layout.c \
 	glm53_static_layout.h glm53_weights.h
 tests/test_glm53_static_loader.o: tests/test_glm53_static_loader.cu \
 	glm53_static_loader.h glm53_static_layout.h
+tests/test_glm53_static_bindings.o: tests/test_glm53_static_bindings.c \
+	glm53_static_bindings.h glm53_static_loader.h glm53_static_layout.h \
+	glm53_weights.h
 tests/test_glm53_phase5b_loader_official.o: \
 	tests/test_glm53_phase5b_loader_official.cu glm53_static_loader.h \
 	glm53_static_layout.h glm53_process_memory.h glm53_weights.h
+tests/test_glm53_phase5c_mhc_official.o: \
+	tests/test_glm53_phase5c_mhc_official.cu glm53_mhc_ops.h \
+	glm53_vector_ops.h glm53_process_memory.h glm53_weights.h
 tests/test_glm53_phase5a_official.o: \
 	tests/test_glm53_phase5a_official.c glm53_weights.h \
 	glm53_expert_stream.h glm53_engine_plan.h
 tests/test_glm53_residency.o: tests/test_glm53_residency.c glm53_residency.h
 tests/test_glm53_rocm_ops.o: tests/test_glm53_rocm_ops.cu \
 	glm53_rocm_ops.h glm53_fp8_oracle.h k3_rocm_ops.h
+tests/test_glm53_vector_ops.o: tests/test_glm53_vector_ops.cu \
+	glm53_vector_ops.h
+tests/test_glm53_mhc_ops.o: tests/test_glm53_mhc_ops.cu glm53_mhc_ops.h
+tests/test_glm53_dense_ops.o: tests/test_glm53_dense_ops.cu \
+	glm53_dense_ops.h glm53_rocm_ops.h glm53_vector_ops.h
+tests/test_glm53_phase5c.o: tests/test_glm53_phase5c.cu glm53_phase5c.h \
+	glm53_static_bindings.h
 
 tests/test_k3_bundle.o: tests/test_k3_bundle.c k3_bundle.h
 tests/test_k3_chat_session.o: tests/test_k3_chat_session.c k3_chat.h
@@ -423,6 +448,22 @@ tests/test_glm53_residency: tests/test_glm53_residency.o glm53_residency.o
 tests/test_glm53_state_oracle: tests/test_glm53_state_oracle.o \
 		glm53_state_oracle.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_static_bindings: tests/test_glm53_static_bindings.o \
+		glm53_static_bindings.o glm53_static_loader.o glm53_static_layout.o \
+		glm53_weights.o glm53_architecture.o glm53_expert_plan.o \
+		glm53_manifest.o k3_safetensors.o k3_json.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_glm53_vector_ops: tests/test_glm53_vector_ops.o glm53_vector_ops.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_glm53_mhc_ops: tests/test_glm53_mhc_ops.o glm53_mhc_ops.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_glm53_dense_ops: tests/test_glm53_dense_ops.o glm53_dense_ops.o \
+		glm53_rocm_ops.o glm53_vector_ops.o glm53_fp8_dynamic.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_glm53_phase5c: tests/test_glm53_phase5c.o glm53_phase5c.o \
+		glm53_dense_ops.o glm53_mhc_ops.o glm53_rocm_ops.o \
+		glm53_vector_ops.o glm53_fp8_dynamic.o k3_rocm_ops.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
 tests/test_glm53_static_layout: tests/test_glm53_static_layout.o \
 		glm53_static_layout.o glm53_weights.o glm53_architecture.o \
 		glm53_expert_plan.o glm53_manifest.o k3_safetensors.o k3_json.o
@@ -454,7 +495,15 @@ tests/test_glm53_phase5b_expert_official: \
 	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
 tests/test_glm53_phase5b_loader_official: \
 		tests/test_glm53_phase5b_loader_official.o glm53_static_loader.o \
-		glm53_static_layout.o glm53_process_memory.o glm53_weights.o \
+		glm53_static_bindings.o glm53_static_layout.o glm53_phase5c.o \
+		glm53_dense_ops.o glm53_mhc_ops.o glm53_rocm_ops.o \
+		glm53_vector_ops.o glm53_fp8_dynamic.o glm53_process_memory.o \
+		glm53_weights.o glm53_architecture.o glm53_expert_plan.o \
+		glm53_manifest.o k3_rocm_ops.o k3_safetensors.o k3_json.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_glm53_phase5c_mhc_official: \
+		tests/test_glm53_phase5c_mhc_official.o glm53_mhc_ops.o \
+		glm53_vector_ops.o glm53_process_memory.o glm53_weights.o \
 		glm53_architecture.o glm53_expert_plan.o glm53_manifest.o \
 		k3_safetensors.o k3_json.o
 	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
@@ -557,6 +606,20 @@ test-glm53-phase5a-official: tests/test_glm53_phase5a_official
 		(echo "set GLM53_OFFICIAL_ROOT to the verified official artifact" >&2; exit 2)
 	./tests/test_glm53_phase5a_official "$(GLM53_OFFICIAL_ROOT)"
 
+test-glm53-phase5c: tests/test_glm53_static_bindings \
+		tests/test_glm53_vector_ops tests/test_glm53_mhc_ops \
+		tests/test_glm53_dense_ops tests/test_glm53_phase5c
+	./tests/test_glm53_static_bindings
+	./tests/test_glm53_vector_ops
+	./tests/test_glm53_mhc_ops
+	./tests/test_glm53_dense_ops
+	./tests/test_glm53_phase5c
+
+test-glm53-phase5c-official: tests/test_glm53_phase5c_mhc_official
+	@test -n "$(GLM53_OFFICIAL_ROOT)" || \
+		(echo "set GLM53_OFFICIAL_ROOT to the verified official artifact" >&2; exit 2)
+	./tests/test_glm53_phase5c_mhc_official "$(GLM53_OFFICIAL_ROOT)"
+
 test-glm53-phase5b: tests/test_glm53_fp8_dynamic \
 		tests/test_glm53_fp8_dynamic_rocm tests/test_glm53_process_memory \
 		tests/test_glm53_static_layout tests/test_glm53_static_loader
@@ -635,7 +698,8 @@ test-mzg2-bundle:
 
 test-cpu: $(PORTABLE_CPU_TESTS) test-glm53-phase4 test-glm53-phase5a \
 		tests/test_glm53_fp8_dynamic tests/test_glm53_process_memory \
-		tests/test_glm53_static_layout test-cache-analyzer \
+		tests/test_glm53_static_layout tests/test_glm53_static_bindings \
+		test-cache-analyzer \
 	test-prefill-screen-analyzer test-anchor-recovery-analyzer \
 	test-mzg2-bundle
 	./tests/test_k3_expert_cache
@@ -651,6 +715,7 @@ test-cpu: $(PORTABLE_CPU_TESTS) test-glm53-phase4 test-glm53-phase5a \
 	./tests/test_glm53_fp8_dynamic
 	./tests/test_glm53_process_memory
 	./tests/test_glm53_static_layout
+	./tests/test_glm53_static_bindings
 
 test-decode-cache-replay: tests/test_k3_expert_cache
 	@test -n "$(MOONSHINE_DECODE_TRACE)" || \
@@ -687,6 +752,7 @@ test: \
 	test-glm53-phase4 \
 	test-glm53-phase5a \
 	test-glm53-phase5b \
+	test-glm53-phase5c \
 	tests/test_k3_expert_cache \
 	tests/test_k3_prefix_reuse \
 	tests/test_k3_json \

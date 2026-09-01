@@ -2,6 +2,8 @@
 #include "../glm53_process_memory.h"
 #include "../glm53_static_layout.h"
 #include "../glm53_static_loader.h"
+#include "../glm53_static_bindings.h"
+#include "../glm53_phase5c.h"
 #include "../glm53_weights.h"
 #include "../glm53_architecture.h"
 
@@ -17,12 +19,15 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <vector>
+
 #define GIB (UINT64_C(1024) * UINT64_C(1024) * UINT64_C(1024))
 #define EXPECTED_ENTRIES ((size_t)37713)
 #define EXPECTED_LOGICAL UINT64_C(15300311288)
 #define EXPECTED_PADDED UINT64_C(15300353024)
 #define EXPECTED_FULL_CRC64 UINT64_C(0xe29a16329b0270f3)
 #define EXPECTED_SMOKE_CRC64 UINT64_C(0xbae1a998574b9223)
+#define EXPECTED_DIAGNOSTIC_CRC64 UINT64_C(0x46cc7f15c53bb356)
 #define SAMPLE_BYTES ((size_t)65536)
 
 #define CHECK(c) do { if (!(c)) { \
@@ -189,6 +194,8 @@ int main(int argc, char **argv) {
     glm53_static_layout full_layout, smoke_layout;
     glm53_static_layout_entry smoke_entries[2];
     glm53_static_store *store = NULL;
+    glm53_static_bindings bindings;
+    glm53_phase5c_session *diagnostic_session = NULL;
     glm53_static_loader_stats stats;
     glm53_process_memory before, loaded, after;
     char error[512], root_prefix[PATH_MAX];
@@ -198,7 +205,7 @@ int main(int argc, char **argv) {
     size_t i, main_count = 0u;
     int device_count = 0, result = 1;
     bool full = false, metadata_open = false, after_sampled = false;
-    uint64_t crc0 = 0u, crc1 = 0u, sample_crc = 0u;
+    uint64_t crc0 = 0u, crc1 = 0u, sample_crc = 0u, diagnostic_crc = 0u;
     double load_start = 0.0, load_end = 0.0, verify_end = 0.0;
     glm53_static_loader_status loader_status;
 
@@ -209,6 +216,7 @@ int main(int argc, char **argv) {
     memset(&weights, 0, sizeof(weights));
     memset(&full_layout, 0, sizeof(full_layout));
     memset(&smoke_layout, 0, sizeof(smoke_layout));
+    memset(&bindings, 0, sizeof(bindings));
     memset(smoke_entries, 0, sizeof(smoke_entries));
     memset(&stats, 0, sizeof(stats));
     memset(error, 0, sizeof(error));
@@ -338,9 +346,63 @@ int main(int argc, char **argv) {
     CHECK(sample_memory("loaded", root_prefix, &loaded));
 
     if (full) {
+        const glm53_static_binding *binding;
+        glm53_static_bindings_status binding_status;
         CHECK(stats.logical_read_bytes == EXPECTED_LOGICAL);
         CHECK(stats.device_allocation_bytes == EXPECTED_PADDED);
         CHECK(stats.aggregate_crc64_ecma == EXPECTED_FULL_CRC64);
+        binding_status = glm53_static_bindings_build(
+            &bindings, &weights, &full_layout, store, error, sizeof(error));
+        CHECK(binding_status == GLM53_STATIC_BINDINGS_OK);
+        CHECK(bindings.binding_count == GLM53_STATIC_BINDING_COUNT);
+        binding = glm53_static_bindings_global(&bindings, GLM53_GLOBAL_LM_HEAD);
+        CHECK(binding != NULL && binding->device ==
+              glm53_static_store_device_pointer(store, binding->runtime));
+        binding = glm53_static_bindings_layer(&bindings, 0u, GLM53_ROLE_MLP_GATE);
+        CHECK(binding != NULL && binding->shape[0] == 12288u &&
+              binding->shape[1] == 4096u);
+        binding = glm53_static_bindings_expert_scale(
+            &bindings, 44u, 287u, GLM53_ROUTED_SCALE_UP);
+        CHECK(binding != NULL && binding->shape[0] == 16u &&
+              binding->shape[1] == 32u);
+        {
+            glm53_phase5c_attention_provider zero_provider = {
+                glm53_phase5c_zero_attention_provider, NULL};
+            glm53_phase5c_layer0_early_head_diagnostic first, second;
+            std::vector<unsigned char> first_logits(
+                GLM53_PHASE5C_LAYER0_VOCAB * 2u);
+            std::vector<unsigned char> second_logits(
+                GLM53_PHASE5C_LAYER0_VOCAB * 2u);
+            CHECK(glm53_phase5c_session_create(&diagnostic_session, &bindings,
+                  error, sizeof(error)) == GLM53_PHASE5C_OK);
+            CHECK(glm53_phase5c_layer0_early_head_diagnostic_step(
+                  diagnostic_session, 1u, 0u, &zero_provider) == GLM53_PHASE5C_OK);
+            CHECK(glm53_phase5c_session_get_layer0_early_head_diagnostic(
+                  diagnostic_session, &first) && first.available &&
+                  first.position == 0u &&
+                  first.layer0_early_head_diagnostic_logits_count ==
+                      GLM53_PHASE5C_LAYER0_VOCAB);
+            HIP_CHECK(hipMemcpy(first_logits.data(),
+                      first.layer0_early_head_diagnostic_logits,
+                      GLM53_PHASE5C_LAYER0_VOCAB * 2u, hipMemcpyDeviceToHost));
+            CHECK(glm53_phase5c_session_reset(diagnostic_session) ==
+                  GLM53_PHASE5C_OK);
+            CHECK(glm53_phase5c_layer0_early_head_diagnostic_step(
+                  diagnostic_session, 1u, 0u, &zero_provider) == GLM53_PHASE5C_OK);
+            CHECK(glm53_phase5c_session_get_layer0_early_head_diagnostic(
+                  diagnostic_session, &second) && second.available &&
+                  second.position == 0u);
+            HIP_CHECK(hipMemcpy(second_logits.data(),
+                      second.layer0_early_head_diagnostic_logits,
+                      GLM53_PHASE5C_LAYER0_VOCAB * 2u, hipMemcpyDeviceToHost));
+            CHECK(memcmp(first_logits.data(), second_logits.data(),
+                         GLM53_PHASE5C_LAYER0_VOCAB * 2u) == 0);
+            diagnostic_crc = crc_update(0u, first_logits.data(),
+                             GLM53_PHASE5C_LAYER0_VOCAB * 2u);
+            CHECK(diagnostic_crc == EXPECTED_DIAGNOSTIC_CRC64);
+            glm53_phase5c_session_destroy(diagnostic_session);
+            diagnostic_session = NULL;
+        }
         CHECK(compare_full_samples(&all, selected_layout, store, &sample_crc));
     } else {
         CHECK(stats.aggregate_crc64_ecma == EXPECTED_SMOKE_CRC64);
@@ -350,6 +412,10 @@ int main(int argc, char **argv) {
     }
     verify_end = monotonic_seconds();
 
+    glm53_phase5c_session_destroy(diagnostic_session);
+    diagnostic_session = NULL;
+    glm53_phase5c_session_destroy(diagnostic_session);
+    glm53_static_bindings_free(&bindings);
     glm53_static_store_destroy(store);
     store = NULL;
     HIP_CHECK(hipDeviceSynchronize());
@@ -359,13 +425,15 @@ int main(int argc, char **argv) {
            "logical=%" PRIu64 " allocation=%" PRIu64
            " requests=%" PRIu64 " direct=%" PRIu64 " buffered=%" PRIu64
            " aggregate_crc64=%016" PRIx64 " verify_crc64=%016" PRIx64
+           " diagnostic_crc64=%016" PRIx64
            " load=%.3fs verify=%.3fs MemAvailable(before/loaded/after)="
            "%" PRIu64 "/%" PRIu64 "/%" PRIu64 " MiB\n",
            full ? "full" : "smoke", properties.name, properties.gcnArchName,
            stats.entry_count, stats.logical_read_bytes,
            stats.device_allocation_bytes, stats.read_requests,
            stats.direct_requests, stats.buffered_requests,
-           stats.aggregate_crc64_ecma, sample_crc, load_end - load_start,
+           stats.aggregate_crc64_ecma, sample_crc, diagnostic_crc,
+           load_end - load_start,
            verify_end - load_end, before.mem_available_bytes >> 20u,
            loaded.mem_available_bytes >> 20u, after.mem_available_bytes >> 20u);
     result = 0;
