@@ -40,6 +40,9 @@ GLM53_OBJS := \
 	glm53_expert_stream.o \
 	glm53_fp8_dynamic.o \
 	glm53_fp8_oracle.o \
+	glm53_kda_aux_ops.o \
+	glm53_kda_gate_ops.o \
+	glm53_kda_ops.o \
 	glm53_manifest.o \
 	glm53_mhc_ops.o \
 	glm53_official_tensor.o \
@@ -74,6 +77,9 @@ GLM53_CPU_TESTS := \
 GLM53_ROCM_TESTS := \
 	tests/test_glm53_dense_ops \
 	tests/test_glm53_fp8_dynamic_rocm \
+	tests/test_glm53_kda_aux_ops \
+	tests/test_glm53_kda_gate_ops \
+	tests/test_glm53_kda_ops \
 	tests/test_glm53_mhc_ops \
 	tests/test_glm53_phase5c \
 	tests/test_glm53_rocm_ops \
@@ -187,7 +193,8 @@ ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS) \
 	test-glm53-phase4-official test-glm53-phase5a \
 	test-glm53-phase5a-official test-glm53-phase5b \
 	test-glm53-phase5b-official test-glm53-phase5b-full \
-	test-glm53-phase5c test-glm53-phase5c-official clean
+	test-glm53-phase5c test-glm53-phase5c-official \
+	test-glm53-phase5d-kda clean
 
 all: libmoonshine.a moonshine-chat moonshine-server
 
@@ -373,7 +380,19 @@ tests/test_glm53_rocm_ops.o: tests/test_glm53_rocm_ops.cu \
 	glm53_rocm_ops.h glm53_fp8_oracle.h k3_rocm_ops.h
 tests/test_glm53_vector_ops.o: tests/test_glm53_vector_ops.cu \
 	glm53_vector_ops.h
-tests/test_glm53_mhc_ops.o: tests/test_glm53_mhc_ops.cu glm53_mhc_ops.h
+tests/test_glm53_kda_aux_ops.o: tests/test_glm53_kda_aux_ops.cu \
+	glm53_kda_aux_ops.h
+tests/test_glm53_kda_gate_ops.o: tests/test_glm53_kda_gate_ops.cu \
+	glm53_kda_gate_ops.h
+tests/test_glm53_kda_ops.o: tests/test_glm53_kda_ops.cu glm53_kda_ops.h
+glm53_kda_aux_ops.o: glm53_kda_aux_ops.cu glm53_kda_aux_ops.h
+glm53_kda_gate_ops.o: glm53_kda_gate_ops.cu glm53_kda_gate_ops.h
+glm53_kda_ops.o: glm53_kda_ops.cu glm53_kda_ops.h
+
+glm53_kda_aux_ops.o glm53_kda_gate_ops.o glm53_kda_ops.o \
+	tests/test_glm53_kda_aux_ops.o tests/test_glm53_kda_gate_ops.o \
+	tests/test_glm53_kda_ops.o: HIPFLAGS += -fno-fast-math
+glm53_mhc_ops.o: glm53_mhc_ops.cu glm53_mhc_ops.h
 tests/test_glm53_dense_ops.o: tests/test_glm53_dense_ops.cu \
 	glm53_dense_ops.h glm53_rocm_ops.h glm53_vector_ops.h
 tests/test_glm53_phase5c.o: tests/test_glm53_phase5c.cu glm53_phase5c.h \
@@ -454,6 +473,12 @@ tests/test_glm53_static_bindings: tests/test_glm53_static_bindings.o \
 		glm53_manifest.o k3_safetensors.o k3_json.o
 	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
 tests/test_glm53_vector_ops: tests/test_glm53_vector_ops.o glm53_vector_ops.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_glm53_kda_aux_ops: tests/test_glm53_kda_aux_ops.o glm53_kda_aux_ops.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_glm53_kda_gate_ops: tests/test_glm53_kda_gate_ops.o glm53_kda_gate_ops.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_glm53_kda_ops: tests/test_glm53_kda_ops.o glm53_kda_ops.o
 	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
 tests/test_glm53_mhc_ops: tests/test_glm53_mhc_ops.o glm53_mhc_ops.o
 	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
@@ -606,6 +631,12 @@ test-glm53-phase5a-official: tests/test_glm53_phase5a_official
 		(echo "set GLM53_OFFICIAL_ROOT to the verified official artifact" >&2; exit 2)
 	./tests/test_glm53_phase5a_official "$(GLM53_OFFICIAL_ROOT)"
 
+test-glm53-phase5d-kda: tests/test_glm53_kda_aux_ops \
+		tests/test_glm53_kda_gate_ops tests/test_glm53_kda_ops
+	./tests/test_glm53_kda_aux_ops
+	./tests/test_glm53_kda_gate_ops
+	./tests/test_glm53_kda_ops
+
 test-glm53-phase5c: tests/test_glm53_static_bindings \
 		tests/test_glm53_vector_ops tests/test_glm53_mhc_ops \
 		tests/test_glm53_dense_ops tests/test_glm53_phase5c
@@ -753,6 +784,7 @@ test: \
 	test-glm53-phase5a \
 	test-glm53-phase5b \
 	test-glm53-phase5c \
+	test-glm53-phase5d-kda \
 	tests/test_k3_expert_cache \
 	tests/test_k3_prefix_reuse \
 	tests/test_k3_json \
