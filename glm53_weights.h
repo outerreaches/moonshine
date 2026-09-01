@@ -21,6 +21,7 @@ extern "C" {
 #define GLM53_WEIGHT_STREAMED_BYTES UINT64_C(304405807104)
 #define GLM53_WEIGHT_ROUTED_SCALE_BYTES UINT64_C(74317824)
 #define GLM53_WEIGHT_RESIDENT_STATIC_BYTES UINT64_C(15225993464)
+#define GLM53_WEIGHT_ENGINE_RESIDENT_BYTES UINT64_C(15300311288)
 #define GLM53_WEIGHT_RESIDENT_STATIC_COUNT 1425u
 #define GLM53_WEIGHT_STREAMED_COUNT 36288u
 #define GLM53_WEIGHT_ROUTED_SCALE_COUNT 36288u
@@ -92,6 +93,7 @@ typedef struct {
 } glm53_weight_layer;
 
 typedef struct {
+    bool built;
     const k3_st_tensor *globals[GLM53_WEIGHT_GLOBAL_COUNT];
     glm53_weight_layer layers[GLM53_WEIGHT_LAYER_COUNT];
     glm53_expert_model_plan routed_experts;
@@ -119,6 +121,11 @@ bool glm53_weight_plan_build_manifest(glm53_weight_plan *plan,
                                       const glm53_manifest *manifest,
                                       const k3_st_model *model,
                                       char *error, size_t error_size);
+
+/* Return resident static tensors plus resident routed FP8 scales. Streamed
+ * routed expert values are deliberately excluded. Output is zero on failure. */
+bool glm53_weight_plan_engine_resident_bytes(const glm53_weight_plan *plan,
+                                              uint64_t *bytes);
 
 void glm53_weight_plan_free(glm53_weight_plan *plan);
 

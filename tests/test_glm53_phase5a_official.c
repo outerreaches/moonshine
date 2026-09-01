@@ -115,7 +115,9 @@ int main(int argc, char **argv) {
     CHECK(weights.routed_experts.physical_bytes == UINT64_C(304578072576));
 
     glm53_engine_plan_config_init(&config);
-    static_ledger.resident_bytes = weights.resident_static.total_bytes;
+    CHECK(glm53_weight_plan_engine_resident_bytes(
+              &weights, &static_ledger.resident_bytes));
+    CHECK(static_ledger.resident_bytes == UINT64_C(15300311288));
     /* Conservative load-time scratch: retain one full mapped staging slot. */
     static_ledger.peak_transient_bytes = GLM53_ENGINE_PLAN_MAPPED_STAGING_BYTES;
     CHECK(glm53_engine_plan_build(&config, &static_ledger,
@@ -128,7 +130,7 @@ int main(int argc, char **argv) {
     CHECK(engine.expert_cache_slots_per_layer == 0u);
     CHECK(engine.mapped_staging_slots == 1u);
     CHECK(engine.expert_resident_bytes == 0u);
-    CHECK(engine.static_resident_bytes == GLM53_WEIGHT_RESIDENT_STATIC_BYTES);
+    CHECK(engine.static_resident_bytes == UINT64_C(15300311288));
     CHECK(engine.static_peak_transient_bytes == UINT64_C(33562624));
     CHECK(engine.kda_state_bytes == UINT64_C(142606336));
     CHECK(engine.kda_conv_bytes == UINT64_C(13369344));
@@ -139,11 +141,11 @@ int main(int argc, char **argv) {
     CHECK(engine.allocator_guard_bytes == UINT64_C(268435456));
     CHECK(engine.runtime_guard_bytes == UINT64_C(1073741824));
     CHECK(engine.host_guard_bytes == UINT64_C(4294967296));
-    CHECK(engine.runtime_bytes_before_guards == UINT64_C(15759738104));
-    CHECK(engine.load_bytes_before_guards == UINT64_C(15259556088));
-    CHECK(engine.peak_bytes_before_guards == UINT64_C(15759738104));
-    CHECK(engine.admitted_bytes == UINT64_C(21396882680));
-    CHECK(engine.abort_reserve_bytes == UINT64_C(111747103495));
+    CHECK(engine.runtime_bytes_before_guards == UINT64_C(15834055928));
+    CHECK(engine.load_bytes_before_guards == UINT64_C(15333873912));
+    CHECK(engine.peak_bytes_before_guards == UINT64_C(15834055928));
+    CHECK(engine.admitted_bytes == UINT64_C(21471200504));
+    CHECK(engine.abort_reserve_bytes == UINT64_C(111672785671));
 
     for (i = 0u; i < weights.routed_experts.expert_count; ++i) {
         const glm53_expert_plan *expert = &weights.routed_experts.experts[i];

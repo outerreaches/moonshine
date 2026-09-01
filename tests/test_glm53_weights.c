@@ -52,6 +52,38 @@ static void test_transactional_failure(void) {
     assert(error[0]!='\0'); assert(memcmp(&after,&before,sizeof(after))==0);
 }
 
+static void test_engine_resident_helper(void) {
+    glm53_weight_plan plan; uint64_t bytes=123u;
+    memset(&plan,0,sizeof(plan));
+    assert(!glm53_weight_plan_engine_resident_bytes(&plan,&bytes));
+    assert(bytes==0u);
+    assert(!glm53_weight_plan_engine_resident_bytes(NULL,&bytes));
+    assert(bytes==0u);
+    assert(!glm53_weight_plan_engine_resident_bytes(&plan,NULL));
+
+    plan.built=true;
+    plan.resident_static.tensor_count=GLM53_WEIGHT_RESIDENT_STATIC_COUNT;
+    plan.resident_static.bf16_bytes=GLM53_WEIGHT_RESIDENT_STATIC_BYTES;
+    plan.resident_static.total_bytes=GLM53_WEIGHT_RESIDENT_STATIC_BYTES;
+    plan.resident_routed_scales.tensor_count=GLM53_WEIGHT_ROUTED_SCALE_COUNT;
+    plan.resident_routed_scales.f32_bytes=GLM53_WEIGHT_ROUTED_SCALE_BYTES;
+    plan.resident_routed_scales.total_bytes=GLM53_WEIGHT_ROUTED_SCALE_BYTES;
+    assert(glm53_weight_plan_engine_resident_bytes(&plan,&bytes));
+    assert(bytes==GLM53_WEIGHT_ENGINE_RESIDENT_BYTES);
+    assert(bytes==UINT64_C(15300311288));
+    plan.streamed_routed_experts.total_bytes=UINT64_MAX;
+    assert(glm53_weight_plan_engine_resident_bytes(&plan,&bytes));
+    assert(bytes==GLM53_WEIGHT_ENGINE_RESIDENT_BYTES);
+
+    plan.resident_static.bf16_bytes=UINT64_MAX;
+    plan.resident_static.total_bytes=UINT64_MAX;
+    plan.resident_routed_scales.f32_bytes=1u;
+    plan.resident_routed_scales.total_bytes=1u;
+    bytes=123u;
+    assert(!glm53_weight_plan_engine_resident_bytes(&plan,&bytes));
+    assert(bytes==0u);
+}
+
 static void optional_official(void) {
     const char *root=getenv("GLM53_OFFICIAL_ROOT"); k3_st_model all,main;
     glm53_manifest manifest; glm53_weight_plan plan; char error[512]; size_t i,n=0u;
@@ -68,6 +100,9 @@ static void optional_official(void) {
     main.tensor_count=n; main.tensor_capacity=n; assert(n==GLM53_MAIN_TENSOR_COUNT);
     assert(glm53_weight_plan_build_manifest(&plan,&manifest,&main,error,sizeof(error)));
     assert(plan.total.total_bytes==GLM53_WEIGHT_MAIN_BYTES);
+    { uint64_t resident=0u;
+      assert(glm53_weight_plan_engine_resident_bytes(&plan,&resident));
+      assert(resident==GLM53_WEIGHT_ENGINE_RESIDENT_BYTES); }
     assert(plan.routed_experts.expert_count==(size_t)GLM53_EXPERT_LAYER_COUNT*GLM53_EXPERTS_PER_LAYER);
     glm53_weight_plan_free(&plan); free(main.tensors);
     /* The shallow main view does not own shard or tensor-name storage. */
@@ -75,6 +110,7 @@ static void optional_official(void) {
 }
 
 int main(void) {
-    test_classifier(); test_transactional_failure(); optional_official();
+    test_classifier(); test_transactional_failure();
+    test_engine_resident_helper(); optional_official();
     puts("glm53 weights: all tests passed"); return 0;
 }

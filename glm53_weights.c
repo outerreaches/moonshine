@@ -223,6 +223,7 @@ static bool build(glm53_weight_plan *out,const glm53_manifest *mf,
        p.resident_static.tensor_count!=GLM53_WEIGHT_RESIDENT_STATIC_COUNT) {
         fail(e,z,"official main-text byte ledger mismatch");goto done;
     }
+    p.built=true;
     *out=p; memset(&p,0,sizeof(p)); ok=true;
 done:
     free(sorted); glm53_expert_model_plan_free(&p.routed_experts); return ok;
@@ -232,4 +233,26 @@ bool glm53_weight_plan_build(glm53_weight_plan *p,const k3_st_model *m,
                              char *e,size_t z){return build(p,NULL,m,e,z);}
 bool glm53_weight_plan_build_manifest(glm53_weight_plan *p,const glm53_manifest *mf,
                                       const k3_st_model *m,char *e,size_t z){return build(p,mf,m,e,z);}
+
+static bool ledger_consistent(const glm53_weight_ledger *l) {
+    uint64_t n=0u;
+    return add64(&n,l->f8_bytes) && add64(&n,l->f32_bytes) &&
+           add64(&n,l->bf16_bytes) && n==l->total_bytes;
+}
+bool glm53_weight_plan_engine_resident_bytes(const glm53_weight_plan *p,
+                                              uint64_t *bytes) {
+    uint64_t n=0u;
+    if(bytes)*bytes=0u;
+    if(!p||!bytes||!p->built ||
+       p->resident_static.tensor_count!=GLM53_WEIGHT_RESIDENT_STATIC_COUNT ||
+       p->resident_routed_scales.tensor_count!=GLM53_WEIGHT_ROUTED_SCALE_COUNT ||
+       !ledger_consistent(&p->resident_static) ||
+       !ledger_consistent(&p->resident_routed_scales) ||
+       !add64(&n,p->resident_static.total_bytes) ||
+       !add64(&n,p->resident_routed_scales.total_bytes) ||
+       p->resident_static.total_bytes!=GLM53_WEIGHT_RESIDENT_STATIC_BYTES ||
+       p->resident_routed_scales.total_bytes!=GLM53_WEIGHT_ROUTED_SCALE_BYTES ||
+       n!=GLM53_WEIGHT_ENGINE_RESIDENT_BYTES) return false;
+    *bytes=n; return true;
+}
 void glm53_weight_plan_free(glm53_weight_plan *p){if(!p)return;glm53_expert_model_plan_free(&p->routed_experts);memset(p,0,sizeof(*p));}
