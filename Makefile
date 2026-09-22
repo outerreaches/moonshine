@@ -951,8 +951,27 @@ tools/mimo26_gpu_bench.o: tools/mimo26_gpu_bench.cu k3_rocm_ops.h
 tools/mimo26_gpu_bench: tools/mimo26_gpu_bench.o k3_rocm_ops.o
 	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
 
+mimo26_rocm_layer.o: mimo26_rocm_layer.cu mimo26_rocm_layer.h \
+	mimo26_rocm_ops.h k3_rocm_ops.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/test_mimo26_gpu_layer.o: tests/test_mimo26_gpu_layer.cu \
+	mimo26_rocm_layer.h mimo26_rocm_ops.h mimo26_layer.h mimo26_weights.h \
+	mimo26_kv.h mimo26_manifest.h mimo26_attention.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/test_mimo26_gpu_layer: tests/test_mimo26_gpu_layer.o \
+		mimo26_rocm_layer.o mimo26_rocm_ops.o k3_rocm_ops.o \
+		mimo26_layer.o mimo26_weights.o mimo26_kv.o mimo26_manifest.o \
+		mimo26_architecture.o mimo26_attention.o mimo26_ops.o \
+		mimo26_router.o glm53_fp8_oracle.o k3_safetensors.o k3_json.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+
+# G4: a whole layer on the GPU against the CPU layer, on real weights.
+mimo26-gpu-layer: tests/test_mimo26_gpu_layer
+	MIMO26_ROOT=$(MIMO26_ROOT) ./tests/test_mimo26_gpu_layer
+
 # The whole GPU gate set, in dependency order.
-mimo26-gpu: mimo26-gpu-ops mimo26-gpu-attention mimo26-gpu-mxfp4
+mimo26-gpu: mimo26-gpu-ops mimo26-gpu-attention mimo26-gpu-mxfp4 \
+	mimo26-gpu-layer
 
 # G1: the MiMo expert path on the GPU against the verified CPU dequantizer.
 mimo26-gpu-mxfp4: tests/test_mimo26_gpu_mxfp4

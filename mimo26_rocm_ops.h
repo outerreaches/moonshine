@@ -31,6 +31,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define MIMO26_ROCM_TOP_K 8u
+#define MIMO26_ROCM_EXPERTS 256u
+#define MIMO26_ROCM_HIDDEN 4096u
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -58,6 +62,23 @@ bool mimo26_rocm_silu_product_bf16(void *output, const void *gate,
 bool mimo26_rocm_residual_add_bf16(void *output, const void *residual,
                                    const void *delta, uint64_t count,
                                    void *stream);
+
+/*
+ * Router logits in F32, summed in ascending column order so the result
+ * matches mimo26_router_logits_f32 on the CPU.
+ *
+ * Pinning the order matters here specifically. The logits land around -2
+ * while their summands total far more in absolute value, so the sum
+ * cancels heavily and a tree reduction diverges much further than the
+ * condition of a well-behaved row would suggest: measured through the
+ * mixing weights it sat 4.5e-04 from the CPU, roughly 3800x libm's last
+ * ulp, which is enough to shift every element of the expert-weighted sum.
+ * The exactness is free -- the router is negligible beside the 4.68 GiB of
+ * expert reads in the same token.
+ */
+bool mimo26_rocm_router_logits_f32(float *logits, const void *weight,
+                                   const void *hidden, uint32_t experts,
+                                   uint32_t hidden_size, void *stream);
 
 /*
  * Select top_k of expert_count by sigmoid(logit) + bias, returning the

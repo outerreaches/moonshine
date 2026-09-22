@@ -38,19 +38,31 @@ __global__ static void mimo26_rmsnorm_kernel(uint16_t *output,
     const uint64_t base = (uint64_t)vector * hidden_size;
     __shared__ float reduction[MIMO26_ROCM_THREADS];
 
-    float sum_squares = 0.0f;
-    for (uint32_t d = tid; d < hidden_size; d += blockDim.x) {
-        const float value = mimo26_bf16_to_f32_d(input[base + d]);
-        sum_squares += value * value;
-    }
-    reduction[tid] = sum_squares;
-    __syncthreads();
-    for (uint32_t width = blockDim.x / 2u; width > 0u; width /= 2u) {
-        if (tid < width) {
-            reduction[tid] += reduction[tid + width];
+    /*
+     * Summed by one thread in ascending order, not tree-reduced.
+     *
+     * The sum itself is well conditioned -- every term is a square -- so a
+     * tree reduction lands within an ulp, and in isolation that is
+     * invisible: this kernel passed a 12,288-element bit-exactness check
+     * against the CPU while tree-reducing. It stopped being invisible in
+     * composition. A single differing ulp in the reciprocal moves a handful
+     * of normalized values by one BF16 step, and the router's dot product
+     * cancels heavily enough to turn that into a 4.5e-04 shift in the
+     * mixing weights, which then reaches every element of the expert sum.
+     *
+     * 4096 serial adds, twice per layer per token: ~400k operations against
+     * the 4.68 GiB of expert reads in the same token. The exactness is free
+     * and the amplification is not hypothetical.
+     */
+    if (tid == 0u) {
+        float sum_squares = 0.0f;
+        for (uint32_t d = 0; d < hidden_size; d++) {
+            const float value = mimo26_bf16_to_f32_d(input[base + d]);
+            sum_squares += value * value;
         }
-        __syncthreads();
+        reduction[0] = sum_squares;
     }
+    __syncthreads();
     const float reciprocal =
         rsqrtf(reduction[0] / (float)hidden_size + epsilon);
 
@@ -471,6 +483,40 @@ __global__ static void mimo26_rope_apply_kernel(uint16_t *heads,
     }
 }
 
+
+/*
+ * Router logits, summed in ascending column order to match the CPU exactly.
+ *
+ * K3's F32-output GEMV tree-reduces, which is fine for a well-conditioned
+ * row. This row is not: the logits land around -2 while the summands total
+ * far more in absolute value, so the cancellation amplifies any difference
+ * in association. Measured through the mixing weights, the tree reduction
+ * put them 4.5e-04 from the CPU's -- about 3800x libm's last ulp, and enough
+ * to move every element of an expert-weighted sum.
+ *
+ * One thread per expert row, each summing its 4096 terms sequentially. 256
+ * threads is small for this GPU, but the router is a rounding error next to
+ * the 4.68 GiB of expert reads the same token performs, so the exactness is
+ * free.
+ */
+__global__ static void mimo26_router_logits_kernel(float *logits,
+                                                   const uint16_t *weight,
+                                                   const uint16_t *hidden,
+                                                   uint32_t experts,
+                                                   uint32_t hidden_size)
+{
+    const uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= experts) {
+        return;
+    }
+    const uint16_t *w = weight + (uint64_t)row * hidden_size;
+    float sum = 0.0f;
+    for (uint32_t c = 0; c < hidden_size; c++) {
+        sum += mimo26_bf16_to_f32_d(w[c]) * mimo26_bf16_to_f32_d(hidden[c]);
+    }
+    logits[row] = sum;
+}
+
 static inline uint32_t blocks_for(uint64_t count)
 {
     return (uint32_t)((count + MIMO26_ROCM_THREADS - 1u) /
@@ -701,6 +747,21 @@ bool mimo26_rocm_rope_apply(void *heads, const void *cos_table,
                        dim3(MIMO26_ROCM_ROPE_PAIRS), 0, (hipStream_t)stream,
                        (uint16_t *)heads, (const uint16_t *)cos_table,
                        (const uint16_t *)sin_table, head_count);
+    return hipGetLastError() == hipSuccess;
+}
+
+bool mimo26_rocm_router_logits_f32(float *logits, const void *weight,
+                                   const void *hidden, uint32_t experts,
+                                   uint32_t hidden_size, void *stream)
+{
+    if (logits == NULL || weight == NULL || hidden == NULL || experts == 0u ||
+        hidden_size == 0u) {
+        return false;
+    }
+    hipLaunchKernelGGL(mimo26_router_logits_kernel, dim3(blocks_for(experts)),
+                       dim3(MIMO26_ROCM_THREADS), 0, (hipStream_t)stream,
+                       logits, (const uint16_t *)weight,
+                       (const uint16_t *)hidden, experts, hidden_size);
     return hipGetLastError() == hipSuccess;
 }
 
