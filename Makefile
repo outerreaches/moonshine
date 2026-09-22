@@ -504,6 +504,14 @@ tests/test_mimo26_layer_parity: tests/test_mimo26_layer_parity.o \
 		mimo26_architecture.o mimo26_attention.o mimo26_ops.o \
 		mimo26_router.o glm53_fp8_oracle.o k3_safetensors.o k3_json.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_mimo26_qualify.o: tests/test_mimo26_qualify.c mimo26_worker.h
+tests/test_mimo26_qualify.o: CFLAGS += -fno-fast-math
+tests/test_mimo26_qualify: tests/test_mimo26_qualify.o \
+		mimo26_worker.o mimo26_layer.o mimo26_weights.o mimo26_kv.o \
+		mimo26_manifest.o mimo26_architecture.o mimo26_attention.o \
+		mimo26_ops.o mimo26_router.o k3_expert_cache.o \
+		glm53_fp8_oracle.o k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 mimo26_weights.o: mimo26_weights.c mimo26_weights.h \
 	mimo26_architecture.h mimo26_attention.h mimo26_ops.h \
 	mimo26_router.h glm53_fp8_oracle.h k3_safetensors.h
@@ -887,6 +895,12 @@ mimo26-layer-parity: tests/test_mimo26_layer_parity
 	    mimo26-layer$$layer.bin || exit 1; \
 	  rm -f mimo26-layer$$layer.bin; \
 	done
+
+# M4 operational qualification: determinism, cache-independence, rollback,
+# reset, fault containment and the memory guard, against a real checkpoint.
+# About a minute per decoded token on CPU, so it is not part of test-mimo26.
+mimo26-qualify: tests/test_mimo26_qualify
+	MIMO26_ROOT=$(MIMO26_ROOT) ./tests/test_mimo26_qualify
 
 mimo26-budget:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tools/mimo26_budget.py \
