@@ -1018,6 +1018,12 @@ tools/mimo26_server: mimo26_server.o mimo26_server_slot.o \
 		k3_safetensors.o k3_json.o k3_io_uring.o k3_expert_cache.o
 	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS) $(ICU_LDLIBS)
 
+# Sustained mixed-request soak against a running server. Start the server
+# first; this drives it and checks health, refusals and residency after.
+mimo26-soak:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/soak_mimo26_server.py \
+	  $(MIMO26_SERVER_URL) --seconds $(MIMO26_SOAK_SECONDS)
+
 # The whole GPU gate set, in dependency order.
 mimo26-gpu: mimo26-gpu-ops mimo26-gpu-attention mimo26-gpu-mxfp4 \
 	mimo26-gpu-layer mimo26-gpu-qualify

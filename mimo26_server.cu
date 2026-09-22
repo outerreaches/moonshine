@@ -256,7 +256,41 @@ typedef struct {
     const char        *model_root;
     size_t             context_capacity;
     uint64_t           served;
+    /* Consecutive supervised restarts that did not lead to a clean request.
+     * Bounded so a persistently broken worker stops thrashing and stays
+     * degraded for an operator to look at, rather than resetting forever. */
+    unsigned           recovery_attempts;
 } server_runtime;
+
+#define MAX_RECOVERY_ATTEMPTS 3u
+
+/*
+ * Supervised restart after a fault.
+ *
+ * Quarantine without a way out means one failed decode takes the server down
+ * until someone notices, which is worse than the fault. Recovery resets the
+ * worker -- dropping the KV history, which is the state that cannot be
+ * trusted after a mid-step failure -- and only then clears the quarantine.
+ *
+ * Bounded on purpose. If resets keep being followed by faults the problem is
+ * not transient, and continuing to reset would hide a hardware or checkpoint
+ * problem behind an endless retry loop.
+ */
+static bool attempt_recovery(server_runtime *runtime)
+{
+    if (runtime->slot.phase != MIMO26_SLOT_QUARANTINED) {
+        return true;
+    }
+    if (runtime->recovery_attempts >= MAX_RECOVERY_ATTEMPTS) {
+        return false;
+    }
+    runtime->recovery_attempts++;
+    fprintf(stderr,
+            "mimo26: supervised restart %u of %u after a worker fault\n",
+            runtime->recovery_attempts, MAX_RECOVERY_ATTEMPTS);
+    mimo26_gpu_worker_reset(runtime->worker);
+    return mimo26_slot_recover(&runtime->slot);
+}
 
 static void send_health(int fd, server_runtime *runtime)
 {
@@ -622,7 +656,10 @@ static void handle_chat(server_runtime *runtime, int fd,
     }
 
     /* Admission before any work, so a busy or unhealthy server answers
-     * immediately rather than after tokenizing. */
+     * immediately rather than after tokenizing. A quarantined worker gets
+     * one supervised restart first, so a transient fault costs a request
+     * rather than the process. */
+    attempt_recovery(runtime);
     const double started = now_seconds();
     const mimo26_slot_admission admission =
         mimo26_slot_admit(&runtime->slot, started, DEFAULT_DEADLINE_SECONDS,
@@ -637,7 +674,8 @@ static void handle_chat(server_runtime *runtime, int fd,
                 ? "another request is using the single execution slot; retry "
                   "shortly"
             : admission == MIMO26_SLOT_REJECT_QUARANTINED
-                ? "the worker is quarantined after a fault and is not serving"
+                ? "the worker faulted repeatedly and supervised restart has "
+                  "given up; it needs operator attention"
                 : "the server is shutting down";
         send_error(fd, 503, "Service Unavailable", reason_code, message);
         chat_request_free(&request);
@@ -895,6 +933,11 @@ static void handle_chat(server_runtime *runtime, int fd,
             state.id, prompt.count, produced_tokens, reasoning_used,
             finish_reason, now_seconds() - started);
     runtime->served++;
+    if (!failed) {
+        /* A request that completed cleanly proves the worker recovered, so
+         * the next transient fault gets a full budget again. */
+        runtime->recovery_attempts = 0u;
+    }
 
     free(collected);
     free(reasoning);
