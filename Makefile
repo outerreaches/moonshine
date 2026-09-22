@@ -452,6 +452,13 @@ tests/test_mimo26_official.o: tests/test_mimo26_official.c \
 tests/test_mimo26_official: tests/test_mimo26_official.o \
 		mimo26_manifest.o mimo26_architecture.o k3_safetensors.o k3_json.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tools/mimo26_dump_ops.o: tools/mimo26_dump_ops.c \
+	mimo26_attention.h mimo26_ops.h mimo26_router.h
+tools/mimo26_dump_ops.o: CFLAGS += -fno-fast-math
+tools/mimo26_dump_ops: tools/mimo26_dump_ops.o mimo26_ops.o \
+		mimo26_router.o mimo26_attention.o mimo26_architecture.o \
+		k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 tools/mimo26_dump_rope.o: tools/mimo26_dump_rope.c \
 	mimo26_attention.h mimo26_ops.h
 tools/mimo26_dump_rope.o: CFLAGS += -fno-fast-math
@@ -798,7 +805,7 @@ test-mzg-transcoder:
 	PYTHONDONTWRITEBYTECODE=1 \
 		$(PYTHON) -m unittest -v tests/test_transcode_mzg.py
 
-test-mimo26-schema: tools/mimo26_dump_rope tests/test_mimo26_architecture \
+test-mimo26-schema: tools/mimo26_dump_rope tools/mimo26_dump_ops tests/test_mimo26_architecture \
 		tests/test_mimo26_manifest
 	./tests/test_mimo26_architecture
 	./tests/test_mimo26_manifest
@@ -808,6 +815,7 @@ test-mimo26-schema: tools/mimo26_dump_rope tests/test_mimo26_architecture \
 	./tests/test_mimo26_attention
 	./tests/test_mimo26_kv
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/test_mimo26_rope_vs_torch.py
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/test_mimo26_ops_vs_reference.py
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/test_mimo26_audit.py
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/test_mimo26_tokenizer.py
 
