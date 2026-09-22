@@ -226,6 +226,130 @@ static mimo26_weights_status load_f32(const k3_st_model *model,
     return MIMO26_WEIGHTS_OK;
 }
 
+/*
+ * Read the fused QKV projection, dequantize, and de-interleave it.
+ *
+ * The checkpoint stores fused QKV as kv_heads contiguous groups, each ordered
+ * [Q_g | K_g | V_g], not as [all Q | all K | all V]. Per group Q has
+ * (heads/kv_heads)*qk_dim rows, K has qk_dim, V has v_dim. The shipped
+ * modeling_mimo_v2.py splits it the plain way, which scrambles every head --
+ * confirmed against vLLM's _shard_fp8_qkv_proj, which documents the real
+ * layout.
+ *
+ * Scale indexing differs by layer kind. SWA groups are 1856 rows = 14.5
+ * blocks, so groups straddle block boundaries and the grid is flat
+ * (8 x 14.5 = 116 = ceil(14848/128)). Global groups are 3392 rows = 26.5
+ * blocks and the grid is 108 rather than 106, which is per-group padding to
+ * 27 blocks. Using flat indexing on a global layer misassociates the scales
+ * of every group after the first.
+ */
+static mimo26_weights_status load_fused_qkv(const k3_st_model *model,
+                                            const char *name, uint64_t rows,
+                                            uint64_t cols, size_t heads,
+                                            size_t kv_heads, size_t qk_dim,
+                                            size_t v_dim, uint16_t **out,
+                                            size_t *bytes, char *error,
+                                            size_t error_size)
+{
+    const uint64_t shape[2] = {rows, cols};
+    mimo26_weights_status status = MIMO26_WEIGHTS_OK;
+    const k3_st_tensor *tensor = require(model, name, K3_ST_DTYPE_F8_E4M3, 2u,
+                                         shape, error, error_size, &status);
+    if (tensor == NULL) {
+        return status;
+    }
+    char scale_name[320];
+    snprintf(scale_name, sizeof scale_name, "%s_scale_inv", name);
+    const k3_st_tensor *scale_tensor = k3_st_find(model, scale_name);
+    if (scale_tensor == NULL || scale_tensor->dtype != K3_ST_DTYPE_F32 ||
+        scale_tensor->ndim != 2u) {
+        return fail(error, error_size, MIMO26_WEIGHTS_UNEXPECTED_LAYOUT,
+                    "%s missing or not a 2-D F32 grid", scale_name);
+    }
+
+    const size_t q_per_group = (heads / kv_heads) * qk_dim;
+    const size_t rows_per_group = q_per_group + qk_dim + v_dim;
+    if (rows_per_group * kv_heads != (size_t)rows) {
+        return fail(error, error_size, MIMO26_WEIGHTS_UNEXPECTED_LAYOUT,
+                    "%s: %llu rows is not %zu groups of %zu", name,
+                    (unsigned long long)rows, kv_heads, rows_per_group);
+    }
+    const size_t scale_rows = (size_t)scale_tensor->shape[0];
+    const size_t scale_stride = (size_t)scale_tensor->shape[1];
+    const bool grouped_scales = (scale_rows % kv_heads) == 0u &&
+                                (scale_rows / kv_heads) * MIMO26_FP8_BLOCK >=
+                                    rows_per_group;
+    const size_t scale_per_group = grouped_scales ? scale_rows / kv_heads : 0u;
+
+    void *codes = NULL;
+    void *scales = NULL;
+    status = read_tensor(model, tensor, &codes, error, error_size);
+    if (status != MIMO26_WEIGHTS_OK) {
+        return status;
+    }
+    status = read_tensor(model, scale_tensor, &scales, error, error_size);
+    if (status != MIMO26_WEIGHTS_OK) {
+        free(codes);
+        return status;
+    }
+    uint16_t *decoded = malloc((size_t)rows * (size_t)cols * sizeof *decoded);
+    if (decoded == NULL) {
+        free(codes);
+        free(scales);
+        return fail(error, error_size, MIMO26_WEIGHTS_OUT_OF_MEMORY,
+                    "out of memory dequantizing %s", name);
+    }
+
+    const uint8_t *code_bytes = codes;
+    const float *scale_values = scales;
+    /* Destination offsets for the de-interleaved [Q | K | V] layout. */
+    const size_t q_total = heads * qk_dim;
+    const size_t k_total = kv_heads * qk_dim;
+    for (size_t g = 0; g < kv_heads; g++) {
+        for (size_t r = 0; r < rows_per_group; r++) {
+            const size_t source_row = g * rows_per_group + r;
+            size_t scale_row;
+            if (grouped_scales) {
+                scale_row = g * scale_per_group + r / MIMO26_FP8_BLOCK;
+            } else {
+                scale_row = source_row / MIMO26_FP8_BLOCK;
+            }
+            size_t destination_row;
+            if (r < q_per_group) {
+                destination_row = g * q_per_group + r;
+            } else if (r < q_per_group + qk_dim) {
+                destination_row = q_total + g * qk_dim + (r - q_per_group);
+            } else {
+                destination_row = q_total + k_total + g * v_dim +
+                                  (r - q_per_group - qk_dim);
+            }
+            const uint8_t *source = code_bytes + source_row * (size_t)cols;
+            uint16_t *target = decoded + destination_row * (size_t)cols;
+            for (size_t c = 0; c < (size_t)cols; c++) {
+                float value = 0.0f;
+                if (glm53_fp8_e4m3fn_decode(source[c], &value) !=
+                    GLM53_FP8_ORACLE_OK) {
+                    free(codes);
+                    free(scales);
+                    free(decoded);
+                    return fail(error, error_size,
+                                MIMO26_WEIGHTS_NONFINITE_VALUE,
+                                "%s: FP8 NaN at row %zu", name, source_row);
+                }
+                const float scale =
+                    scale_values[scale_row * scale_stride +
+                                 c / MIMO26_FP8_BLOCK];
+                target[c] = mimo26_f32_to_bf16(value * scale);
+            }
+        }
+    }
+    free(codes);
+    free(scales);
+    *out = decoded;
+    *bytes += (size_t)rows * (size_t)cols * sizeof *decoded;
+    return MIMO26_WEIGHTS_OK;
+}
+
 /* Read an F8_E4M3 matrix plus its scale grid and dequantize to BF16. */
 static mimo26_weights_status load_fp8(const k3_st_model *model,
                                       const char *name, uint64_t rows,
@@ -354,9 +478,11 @@ mimo26_weights_status mimo26_layer_weights_load(
 
     snprintf(name, sizeof name, "model.layers.%u.self_attn.qkv_proj.weight",
              layer);
-    status = load_fp8(model, name, weights->attention.qkv_width,
-                      MIMO26_HIDDEN_SIZE, &weights->qkv_proj, &weights->bytes,
-                      error, error_size);
+    status = load_fused_qkv(model, name, weights->attention.qkv_width,
+                            MIMO26_HIDDEN_SIZE, MIMO26_QUERY_HEADS,
+                            weights->attention.kv_heads, MIMO26_QK_HEAD_DIM,
+                            MIMO26_V_HEAD_DIM, &weights->qkv_proj,
+                            &weights->bytes, error, error_size);
     if (status != MIMO26_WEIGHTS_OK) { goto failed; }
 
     {

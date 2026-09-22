@@ -135,6 +135,71 @@ class Checkpoint:
                                        axis=0), 128, axis=1)[:rows, :cols]
         return (values * expanded).astype(np.float32)
 
+    def fp8_qkv(self, name, num_heads, num_kv_heads, head_dim, v_head_dim,
+                grouped_scales=False):
+        """Dequantize a fused QKV projection and de-interleave its rows.
+
+        The checkpoint stores the fused QKV as num_kv_heads contiguous groups,
+        each ordered [Q_g | K_g | V_g], NOT as [all Q | all K | all V]. Per
+        group Q has (num_heads/num_kv_heads)*head_dim rows, K has head_dim and
+        V has v_head_dim. The shipped modeling_mimo_v2.py splits it the plain
+        way, which scrambles every head. Confirmed against vLLM's
+        _shard_fp8_qkv_proj docstring.
+
+        Scale indexing is kept separate because the two layer kinds differ.
+        SWA groups are 1856 rows = 14.5 blocks, so groups straddle block
+        boundaries and the grid is flat (8 x 14.5 = 116, exactly
+        ceil(14848/128)). Global groups are 3392 rows = 26.5 blocks and the
+        grid is 108 rather than the 106 a flat layout needs, which is
+        consistent with per-group padding to 27 blocks. grouped_scales selects
+        that reading.
+        """
+        blob, dtype, shape = self.raw(name)
+        if dtype != "F8_E4M3":
+            raise RuntimeError(f"{name} is {dtype}, expected F8_E4M3")
+        codes = np.frombuffer(blob, dtype=np.uint8).reshape(shape)
+        scale_blob, scale_dtype, scale_shape = self.raw(name + "_scale_inv")
+        scales = np.frombuffer(scale_blob, dtype=np.float32).reshape(scale_shape)
+
+        rows, cols = shape
+        q_per = (num_heads // num_kv_heads) * head_dim
+        rows_per_group = q_per + head_dim + v_head_dim
+        if rows_per_group * num_kv_heads != rows:
+            raise RuntimeError(f"{name}: {rows} rows is not {num_kv_heads} x "
+                               f"{rows_per_group}")
+
+        table = e4m3_table()
+        values = table[codes]
+        if np.isnan(values).any():
+            raise RuntimeError(f"{name} contains an FP8 NaN encoding")
+
+        dequant = np.empty((rows, cols), dtype=np.float32)
+        if grouped_scales and scale_shape[0] % num_kv_heads == 0:
+            per_group = scale_shape[0] // num_kv_heads
+            for g in range(num_kv_heads):
+                r0 = g * rows_per_group
+                grid = scales[g * per_group:(g + 1) * per_group]
+                expanded = np.repeat(np.repeat(grid, 128, axis=0), 128,
+                                     axis=1)[:rows_per_group, :cols]
+                dequant[r0:r0 + rows_per_group] = (
+                    values[r0:r0 + rows_per_group] * expanded)
+        else:
+            block_rows = (rows + 127) // 128
+            block_cols = (cols + 127) // 128
+            expanded = np.repeat(np.repeat(scales[:block_rows, :block_cols],
+                                           128, axis=0), 128,
+                                 axis=1)[:rows, :cols]
+            dequant = (values * expanded).astype(np.float32)
+
+        qs, ks, vs = [], [], []
+        for g in range(num_kv_heads):
+            r0 = g * rows_per_group
+            block = dequant[r0:r0 + rows_per_group]
+            qs.append(block[:q_per])
+            ks.append(block[q_per:q_per + head_dim])
+            vs.append(block[q_per + head_dim:])
+        return np.concatenate(qs + ks + vs, axis=0).astype(np.float32)
+
     def mxfp4_expert(self, prefix):
         """Dequantize one packed expert projection plus its E8M0 scales."""
         blob, dtype, shape = self.raw(prefix + ".weight")

@@ -123,13 +123,31 @@ def main():
                 config.hidden_size, eps=config.layernorm_epsilon).eval()
             attention = reference.MiMoV2Attention(
                 config, is_swa, layer, projection_layout="fused_qkv").eval()
+            if os.environ.get("MIMO26_ROPE_FULL") == "1":
+                # Rotate all 192 coordinates rather than the first 64. Needs a
+                # matching table, built below.
+                attention.rope_dim = attention.head_dim
             with torch.no_grad():
                 input_norm.weight.data = to_bf16(
                     checkpoint.bf16(f"{prefix}.input_layernorm.weight"))
                 post_norm.weight.data = to_bf16(
                     checkpoint.bf16(f"{prefix}.post_attention_layernorm.weight"))
-                attention.qkv_proj.weight.data = to_bf16(
-                    checkpoint.fp8_block(f"{prefix}.self_attn.qkv_proj.weight"))
+                nh = (config.swa_num_attention_heads if is_swa
+                      else config.num_attention_heads)
+                nkv = (config.swa_num_key_value_heads if is_swa
+                       else config.num_key_value_heads)
+                hd = config.swa_head_dim if is_swa else config.head_dim
+                vd = (config.swa_v_head_dim if is_swa
+                      else getattr(config, "v_head_dim", hd))
+                if os.environ.get("MIMO26_FLAT_QKV") == "1":
+                    qkvw = checkpoint.fp8_block(
+                        f"{prefix}.self_attn.qkv_proj.weight")
+                else:
+                    qkvw = checkpoint.fp8_qkv(
+                        f"{prefix}.self_attn.qkv_proj.weight", nh, nkv, hd, vd,
+                        grouped_scales=(os.environ.get(
+                            "MIMO26_GROUPED_SCALES") == "1"))
+                attention.qkv_proj.weight.data = to_bf16(qkvw)
                 attention.o_proj.weight.data = to_bf16(
                     checkpoint.bf16(f"{prefix}.self_attn.o_proj.weight"))
                 if attention.attention_sink_bias is not None:
@@ -149,7 +167,22 @@ def main():
                 attention.attention_sink_bias.data = torch.full_like(
                     attention.attention_sink_bias.data, -1.0e4)
 
-            rotary = reference.MiMoV2RotaryEmbedding(config, is_swa=is_swa)
+            if os.environ.get("MIMO26_ROPE_FULL") == "1":
+                cfg_full = MiMoV2Config(
+                    **json.loads((root / "config.json").read_text()))
+                cfg_full.rope_parameters = dict(cfg_full.rope_parameters)
+                cfg_full.rope_parameters["partial_rotary_factor"] = 1.0
+                cfg_full.partial_rotary_factor = 1.0
+                cfg_full._attn_implementation = "eager"
+                rope_cfg = cfg_full
+            else:
+                rope_cfg = config
+            rope_swa = is_swa
+            if os.environ.get("MIMO26_THETA_GLOBAL") == "1":
+                rope_swa = False          # 1e7 everywhere
+            elif os.environ.get("MIMO26_THETA_SWA") == "1":
+                rope_swa = True           # 1e4 everywhere
+            rotary = reference.MiMoV2RotaryEmbedding(rope_cfg, is_swa=rope_swa)
             position_embeddings = rotary(hidden, position_ids)
 
             if os.environ.get("MIMO26_ROPE_TAIL") == "1":
@@ -203,6 +236,16 @@ def main():
                     normed, position_embeddings=position_embeddings,
                     attention_mask=mask, past_key_values=None,
                     cache_position=position_ids[0], position_ids=position_ids)
+            if os.environ.get("MIMO26_POS_SIM") == "1":
+                # If positions become mutually indistinguishable, the model has
+                # lost token identity and every prediction collapses.
+                h = hidden[0].float()
+                hn = torch.nn.functional.normalize(h, dim=-1)
+                sim = hn @ hn.T
+                off = sim[~torch.eye(h.shape[0], dtype=bool)]
+                print(f"      pos-sim layer {layer:2d}: mean {float(off.mean()):+.4f} "
+                      f"min {float(off.min()):+.4f}  resid_rms "
+                      f"{float(h.pow(2).mean().sqrt()):8.3f}", flush=True)
             if os.environ.get("MIMO26_QK_STATS") == "1":
                 # Reproduce the pre-softmax scores to see their spread. A
                 # uniform softmax means the scores barely differ.
@@ -263,6 +306,13 @@ def main():
                         np.ascontiguousarray(checkpoint.f32(
                             f"{prefix}.mlp.gate.e_score_correction_bias"))
                     ).to(torch.float32)
+                    if os.environ.get("MIMO26_ROUTER_BF16") == "1":
+                        # vLLM honours moe_router_dtype (bfloat16) for both the
+                        # gate projection and the correction bias; the shipped
+                        # reference hardcodes float32.
+                        gate.weight.data = gate.weight.data.to(torch.bfloat16)
+                        gate.e_score_correction_bias.data = (
+                            gate.e_score_correction_bias.data.to(torch.bfloat16))
                     topk_indices, _ = gate(normed)
                 routed = sorted({int(x) for x in topk_indices.flatten().tolist()})
                 experts = [None] * config.n_routed_experts
@@ -272,10 +322,18 @@ def main():
                             config,
                             intermediate_size=config.moe_intermediate_size).eval()
                         base = f"{prefix}.mlp.experts.{expert_id}"
-                        mlp.gate_proj.weight.data = to_bf16(
-                            checkpoint.mxfp4_expert(f"{base}.gate_proj"))
-                        mlp.up_proj.weight.data = to_bf16(
-                            checkpoint.mxfp4_expert(f"{base}.up_proj"))
+                        if os.environ.get("MIMO26_SWAP_GATE_UP") == "1":
+                            # silu is applied to gate; if the checkpoint's
+                            # naming is inverted, silu lands on the wrong one.
+                            mlp.gate_proj.weight.data = to_bf16(
+                                checkpoint.mxfp4_expert(f"{base}.up_proj"))
+                            mlp.up_proj.weight.data = to_bf16(
+                                checkpoint.mxfp4_expert(f"{base}.gate_proj"))
+                        else:
+                            mlp.gate_proj.weight.data = to_bf16(
+                                checkpoint.mxfp4_expert(f"{base}.gate_proj"))
+                            mlp.up_proj.weight.data = to_bf16(
+                                checkpoint.mxfp4_expert(f"{base}.up_proj"))
                         mlp.down_proj.weight.data = to_bf16(
                             checkpoint.mxfp4_expert(f"{base}.down_proj"))
                         experts[expert_id] = mlp
@@ -287,6 +345,9 @@ def main():
                 moe.eval()
                 with torch.no_grad():
                     mlp_out = moe(normed)
+                    skip_layers = os.environ.get("MIMO26_SKIP_MOE_LAYERS", "")
+                    if skip_layers and str(layer) in skip_layers.split(","):
+                        mlp_out = torch.zeros_like(mlp_out)
                     if os.environ.get("MIMO26_SKIP_MOE") == "1":
                         # Zero the MoE contribution. If ranks improve, the
                         # expert path is actively harmful; if they collapse,
