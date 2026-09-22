@@ -113,6 +113,62 @@ not 127 and not 129. Positions 127/128/129 and 255/256/257 are the boundary
 cases any window test must cover, because each sits on a different side of a
 wrap or an eviction.
 
+## RoPE and attention arithmetic
+
+Implemented in `mimo26_attention.{c,h}`, tested by
+`tests/test_mimo26_attention.c` and cross-checked against torch by
+`tests/test_mimo26_rope_vs_torch.py`, which reaches **bit-exact** agreement on
+both the cos/sin tables and the rotated output across 11 positions from 0 to
+1,048,575.
+
+| Item | Status | Value |
+| --- | --- | --- |
+| `inv_freq` precision | SETTLED | **F32**, matching `1/(theta**(arange(0,64,2)/64))` |
+| Angle product | SETTLED | F32 `position * inv_freq` |
+| cos/sin dtype | SETTLED | computed F32, then rounded to BF16 before use |
+| Rotation arithmetic | SETTLED | BF16: each product rounds, then the sum rounds |
+| Rotation convention | SETTLED | split-half (NeoX), not interleaved |
+| Score dtype | SETTLED | BF16 after scaling |
+| Max subtraction | SETTLED | explicit, in BF16, before the softmax |
+| Softmax | SETTLED | F32, then probabilities round to BF16 |
+| Sink probability | SETTLED | computed, then **discarded** |
+| Output | SETTLED | F32 accumulation, one BF16 rounding |
+
+**Compute `inv_freq` in F32, not double.** Double is *more accurate* and
+therefore wrong here: the reference's F32 `inv_freq` carries up to 6.4e-8
+relative error, which the position multiplies. Using double instead broke
+agreement at long positions, and switching to F32 made the tables bit-exact.
+
+**Long-context RoPE is ill-conditioned, and this bounds useful context.**
+Because the angle error scales with position, the absolute error in cos and
+sin grows accordingly:
+
+| Position | Angle error | cos error | vs one BF16 ulp (3.9e-3) |
+| ---: | ---: | ---: | --- |
+| 1,024 | 1.8e-5 rad | 4.3e-6 | negligible |
+| 65,535 | 1.4e-3 rad | 8.8e-4 | approaching |
+| 1,048,575 | 2.5e-2 rad | 8.1e-3 | **2x over** |
+
+Those figures are for an F32-versus-double `inv_freq` difference, but the same
+amplification applies to *any* last-ulp difference in `inv_freq` or in the
+platform's `cos`/`sin`. So exact parity at extreme positions requires a
+bit-identical `inv_freq` and a bit-identical trig implementation — not
+something to assume across platforms. This is an independent argument for
+qualifying context well below the advertised 1M, separate from memory and
+latency, and it is why the context ladder should carry a parity check at each
+rung rather than only a retrieval check.
+
+**The rotation rounds three times.** `(q * cos) + (rotate_half(q) * sin)` has
+every operand in BF16, so each product rounds and then the sum rounds.
+Accumulating in F32 and rounding once left 21 of 192 coordinates differing;
+matching the reference brought it to zero.
+
+**The sink's probability mass is discarded.** Its logit is appended before the
+softmax and its column is dropped after, so the surviving probabilities
+deliberately sum to less than one and the output is a partial weighted sum. A
+dominant sink drives the output toward zero, which the test asserts. Treating
+the sink as a cached token, or renormalizing after dropping it, are both wrong.
+
 ## Routing
 
 | Item | Status | Value |
@@ -237,11 +293,10 @@ fixtures are not evidence that tool execution works.
 
 ## Open items blocking M1 exit
 
-1. Attention primitives: the 192^-0.5 scale, partial RoPE on 64 coordinates,
-   the pre-cache 0.707 V scale and the per-head SWA sink logit are specified
-   above but not yet implemented or tested. This is the last implementation
-   gap in M1.
-2. The independent full-model reference path. An opaque chat API cannot
+1. The independent full-model reference path. An opaque chat API cannot
    establish logit, route or precision parity, and generic HF loading is not
    assumed to work since the reference modeling code carries no packed-expert
    dequantization. Needs a decision, not more code.
+
+Every operator-level item is now settled. What remains is composition: M2's
+transactional KV, and M3's layer assembly against captured inputs.

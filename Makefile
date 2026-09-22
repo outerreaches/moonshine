@@ -62,7 +62,8 @@ MIMO26_CPU_TESTS := \
 	tests/test_mimo26_manifest \
 	tests/test_mimo26_fp8 \
 	tests/test_mimo26_router \
-	tests/test_mimo26_ops
+	tests/test_mimo26_ops \
+	tests/test_mimo26_attention
 
 GLM53_CPU_TESTS := \
 	tests/test_glm53_arch_math \
@@ -450,6 +451,22 @@ tests/test_mimo26_official.o: tests/test_mimo26_official.c \
 tests/test_mimo26_official: tests/test_mimo26_official.o \
 		mimo26_manifest.o mimo26_architecture.o k3_safetensors.o k3_json.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tools/mimo26_dump_rope.o: tools/mimo26_dump_rope.c \
+	mimo26_attention.h mimo26_ops.h
+tools/mimo26_dump_rope.o: CFLAGS += -fno-fast-math
+tools/mimo26_dump_rope: tools/mimo26_dump_rope.o mimo26_attention.o \
+		mimo26_ops.o mimo26_architecture.o k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+mimo26_attention.o: mimo26_attention.c mimo26_attention.h \
+	mimo26_architecture.h mimo26_ops.h
+mimo26_attention.o: CFLAGS += -fno-fast-math
+tests/test_mimo26_attention.o: tests/test_mimo26_attention.c \
+	mimo26_attention.h mimo26_ops.h
+tests/test_mimo26_attention.o: CFLAGS += -fno-fast-math
+tests/test_mimo26_attention: tests/test_mimo26_attention.o \
+		mimo26_attention.o mimo26_ops.o mimo26_architecture.o \
+		k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 mimo26_ops.o: mimo26_ops.c mimo26_ops.h
 mimo26_ops.o: CFLAGS += -fno-fast-math
 tests/test_mimo26_ops.o: tests/test_mimo26_ops.c mimo26_ops.h \
@@ -772,13 +789,15 @@ test-mzg-transcoder:
 	PYTHONDONTWRITEBYTECODE=1 \
 		$(PYTHON) -m unittest -v tests/test_transcode_mzg.py
 
-test-mimo26-schema: tests/test_mimo26_architecture \
+test-mimo26-schema: tools/mimo26_dump_rope tests/test_mimo26_architecture \
 		tests/test_mimo26_manifest
 	./tests/test_mimo26_architecture
 	./tests/test_mimo26_manifest
 	./tests/test_mimo26_fp8
 	./tests/test_mimo26_router
 	./tests/test_mimo26_ops
+	./tests/test_mimo26_attention
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/test_mimo26_rope_vs_torch.py
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/test_mimo26_audit.py
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/test_mimo26_tokenizer.py
 
