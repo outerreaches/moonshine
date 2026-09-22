@@ -123,6 +123,30 @@ bool mimo26_rocm_attention_decode(void *out, const void *query,
                                   void *stream);
 
 /*
+ * Split a fused QKV projection output into per-head Q, K and V, scaling V by
+ * 0.707 on the way so a cache downstream holds pre-scaled V -- as the
+ * reference does. Layout in is [q | k | v] with q = 64*192, k = kv*192,
+ * v = kv*128.
+ */
+bool mimo26_rocm_split_qkv(void *q, void *k, void *v, const void *fused,
+                           uint32_t kv_heads, void *stream);
+
+/*
+ * Rotate the first 64 coordinates of each 192-wide head in place, split-half
+ * (NeoX), leaving the other 128 untouched.
+ *
+ * The cos/sin tables are built on the HOST by mimo26_rope_table and uploaded.
+ * They need powf, cosf and sinf, and host and device libm disagree in the
+ * last ulp, so computing them on device would import that difference into
+ * every rotated coordinate for nothing -- the tables are 64 entries and are
+ * built once per position. Keeping them on the host is what lets the rotation
+ * itself be bit-exact.
+ */
+bool mimo26_rocm_rope_apply(void *heads, const void *cos_table,
+                            const void *sin_table, uint32_t head_count,
+                            void *stream);
+
+/*
  * Run only the score pass, leaving the raw per-slot scores in scratch:
  * -INFINITY for a masked slot, the BF16-rounded scaled dot product for a
  * visible one, and the sink logit at index slot_total when sink_bias is

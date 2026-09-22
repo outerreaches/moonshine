@@ -402,6 +402,75 @@ __global__ static void mimo26_attention_decode_kernel(
     }
 }
 
+
+#define MIMO26_ROCM_ROPE_DIM 64u
+#define MIMO26_ROCM_ROPE_PAIRS (MIMO26_ROCM_ROPE_DIM / 2u)
+#define MIMO26_ROCM_VALUE_SCALE 0.707f
+
+/*
+ * Split the fused QKV output into per-head Q, K and V, scaling V on the way
+ * so that anything cached downstream is already pre-scaled -- which is what
+ * the reference does, and getting it wrong would make cached and fresh V
+ * disagree.
+ */
+__global__ static void mimo26_split_qkv_kernel(uint16_t *q, uint16_t *k,
+                                               uint16_t *v,
+                                               const uint16_t *fused,
+                                               uint32_t kv_heads)
+{
+    const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t q_total = MIMO26_ROCM_QUERY_HEADS * MIMO26_ROCM_QK_DIM;
+    const uint32_t k_total = kv_heads * MIMO26_ROCM_QK_DIM;
+    const uint32_t v_total = kv_heads * MIMO26_ROCM_V_DIM;
+    if (index < q_total) {
+        q[index] = fused[index];
+    } else if (index < q_total + k_total) {
+        k[index - q_total] = fused[index];
+    } else if (index < q_total + k_total + v_total) {
+        const uint32_t offset = index - q_total - k_total;
+        v[offset] = mimo26_f32_to_bf16_d(
+            mimo26_bf16_to_f32_d(fused[index]) * MIMO26_ROCM_VALUE_SCALE);
+    }
+}
+
+/*
+ * Rotate the first 64 coordinates of each head, leaving the other 128 alone.
+ * Split-half (NeoX):
+ *   out[j]    = x[j]*cos[j]    - x[j+32]*sin[j]
+ *   out[j+32] = x[j+32]*cos[j] + x[j]*sin[j]
+ *
+ * Three roundings, as the CPU does: each product rounds to BF16, and so does
+ * the sum. The cos/sin tables are built on the host -- they need powf, cosf
+ * and sinf, and host and device libm differ in the last ulp, so computing
+ * them here would import that difference into every rotated coordinate for
+ * no benefit. Built once per position, they are tiny.
+ */
+__global__ static void mimo26_rope_apply_kernel(uint16_t *heads,
+                                                const uint16_t *cos_table,
+                                                const uint16_t *sin_table,
+                                                uint32_t head_count)
+{
+    const uint32_t head = blockIdx.x;
+    if (head >= head_count) {
+        return;
+    }
+    uint16_t *vector = heads + (uint64_t)head * MIMO26_ROCM_QK_DIM;
+    for (uint32_t j = threadIdx.x; j < MIMO26_ROCM_ROPE_PAIRS;
+         j += blockDim.x) {
+        const float low = mimo26_bf16_to_f32_d(vector[j]);
+        const float high =
+            mimo26_bf16_to_f32_d(vector[j + MIMO26_ROCM_ROPE_PAIRS]);
+        const float c = mimo26_bf16_to_f32_d(cos_table[j]);
+        const float s = mimo26_bf16_to_f32_d(sin_table[j]);
+        const float lc = mimo26_bf16_to_f32_d(mimo26_f32_to_bf16_d(low * c));
+        const float hs = mimo26_bf16_to_f32_d(mimo26_f32_to_bf16_d(high * s));
+        const float hc = mimo26_bf16_to_f32_d(mimo26_f32_to_bf16_d(high * c));
+        const float ls = mimo26_bf16_to_f32_d(mimo26_f32_to_bf16_d(low * s));
+        vector[j] = mimo26_f32_to_bf16_d(lc - hs);
+        vector[j + MIMO26_ROCM_ROPE_PAIRS] = mimo26_f32_to_bf16_d(hc + ls);
+    }
+}
+
 static inline uint32_t blocks_for(uint64_t count)
 {
     return (uint32_t)((count + MIMO26_ROCM_THREADS - 1u) /
@@ -601,6 +670,38 @@ bool mimo26_rocm_attention_scores(const void *query, const void *keys,
                             current_keys, sink_bias, scratch, kv_heads,
                             kv_groups, window, history, first_position,
                             query_position, scale, true, stream);
+}
+
+bool mimo26_rocm_split_qkv(void *q, void *k, void *v, const void *fused,
+                           uint32_t kv_heads, void *stream)
+{
+    if (q == NULL || k == NULL || v == NULL || fused == NULL ||
+        kv_heads == 0u) {
+        return false;
+    }
+    const uint32_t total = MIMO26_ROCM_QUERY_HEADS * MIMO26_ROCM_QK_DIM +
+                           kv_heads * MIMO26_ROCM_QK_DIM +
+                           kv_heads * MIMO26_ROCM_V_DIM;
+    hipLaunchKernelGGL(mimo26_split_qkv_kernel, dim3(blocks_for(total)),
+                       dim3(MIMO26_ROCM_THREADS), 0, (hipStream_t)stream,
+                       (uint16_t *)q, (uint16_t *)k, (uint16_t *)v,
+                       (const uint16_t *)fused, kv_heads);
+    return hipGetLastError() == hipSuccess;
+}
+
+bool mimo26_rocm_rope_apply(void *heads, const void *cos_table,
+                            const void *sin_table, uint32_t head_count,
+                            void *stream)
+{
+    if (heads == NULL || cos_table == NULL || sin_table == NULL ||
+        head_count == 0u) {
+        return false;
+    }
+    hipLaunchKernelGGL(mimo26_rope_apply_kernel, dim3(head_count),
+                       dim3(MIMO26_ROCM_ROPE_PAIRS), 0, (hipStream_t)stream,
+                       (uint16_t *)heads, (const uint16_t *)cos_table,
+                       (const uint16_t *)sin_table, head_count);
+    return hipGetLastError() == hipSuccess;
 }
 
 }  /* extern "C" */

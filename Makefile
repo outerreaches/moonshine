@@ -946,6 +946,11 @@ mimo26-gpu-attention: tests/test_mimo26_gpu_attention
 mimo26-gpu-ops: tests/test_mimo26_gpu_ops
 	./tests/test_mimo26_gpu_ops
 
+tools/mimo26_gpu_bench.o: tools/mimo26_gpu_bench.cu k3_rocm_ops.h
+	$(HIPCC) $(HIPFLAGS) -I. -c -o $@ $<
+tools/mimo26_gpu_bench: tools/mimo26_gpu_bench.o k3_rocm_ops.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+
 # The whole GPU gate set, in dependency order.
 mimo26-gpu: mimo26-gpu-ops mimo26-gpu-attention mimo26-gpu-mxfp4
 

@@ -11,6 +11,7 @@ core.*
 /tools/mimo26_dump_weights
 /tools/mimo26_run
 /tools/mimo26_eval
+/tools/mimo26_gpu_bench
 mimo26-eval.jsonl
 mimo26-eval-tokens.txt
 /tools/transcode_mzg2_layer
