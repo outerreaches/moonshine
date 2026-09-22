@@ -324,3 +324,73 @@ rather than materialize. That is the same constraint the production path has.
 2. M3 layer parity: the C side has operators, attention and KV but no weight
    loading or layer composition yet, so there is nothing to compare against
    the layer fixtures the reference tool can now produce.
+
+## Where the contract stops being bit-exact
+
+Everything above is a statement about one backend's arithmetic. Two
+backends exist — the CPU reference and the GPU worker that serves — and
+they do **not** agree bit for bit. Two boundaries explain all of it, and
+both were measured rather than assumed.
+
+### libm
+
+Device `expf` and host `expf` are different implementations. Over the range
+a max-subtracted softmax produces they disagree by 1 ulp on **6.26%** of
+inputs (`docs/reference-extracts/expf-host-vs-device.hip` reproduces it).
+
+That reaches attention through the softmax and the router through sigmoid.
+It cannot be engineered away while each side calls its own library, so those
+two get a stated bound instead of an equality. Everything not downstream of
+a transcendental is held exactly.
+
+Note the boundary is where the difference *survives*, not where the call
+occurs: the SwiGLU product also calls `expf` and is still bit-exact,
+because rounding the activation to BF16 absorbs the last ulp.
+
+### Reduction order
+
+Fixable, and fixed where it matters. Three reductions are pinned to the
+CPU's ascending order rather than tree-reduced:
+
+- **the softmax denominator**, summed by one thread in slot order
+- **the router's logits**, whose row cancels heavily — tree reduction put
+  the mixing weights 4.5e-04 from the CPU, about 3800x libm's last ulp
+- **RMSNorm's sum of squares**
+
+RMSNorm is the instructive one and is worth stating plainly, because it
+contradicts an intuition. That sum is *well conditioned* — every term is a
+square — and the kernel **passed a 12,288-element bit-exactness check
+against the CPU while tree-reducing**. It only became a fault in
+composition: one differing ulp in the reciprocal moves a few normalized
+values by a BF16 step, and the router's cancelling dot product turns that
+into the 4.5e-04 above, which then reaches every element of the
+expert-weighted sum.
+
+A primitive can be measurably exact on its own inputs and still be the
+cause downstream. That is the argument for gating composition separately
+from the parts, not just for pinning reductions.
+
+### Where it is deliberately *not* pinned
+
+`lm_head` uses a tree reduction. The ordered sum was kept there by analogy
+with the router and that was a mistake: its input is the final norm of a
+hidden state carrying 48 layers of bounded cross-backend difference, so the
+input error dominates and the association contributes little. The ordered
+version cannot produce exact logits however it sums, because what it sums is
+not exact — it was costing 23 ms against 6 for a property it could not
+deliver, about 9% of a token.
+
+What the qualification gate requires is determinism *within* a backend, and
+a fixed-order tree is exactly as deterministic as a sequential sum.
+`MIMO26_GPU_EXACT_HEAD` restores the ordered form for anyone localizing a
+divergence.
+
+### What is therefore guaranteed
+
+- **Within a backend**: bit-identical logits for the same input, checked by
+  both qualification harnesses on the full 152,576-entry vector, including
+  after reset, after rollback and replay, and across expert-cache sizes.
+- **Across backends**: the same tokens in practice, with bounded per-element
+  difference. Not bit equality, and no test claims it.
+- **Prefill against decode**: equal. Bit-exact at the attention level; at
+  the layer level within the bound the decode path already carries.

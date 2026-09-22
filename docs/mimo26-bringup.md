@@ -131,7 +131,9 @@ checks the payload sum against it rather than against file sizes.
 `save_format` is treated as part of the artifact identity: a checkpoint
 claiming anything but `mxfp4` is rejected rather than probed.
 
-## Implemented so far
+## What is here
+
+### Schema and artifact
 
 - `mimo26_architecture.{c,h}` — payload-free schema: layer kinds from the
   explicit pattern, per-kind tensor contracts, exact group coverage.
@@ -140,30 +142,48 @@ claiming anything but `mxfp4` is rejected rather than probed.
 - `k3_st_model_open_paths` — additive opener taking an explicit shard list,
   since MiMo's filenames defeat the numbered family. Existing openers are
   unchanged.
-- `tests/test_mimo26_architecture.c`, `tests/test_mimo26_manifest.c` —
-  synthetic positive and negative cases.
-- `tests/test_mimo26_official.c` — end-to-end against a real checkpoint.
-- `tests/audit_mimo26_checkpoint.py` — full read-only metadata audit with
-  machine-readable status; `tests/test_mimo26_audit.py` injects one
-  synthesized fault per check.
-- `tests/fixtures/mimo26_tokenizer_v1.json` with
-  `tests/generate_mimo26_tokenizer_fixture.py` and
-  `tests/test_mimo26_tokenizer.py` — pinned token ids and rendered turns,
-  produced without `trust_remote_code`.
-- `tools/mimo26_budget.py` — allocation, cache and KV ledger from measured
-  host memory.
+- `tests/audit_mimo26_checkpoint.py` — read-only metadata audit;
+  `tests/test_mimo26_audit.py` injects one synthesized fault per check.
 
-```
-make test-mimo26-schema                      # no checkpoint needed
-make test-mimo26-checkpoint MIMO26_ROOT=...  # header-only, read-only
-make mimo26-budget MIMO26_ROOT=...
-```
+### Numerics
 
-The audit and the C module encode the same contract independently, so they
-disagree loudly if either drifts. Both pass, and the C path independently
-reproduces the Python-derived figures: 382 main / 72,192 expert / 48 MTP /
-364 vision / 95 audio tensors, 149.8125 GiB of experts across 12,032 resolved
-expert identities, 8.2837 GiB of static text.
+- `mimo26_ops`, `mimo26_router`, `mimo26_attention`, `mimo26_kv`,
+  `mimo26_weights` — the CPU contract, bit-exact against an independent
+  NumPy path over 121M dequantized values and against the reference's own
+  modules on real weights.
+- `mimo26_rocm_ops.{cu,h}` — MiMo's GPU primitives. Forked from
+  `k3_rocm_ops` only where the contracts genuinely differ, which is
+  measured rather than assumed: K3's RMSNorm rounds once where MiMo rounds
+  twice and differs on 3,197 of 12,288 elements. Where they agree the K3
+  kernel is reused, as with the MXFP4 GEMV, which matched on all 8,192
+  values checked.
+
+### Execution
+
+- `mimo26_layer`, `mimo26_worker` — the CPU reference worker.
+- `mimo26_rocm_layer.{cu,h}` — the GPU layer, decode and layer-major
+  prefill. Prefilling a chunk is gated as equal to decoding the same tokens
+  one at a time.
+- `mimo26_gpu_worker.{cu,h}` — the 48-layer GPU worker. Experts are cached
+  **packed**, admitted through `k3_expert_cache` and read through K3's
+  `io_uring` into mapped staging.
+
+### Serving
+
+- `mimo26_tokenizer.{c,h}` — byte-level BPE, chat template, tool rendering
+  and parsing, streaming decode that never emits partial UTF-8. Exact
+  against every in-scope pinned fixture.
+- `mimo26_server_slot.{c,h}` — admission, cancellation, deadlines, fault
+  quarantine, supervised restart, graceful drain. Pure logic with the clock
+  passed in, so the timing-dependent behaviours are actually testable.
+- `mimo26_server.cu` — `/health`, `/v1/models`, `/v1/chat/completions` with
+  SSE, tools, and reasoning separated from content.
+
+### Tools
+
+`tools/mimo26_run`, `mimo26_gpu_run`, `mimo26_eval`, `mimo26_gpu_bench`,
+`mimo26_context_gate`, `mimo26_server`, `mimo26_budget.py`, and
+`tests/soak_mimo26_server.py`.
 
 ## Memory budget
 
@@ -192,38 +212,137 @@ At an assumed ~5 GiB/s from the local SSD — unmeasured — a 0%-hit token cost
 4.68 GiB and ~936 ms, so ~1.07 tok/s; an 80% hit rate gives ~5.3 tok/s and 90%
 gives ~10.7. Arithmetic bounds recorded before results exist, not predictions.
 
+### What those bounds turned out to be worth
+
+Scored against measurement, because a bound recorded in advance is only
+useful if someone goes back and checks it.
+
+**Resident share against hit rate.** The warning above was the right
+warning and the numbers are now in: 144 slots per layer holds 6,768 of
+12,032 identities, **56% resident**, and yields a **92% hit rate**. Routing
+locality is high, so the two numbers diverge in the favourable direction —
+but they did have to be measured, and 56% would have been a poor guess for
+92%.
+
+**Throughput.** The projection was optimistic and the reason is worth
+keeping. It counted only the 4.68 GiB of expert traffic, and a whole token
+also reads **10.72 GB of BF16 projections** — the fused QKV and o_proj,
+which are more than double the expert term. Measured decode at a 92% hit
+rate is **5.7 tok/s**, against the ~10.7 the 90% line predicted. The
+arithmetic was not wrong; its inventory was incomplete.
+
+**Prefill.** Not modelled here at all, because at the time prefill was
+assumed to be decode. Going layer-major makes the projections a per-chunk
+cost rather than a per-token one, which is the single largest structural
+win found in this lane: 0.422 to 0.098 s/token.
+
 ## Status
 
-M0 through M3 are complete and M4 is qualified at the **worker** level. The
-48-layer CPU worker generates correct text: given "The quick brown fox
-jumps." twice plus "The quick brown fox" it continues with all 12 tokens
-right, and induction strengthens with repetition.
+Every milestone through M5 is qualified. MiMo V2.6 Flash serves an
+OpenAI-shaped text API on this host, on GPU, with tools, and the context
+ladder is walked to 8K.
 
-`make mimo26-qualify MIMO26_ROOT=...` passes 15/15 against the real
-checkpoint — determinism, rollback replay, reset, fault containment and
-cache-size independence, all bit-exact on the full 152,576-entry logit
-vector. `make mimo26-eval MIMO26_ROOT=...` runs the teacher-forced quality
-gate whose corpus and thresholds are frozen in `tests/mimo26_eval_spec.json`.
+### Correctness
+
+The model is right. Given "The quick brown fox jumps." twice plus "The quick
+brown fox" it continues with all 12 tokens correct, and induction
+strengthens with repetition. That took finding the fused-QKV layout, which
+is the trap documented above and worth reading before touching this lane.
+
+The held-out quality gate passes 7/7 against thresholds frozen before the
+run: mean log-prob **-1.73 nats**, top-1 **51.6%**, top-10 **92.8%**, median
+rank 1, no non-finite logits, no aborted steps.
+
+### Backends
+
+Two, and they agree. The CPU worker is the reference; the GPU worker is what
+serves. Cross-backend agreement is bounded rather than exact, and the
+boundary is measured rather than assumed: device and host `expf` differ by 1
+ulp on **6.26%** of inputs, so anything downstream of a transcendental gets
+a stated bound and everything else gets none. Reduction order is the other
+such boundary; three reductions are pinned to the CPU's order because they
+amplify, and `lm_head` deliberately is not, because its input already
+differs and the ordered sum cost 9% of a token for a property it could not
+deliver.
+
+    CPU worker    ~55 s/token      reference, qualified 15/15
+    GPU worker    0.176 s/token    ~200x, qualified 18/18
+
+### Performance
+
+Decode 0.176 s/token at 144 expert slots. Prefill is layer-major and
+0.098 s/token, down from 0.422 when it was still the decode loop.
+
+The bottleneck is disk, not arithmetic. Profiling puts expert admission at
+94% of prefill and roughly three quarters of decode, while compute sits near
+the memory-bandwidth bound. The lever is residency: 48 slots leaves
+admission at 152 s for a 538-token prompt, 144 slots at a 92% hit rate
+brings it to 39 s.
+
+A correction worth carrying: the expert path is **not** the dominant traffic
+term. Counting a whole token, the BF16 projections are 10.72 GB against
+5.03 GB of packed experts, so the fused QKV and o_proj dominate. An earlier
+benchmark here measured the expert path alone at 26.7 tok/s and that figure
+was read as a ceiling; the whole-token ceiling is nearer 8.
+
+### Context
+
+| depth | prefill | retrieval | replay | residency |
+| ---: | --- | --- | --- | --- |
+| 512 | 0.098 s/tok | ok | 0 differ | 95.41 GiB |
+| 2048 | 0.088 s/tok | ok | 0 differ | 95.41 GiB |
+| 8192 | 0.109 s/tok | ok | 0 differ | 95.41 GiB |
+
+Retrieval places the needle at the **start** of context and asks for it from
+the end, so it exercises the nine global layers rather than the 128-token
+sliding window. A fact near the end is recoverable from the window alone and
+would pass at any depth while proving nothing.
+
+8K prefill is 14.8 minutes. Qualified, not comfortable.
+
+## Running it
+
+    make test-mimo26-schema                        # no checkpoint needed
+    make test-mimo26-checkpoint MIMO26_ROOT=...    # read-only, plus tokenizer
+    make mimo26-qualify MIMO26_ROOT=...            # CPU worker, 15 checks
+    make mimo26-gpu MIMO26_ROOT=...                # five GPU gates
+    make mimo26-eval MIMO26_ROOT=...               # frozen quality gate
+    make mimo26-context-gate MIMO26_ROOT=... MIMO26_DEPTHS=512,2048
+    tools/mimo26_server ROOT --port 8640 --slots 144 --context 4096
+    make mimo26-soak MIMO26_SERVER_URL=http://127.0.0.1:8640
+
+The server is local-only by default and is not installed as a service.
 
 ## Not done
 
-**M4's slot-level gates.** Busy-slot rejection, cancellation and worker
-quarantine are named in the plan's M4 gate but are properties of a serving
-slot, not of this worker, which has no concurrency. They belong with the
-server work.
+**Beyond 8K.** Untested. The checkpoint advertises 1M and nothing here
+supports reading that as available.
 
-**M5 entirely.** It needs a GPU path, and the MiMo lane is CPU-only: the
-worker decodes at roughly a minute per token, so the context ladder, prefill
-latency budgets and the sustained soak are not reachable on this host. A GPU
-window is a prerequisite, not a scheduling preference.
+**Speculative decoding and MTP.** The MTP tensors are loaded and validated
+but unused.
 
-**Two loose ends from M0/M1.** `tests/test_mimo26_manifest` still covers
-parse, reconcile and span-planner rejection but not a fault-injected shard
-file. Sparky's copy of the shards remains unhashed, so equality with the
-local copy is unproven at whole-file level.
+**Expert-major grouping in prefill.** Deliberately deferred: it would cut
+GTT traffic, and GTT traffic is no longer the constraint. Admission is.
 
-**One fidelity question left open.** `moe_router_dtype` is `bfloat16` in the
-config; vLLM honours it and the shipped reference hardcodes F32, which is
-what this lane implements. It was measured and is not the bug — it moves
-ranks marginally — but the checkpoint says what it says. Changing it needs an
-oracle this host cannot run, so it is recorded rather than guessed at.
+**MZG2.** Measured rather than assumed: MiMo's experts compress to **88.7%**
+of packed, because MXFP4 is already near its entropy at 3.55-3.78 bits of 4
+and essentially all the gain comes from the scales, which are a sixteenth of
+the payload. That is ~11% fewer read bytes for a 133 GiB derived artifact
+and a decompression path in the hot loop, and decompressing into the cache
+costs more GPU traffic than the copy it replaces. Recommended against on
+those numbers.
+
+**Authentication and remote exposure.** Local-only. The plan requires an
+explicit authentication and network policy first.
+
+**Supervised restart has never run against a real fault.** The path is
+exercised by the slot's unit tests; no decode has actually faulted on this
+hardware.
+
+**Sparky's shards are unhashed**, so copy equality with the local checkpoint
+is unproven at whole-file level.
+
+**`moe_router_dtype`** is `bfloat16` in the config while this lane computes
+the router in F32, following the executed reference. It was measured and is
+not the bug -- it moves ranks marginally -- but deciding it properly needs
+an oracle this host cannot run.
