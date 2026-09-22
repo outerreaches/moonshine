@@ -599,6 +599,38 @@ bool k3_st_model_open_file(k3_st_model *model,
     return true;
 }
 
+bool k3_st_model_open_paths(k3_st_model *model,
+                            const char *const *paths,
+                            size_t path_count,
+                            char *error,
+                            size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (!model || !paths || path_count == 0 || path_count > UINT16_MAX) {
+        k3_set_error(error, error_size, "invalid path-list model-open arguments");
+        return false;
+    }
+    for (size_t i = 0; i < path_count; i++) {
+        if (!paths[i] || paths[i][0] == '\0') {
+            k3_set_error(error, error_size, "shard path %zu is empty", i);
+            return false;
+        }
+    }
+    if (!k3_st_model_prepare(model, path_count, error, error_size)) {
+        return false;
+    }
+    for (size_t i = 0; i < path_count; i++) {
+        if (!k3_st_model_open_shard(model, i, paths[i], error, error_size)) {
+            k3_st_model_close(model);
+            return false;
+        }
+    }
+    if (!k3_st_model_finish_open(model, error, error_size)) {
+        k3_st_model_close(model);
+        return false;
+    }
+    return true;
+}
+
 void k3_st_model_close(k3_st_model *model) {
     if (!model) return;
     for (size_t i = 0; i < model->tensor_count; i++) {

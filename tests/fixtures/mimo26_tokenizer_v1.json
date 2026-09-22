@@ -1,0 +1,887 @@
+{
+ "revision": "3b38d063180c3e4aed9691fdc735f3d10b266ee4",
+ "generated_with": {
+  "tokenizers": "0.22.2",
+  "jinja2": "3.1.6"
+ },
+ "file_sha256": {
+  "tokenizer.json": "ff15eb925890d6b71b5160de4b846fbd13178438ab463b38ecc953e8cd1dcb3e",
+  "tokenizer_config.json": "413a7845f52943ccf4de0e5c838414507d16c44dbf573da9e20bc8902b384d06",
+  "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+  "merges.txt": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+  "chat_template.jinja": "853650bee57bf95020373e4c928bd5a4b41b9915adf964a77711d2b49a291887",
+  "generation_config.json": "eecf00d9701921271c904a916c425ba6db61bcd190902e200d0a322bfd5572dd"
+ },
+ "vocab_size_from_tokenizer": 151675,
+ "model_max_length": 1048576,
+ "eos_token": "<|im_end|>",
+ "pad_token": "<|endoftext|>",
+ "generation_config": {
+  "bos_token_id": 151643,
+  "eos_token_id": [
+   151643,
+   151645,
+   151672
+  ],
+  "temperature": 1.0,
+  "top_p": 0.95,
+  "do_sample": false,
+  "max_new_tokens": 2048
+ },
+ "special_token_ids": {
+  "<|im_start|>": 151644,
+  "<|im_end|>": 151645,
+  "<think>": 151667,
+  "</think>": 151668,
+  "<|endoftext|>": 151643,
+  "<tool_call>": 151657,
+  "<|vision_start|>": 151652,
+  "<|image_pad|>": 151655,
+  "<|vision_end|>": 151653,
+  "<|mimo_audio_start|>": 151673,
+  "<|audio_pad|>": 151669,
+  "<|mimo_audio_end|>": 151674,
+  "<|video_pad|>": 151656
+ },
+ "texts": {
+  "ascii_short": {
+   "text": "Hello, world!",
+   "ids": [
+    9707,
+    11,
+    1879,
+    0
+   ],
+   "count": 4
+  },
+  "ascii_sentence": {
+   "text": "The quick brown fox jumps over the lazy dog.",
+   "ids": [
+    785,
+    3974,
+    13876,
+    38835,
+    34208,
+    916,
+    279,
+    15678,
+    5562,
+    13
+   ],
+   "count": 10
+  },
+  "leading_space": {
+   "text": " leading space",
+   "ids": [
+    6388,
+    3550
+   ],
+   "count": 2
+  },
+  "double_newline": {
+   "text": "line one\n\nline three",
+   "ids": [
+    1056,
+    825,
+    271,
+    1056,
+    2326
+   ],
+   "count": 5
+  },
+  "tabs": {
+   "text": "a\tb\tc",
+   "ids": [
+    64,
+    2233,
+    1444
+   ],
+   "count": 3
+  },
+  "cjk": {
+   "text": "你好，世界",
+   "ids": [
+    108386,
+    3837,
+    99489
+   ],
+   "count": 3
+  },
+  "cjk_mixed": {
+   "text": "MiMo 模型 v2.6",
+   "ids": [
+    41887,
+    25612,
+    6567,
+    44401,
+    24300,
+    348,
+    17,
+    13,
+    21
+   ],
+   "count": 9
+  },
+  "emoji_zwj": {
+   "text": "👩‍💻 ships 🚀",
+   "ids": [
+    145233,
+    378,
+    235,
+    145851,
+    17727,
+    11162,
+    248,
+    222
+   ],
+   "count": 8
+  },
+  "combining": {
+   "text": "égalité",
+   "ids": [
+    963,
+    16470,
+    12815
+   ],
+   "count": 3
+  },
+  "rtl": {
+   "text": "שלום עולם",
+   "ids": [
+    126654,
+    123855,
+    124907
+   ],
+   "count": 3
+  },
+  "digits": {
+   "text": "3.14159 and 1e-9 and 0x1F",
+   "ids": [
+    18,
+    13,
+    16,
+    19,
+    16,
+    20,
+    24,
+    323,
+    220,
+    16,
+    68,
+    12,
+    24,
+    323,
+    220,
+    15,
+    87,
+    16,
+    37
+   ],
+   "count": 19
+  },
+  "special_token_surface": {
+   "text": "<|im_start|>not really a turn<|im_end|>",
+   "ids": [
+    151644,
+    1921,
+    2167,
+    264,
+    2484,
+    151645
+   ],
+   "count": 6
+  },
+  "repeated_spaces": {
+   "text": "a     b",
+   "ids": [
+    64,
+    257,
+    293
+   ],
+   "count": 3
+  },
+  "empty": {
+   "text": "",
+   "ids": [],
+   "count": 0
+  }
+ },
+ "chats": {
+  "plain_single_turn": {
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "What is 2 + 2?"
+     }
+    ],
+    "add_generation_prompt": true
+   },
+   "rendered": "<|im_start|>user\nWhat is 2 + 2?<|im_end|><|im_start|>assistant\n",
+   "ids": [
+    151644,
+    872,
+    198,
+    3838,
+    374,
+    220,
+    17,
+    488,
+    220,
+    17,
+    30,
+    151645,
+    151644,
+    77091,
+    198
+   ],
+   "count": 15
+  },
+  "plain_no_generation_prompt": {
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "What is 2 + 2?"
+     }
+    ],
+    "add_generation_prompt": false
+   },
+   "rendered": "<|im_start|>user\nWhat is 2 + 2?<|im_end|>",
+   "ids": [
+    151644,
+    872,
+    198,
+    3838,
+    374,
+    220,
+    17,
+    488,
+    220,
+    17,
+    30,
+    151645
+   ],
+   "count": 12
+  },
+  "thinking_disabled": {
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "What is 2 + 2?"
+     }
+    ],
+    "add_generation_prompt": true,
+    "enable_thinking": false
+   },
+   "rendered": "<|im_start|>user\nWhat is 2 + 2?<|im_end|><|im_start|>assistant\n<think></think>",
+   "ids": [
+    151644,
+    872,
+    198,
+    3838,
+    374,
+    220,
+    17,
+    488,
+    220,
+    17,
+    30,
+    151645,
+    151644,
+    77091,
+    198,
+    151667,
+    151668
+   ],
+   "count": 17
+  },
+  "with_system": {
+   "request": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "You are terse."
+     },
+     {
+      "role": "user",
+      "content": "Define entropy."
+     }
+    ],
+    "add_generation_prompt": true
+   },
+   "rendered": "<|im_start|>system\nYou are terse.<|im_end|><|im_start|>user\nDefine entropy.<|im_end|><|im_start|>assistant\n",
+   "ids": [
+    151644,
+    8948,
+    198,
+    2610,
+    525,
+    50537,
+    13,
+    151645,
+    151644,
+    872,
+    198,
+    35338,
+    47502,
+    13,
+    151645,
+    151644,
+    77091,
+    198
+   ],
+   "count": 18
+  },
+  "multi_turn": {
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "First question."
+     },
+     {
+      "role": "assistant",
+      "content": "First answer."
+     },
+     {
+      "role": "user",
+      "content": "Second question."
+     }
+    ],
+    "add_generation_prompt": true
+   },
+   "rendered": "<|im_start|>user\nFirst question.<|im_end|><|im_start|>assistant\n<think></think>First answer.<|im_end|><|im_start|>user\nSecond question.<|im_end|><|im_start|>assistant\n",
+   "ids": [
+    151644,
+    872,
+    198,
+    5338,
+    3405,
+    13,
+    151645,
+    151644,
+    77091,
+    198,
+    151667,
+    151668,
+    5338,
+    4226,
+    13,
+    151645,
+    151644,
+    872,
+    198,
+    15666,
+    3405,
+    13,
+    151645,
+    151644,
+    77091,
+    198
+   ],
+   "count": 26
+  },
+  "assistant_with_reasoning": {
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Is 91 prime?"
+     },
+     {
+      "role": "assistant",
+      "content": "No, 91 is 7 times 13.",
+      "reasoning_content": "91 = 7 * 13, so it is composite."
+     },
+     {
+      "role": "user",
+      "content": "And 97?"
+     }
+    ],
+    "add_generation_prompt": true
+   },
+   "rendered": "<|im_start|>user\nIs 91 prime?<|im_end|><|im_start|>assistant\n<think>91 = 7 * 13, so it is composite.</think>No, 91 is 7 times 13.<|im_end|><|im_start|>user\nAnd 97?<|im_end|><|im_start|>assistant\n",
+   "ids": [
+    151644,
+    872,
+    198,
+    3872,
+    220,
+    24,
+    16,
+    10250,
+    30,
+    151645,
+    151644,
+    77091,
+    198,
+    151667,
+    24,
+    16,
+    284,
+    220,
+    22,
+    353,
+    220,
+    16,
+    18,
+    11,
+    773,
+    432,
+    374,
+    27714,
+    13,
+    151668,
+    2753,
+    11,
+    220,
+    24,
+    16,
+    374,
+    220,
+    22,
+    3039,
+    220,
+    16,
+    18,
+    13,
+    151645,
+    151644,
+    872,
+    198,
+    3036,
+    220,
+    24,
+    22,
+    30,
+    151645,
+    151644,
+    77091,
+    198
+   ],
+   "count": 56
+  },
+  "unicode_turn": {
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "翻译：🚀 → ?"
+     }
+    ],
+    "add_generation_prompt": true
+   },
+   "rendered": "<|im_start|>user\n翻译：🚀 → ?<|im_end|><|im_start|>assistant\n",
+   "ids": [
+    151644,
+    872,
+    198,
+    105395,
+    5122,
+    145836,
+    11397,
+    937,
+    151645,
+    151644,
+    77091,
+    198
+   ],
+   "count": 12
+  },
+  "content_parts": {
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": [
+       {
+        "type": "text",
+        "text": "Part one. "
+       },
+       {
+        "type": "text",
+        "text": "Part two."
+       }
+      ]
+     }
+    ],
+    "add_generation_prompt": true
+   },
+   "rendered": "<|im_start|>user\nPart one. Part two.<|im_end|><|im_start|>assistant\n",
+   "ids": [
+    151644,
+    872,
+    198,
+    5800,
+    825,
+    13,
+    3660,
+    1378,
+    13,
+    151645,
+    151644,
+    77091,
+    198
+   ],
+   "count": 13
+  },
+  "tools_declared": {
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Weather in Ottawa?"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Look up the weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "c",
+           "f"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ],
+    "add_generation_prompt": true
+   },
+   "rendered": "<|im_start|>system\nYou are provided with the following tools:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Look up the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}}, \"required\": [\"city\"]}}}\n</tools><|im_end|><|im_start|>user\nWeather in Ottawa?<|im_end|><|im_start|>assistant\n",
+   "ids": [
+    151644,
+    8948,
+    198,
+    2610,
+    525,
+    3897,
+    448,
+    279,
+    2701,
+    7375,
+    1447,
+    27,
+    15918,
+    397,
+    4913,
+    1313,
+    788,
+    330,
+    1688,
+    497,
+    330,
+    1688,
+    788,
+    5212,
+    606,
+    788,
+    330,
+    455,
+    69364,
+    497,
+    330,
+    4684,
+    788,
+    330,
+    10380,
+    705,
+    279,
+    9104,
+    369,
+    264,
+    3283,
+    10465,
+    330,
+    13786,
+    788,
+    5212,
+    1313,
+    788,
+    330,
+    1700,
+    497,
+    330,
+    13193,
+    788,
+    5212,
+    8926,
+    788,
+    5212,
+    1313,
+    788,
+    330,
+    917,
+    14345,
+    330,
+    3843,
+    788,
+    5212,
+    1313,
+    788,
+    330,
+    917,
+    497,
+    330,
+    9018,
+    788,
+    4383,
+    66,
+    497,
+    330,
+    69,
+    1341,
+    38154,
+    330,
+    6279,
+    788,
+    4383,
+    8926,
+    1341,
+    3417,
+    532,
+    522,
+    15918,
+    29,
+    151645,
+    151644,
+    872,
+    198,
+    28981,
+    304,
+    32166,
+    30,
+    151645,
+    151644,
+    77091,
+    198
+   ],
+   "count": 105
+  },
+  "tool_call_and_result": {
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Weather in Ottawa?"
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "type": "function",
+        "function": {
+         "name": "get_weather",
+         "arguments": {
+          "city": "Ottawa",
+          "unit": "c"
+         }
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "content": "{\"temp_c\": -3}"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Look up the weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "c",
+           "f"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ],
+    "add_generation_prompt": true
+   },
+   "rendered": "<|im_start|>system\nYou are provided with the following tools:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Look up the weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}}, \"required\": [\"city\"]}}}\n</tools><|im_end|><|im_start|>user\nWeather in Ottawa?<|im_end|><|im_start|>assistant\n<think></think><tool_call><function=get_weather><parameter=city>Ottawa</parameter><parameter=unit>c</parameter></function></tool_call><|im_end|><|im_start|>tool\n{\"temp_c\": -3}<|im_end|><|im_start|>assistant\n",
+   "ids": [
+    151644,
+    8948,
+    198,
+    2610,
+    525,
+    3897,
+    448,
+    279,
+    2701,
+    7375,
+    1447,
+    27,
+    15918,
+    397,
+    4913,
+    1313,
+    788,
+    330,
+    1688,
+    497,
+    330,
+    1688,
+    788,
+    5212,
+    606,
+    788,
+    330,
+    455,
+    69364,
+    497,
+    330,
+    4684,
+    788,
+    330,
+    10380,
+    705,
+    279,
+    9104,
+    369,
+    264,
+    3283,
+    10465,
+    330,
+    13786,
+    788,
+    5212,
+    1313,
+    788,
+    330,
+    1700,
+    497,
+    330,
+    13193,
+    788,
+    5212,
+    8926,
+    788,
+    5212,
+    1313,
+    788,
+    330,
+    917,
+    14345,
+    330,
+    3843,
+    788,
+    5212,
+    1313,
+    788,
+    330,
+    917,
+    497,
+    330,
+    9018,
+    788,
+    4383,
+    66,
+    497,
+    330,
+    69,
+    1341,
+    38154,
+    330,
+    6279,
+    788,
+    4383,
+    8926,
+    1341,
+    3417,
+    532,
+    522,
+    15918,
+    29,
+    151645,
+    151644,
+    872,
+    198,
+    28981,
+    304,
+    32166,
+    30,
+    151645,
+    151644,
+    77091,
+    198,
+    151667,
+    151668,
+    151657,
+    27,
+    1688,
+    28280,
+    69364,
+    1784,
+    16181,
+    28,
+    8926,
+    78844,
+    5566,
+    14077,
+    522,
+    16181,
+    1784,
+    16181,
+    28,
+    3843,
+    56346,
+    522,
+    16181,
+    1472,
+    1688,
+    29,
+    151658,
+    151645,
+    151644,
+    14172,
+    198,
+    4913,
+    3888,
+    666,
+    788,
+    481,
+    18,
+    92,
+    151645,
+    151644,
+    77091,
+    198
+   ],
+   "count": 147
+  }
+ }
+}

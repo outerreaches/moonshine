@@ -29,6 +29,14 @@ not be silently decided in code.
 | FP8 activation scheme | SETTLED | `dynamic`, per `quantization_config` |
 | o_proj, router, embeddings | SETTLED | BF16; all 48 `o_proj` are FP8-ignored |
 | Expert compute output | SETTLED | BF16, round-to-nearest-even |
+| Embedding rows | SETTLED | 152,576 rows for a 151,675-token vocabulary |
+
+The embedding and `lm_head` carry **901 more rows than the tokenizer has
+tokens** — 152,576 is 151,675 padded up to a multiple of 128. Ids
+151,675..152,575 decode to no token, so sampling must mask that tail. An
+unmasked argmax or a top-p tail can otherwise select an id the detokenizer
+cannot map, which surfaces as a crash or a dropped token rather than as bad
+text. `tests/test_mimo26_tokenizer.py` asserts the surplus stays known.
 
 Code order is settled externally, not from the checkpoint: swapping the nibble
 order permutes elements inside a shared-scale block and leaves every marginal
@@ -128,6 +136,38 @@ down 4096x2048), across `gemv`, `gemm` and `gemm_tiled` at tiles 16/32/64.
 This establishes kernel-versus-oracle agreement and geometry compatibility. It
 is not a full-model qualification: coverage is three experts, and M1's
 independent full-model reference does not yet exist.
+
+## Tokenization and turn rendering
+
+Pinned in `tests/fixtures/mimo26_tokenizer_v1.json` from `tokenizer.json` and
+`chat_template.jinja`, generated without `trust_remote_code` and verified by
+`tests/test_mimo26_tokenizer.py` against the checkpoint's file hashes.
+
+| Item | Status | Value |
+| --- | --- | --- |
+| Tokenizer vocabulary | SETTLED | 151,675 including added tokens |
+| `model_max_length` | SETTLED | 1,048,576 (upstream claim, not qualified) |
+| `eos_token_id` | SETTLED | **three** ids: 151643, 151645, 151672 |
+| Default sampling | SETTLED | `do_sample` false, temperature 1.0, top_p 0.95 |
+| Turn framing | SETTLED | `<\|im_start\|>role\n` ... `<\|im_end\|>` |
+| Generation prompt | SETTLED | `<\|im_start\|>assistant\n` |
+| `enable_thinking: false` | SETTLED | appends an empty `<think></think>` |
+| Tool call surface | SETTLED | `<tool_call><function=NAME><parameter=K>V</parameter></function></tool_call>` |
+
+Two consequences worth stating before any server work:
+
+**Finish detection needs all three eos ids.** Treating `eos_token_id` as a
+scalar leaves two stop conditions unhandled.
+
+**Assistant turns always carry a think block.** The template emits
+`<think>` + `reasoning_content` + `</think>` for every assistant message, so a
+replayed turn with no reasoning renders as `<think></think>text`. History
+replay must reproduce that byte-exactly or the KV prefix diverges — the same
+failure class as the earlier Hermes reasoning-replay prefix miss.
+
+Tool calls are **not** JSON: arguments are nested parameter tags. A parser and
+a round-trip test are required before tool support is offered, and rendering
+fixtures are not evidence that tool execution works.
 
 ## Open items blocking M1 exit
 

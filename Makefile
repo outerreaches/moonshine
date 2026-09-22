@@ -58,7 +58,8 @@ GLM53_OBJS := \
 	glm53_weights.o
 
 MIMO26_CPU_TESTS := \
-	tests/test_mimo26_architecture
+	tests/test_mimo26_architecture \
+	tests/test_mimo26_manifest
 
 GLM53_CPU_TESTS := \
 	tests/test_glm53_arch_math \
@@ -182,7 +183,7 @@ ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS) \
 	$(GLM53_CPU_TESTS) $(GLM53_ROCM_TESTS) $(GLM53_OFFICIAL_TESTS)
 
 .PHONY: all help tests test test-cpu check-model \
-	test-mimo26-schema test-mimo26-checkpoint \
+	test-mimo26-schema test-mimo26-checkpoint mimo26-budget \
 	test-model-layout test-model-components test-engine-init \
 	test-engine-hello test-chat-hello test-state-checkpoint test-tokenizer \
 	test-prefill-2 test-prefill-scale test-prefill-kda-blas \
@@ -440,6 +441,18 @@ mimo26_architecture.o: mimo26_architecture.c mimo26_architecture.h \
 	k3_safetensors.h
 tests/test_mimo26_architecture.o: tests/test_mimo26_architecture.c \
 	mimo26_architecture.h k3_safetensors.h
+tests/test_mimo26_official.o: tests/test_mimo26_official.c \
+	mimo26_manifest.h mimo26_architecture.h k3_safetensors.h
+tests/test_mimo26_official: tests/test_mimo26_official.o \
+		mimo26_manifest.o mimo26_architecture.o k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+mimo26_manifest.o: mimo26_manifest.c mimo26_manifest.h \
+	mimo26_architecture.h k3_safetensors.h k3_json.h
+tests/test_mimo26_manifest.o: tests/test_mimo26_manifest.c \
+	mimo26_manifest.h mimo26_architecture.h k3_safetensors.h
+tests/test_mimo26_manifest: tests/test_mimo26_manifest.o \
+		mimo26_manifest.o mimo26_architecture.o k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 tests/test_mimo26_architecture: tests/test_mimo26_architecture.o \
 		mimo26_architecture.o k3_safetensors.o k3_json.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
@@ -735,14 +748,24 @@ test-mzg-transcoder:
 	PYTHONDONTWRITEBYTECODE=1 \
 		$(PYTHON) -m unittest -v tests/test_transcode_mzg.py
 
-test-mimo26-schema: tests/test_mimo26_architecture
+test-mimo26-schema: tests/test_mimo26_architecture \
+		tests/test_mimo26_manifest
 	./tests/test_mimo26_architecture
+	./tests/test_mimo26_manifest
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/test_mimo26_audit.py
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/test_mimo26_tokenizer.py
 
 # Full-metadata audit against a real checkpoint. Header-only and read-only;
 # requires MIMO26_ROOT to point at an official download.
-test-mimo26-checkpoint:
+test-mimo26-checkpoint: tests/test_mimo26_official
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/audit_mimo26_checkpoint.py \
+		$(MIMO26_ROOT)
+	./tests/test_mimo26_official $(MIMO26_ROOT)
+	MIMO26_ROOT=$(MIMO26_ROOT) PYTHONDONTWRITEBYTECODE=1 \
+		$(PYTHON) tests/test_mimo26_tokenizer.py
+
+mimo26-budget:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tools/mimo26_budget.py \
 		$(MIMO26_ROOT)
 
 test-mzg2-bundle:

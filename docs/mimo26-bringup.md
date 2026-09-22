@@ -88,34 +88,82 @@ is 12.75 MiB including scales.
 **The reference attention comment is stale.** It describes split Flash Q/K/V,
 while the config and the actual tensors are fused QKV. Trust the tensors.
 
+## Index
+
+`model.safetensors.index.json` carries `metadata` with three keys:
+`save_format: mxfp4`, `tp_size: 4`, and `total_size: 172923364096`. That
+total is the **payload** sum — about 8.7 MiB below the sum of file sizes,
+the difference being per-shard SafeTensors headers. `mimo26_manifest_reconcile`
+checks the payload sum against it rather than against file sizes.
+
+`save_format` is treated as part of the artifact identity: a checkpoint
+claiming anything but `mxfp4` is rejected rather than probed.
+
 ## Implemented so far
 
 - `mimo26_architecture.{c,h}` — payload-free schema: layer kinds from the
   explicit pattern, per-kind tensor contracts, exact group coverage.
-- `tests/test_mimo26_architecture.c` — synthetic positive and negative cases.
+- `mimo26_manifest.{c,h}` — index parse and validation, the index-driven
+  shard opener, directory reconciliation, and the routed-expert span planner.
+- `k3_st_model_open_paths` — additive opener taking an explicit shard list,
+  since MiMo's filenames defeat the numbered family. Existing openers are
+  unchanged.
+- `tests/test_mimo26_architecture.c`, `tests/test_mimo26_manifest.c` —
+  synthetic positive and negative cases.
+- `tests/test_mimo26_official.c` — end-to-end against a real checkpoint.
 - `tests/audit_mimo26_checkpoint.py` — full read-only metadata audit with
-  machine-readable status.
-- `tests/test_mimo26_audit.py` — a synthesized fault per audit check.
+  machine-readable status; `tests/test_mimo26_audit.py` injects one
+  synthesized fault per check.
+- `tests/fixtures/mimo26_tokenizer_v1.json` with
+  `tests/generate_mimo26_tokenizer_fixture.py` and
+  `tests/test_mimo26_tokenizer.py` — pinned token ids and rendered turns,
+  produced without `trust_remote_code`.
+- `tools/mimo26_budget.py` — allocation, cache and KV ledger from measured
+  host memory.
 
 ```
 make test-mimo26-schema                      # no checkpoint needed
 make test-mimo26-checkpoint MIMO26_ROOT=...  # header-only, read-only
+make mimo26-budget MIMO26_ROOT=...
 ```
 
 The audit and the C module encode the same contract independently, so they
-disagree loudly if either drifts. Both currently pass, and the audit reports
-`status: pass` on the full 73,081-tensor checkpoint.
+disagree loudly if either drifts. Both pass, and the C path independently
+reproduces the Python-derived figures: 382 main / 72,192 expert / 48 MTP /
+364 vision / 95 audio tensors, 149.8125 GiB of experts across 12,032 resolved
+expert identities, 8.2837 GiB of static text.
+
+## Memory budget
+
+From `tools/mimo26_budget.py` on this host: 124.94 GiB of RAM, 120.85 GiB
+available. Static text is 8.2837 GiB, the SWA rings are a fixed 24.375 MiB
+across 39 layers, and global KV costs 23,040 B/token across nine layers.
+
+| Context | Global KV | Cache room | Experts cacheable | Share |
+| ---: | ---: | ---: | ---: | ---: |
+| 8,192 | 0.176 GiB | 100.36 GiB | 8,060 | 67.0% |
+| 65,536 | 1.406 GiB | 99.13 GiB | 7,961 | 66.2% |
+| 1,048,576 | 22.500 GiB | 78.04 GiB | 6,267 | 52.1% |
+
+At a 12 GiB reserve. **Cache room is not a cache size**: it excludes HIP
+overhead, aligned staging, pending leases, verification buffers and SWA
+rollback storage. Measure, then choose below it.
+
+**Resident share is not hit rate.** 67% of experts fitting says nothing about
+how often a routed expert is already present; that depends on routing locality
+and has not been measured. Keep the two numbers separate in every report.
+
+Experts total 149.8 GiB against 124.9 GiB of RAM, so streaming is mandatory
+and no configuration can hold them all. Swap must not be relied on.
+
+At an assumed ~5 GiB/s from the local SSD — unmeasured — a 0%-hit token costs
+4.68 GiB and ~936 ms, so ~1.07 tok/s; an 80% hit rate gives ~5.3 tok/s and 90%
+gives ~10.7. Arithmetic bounds recorded before results exist, not predictions.
 
 ## Not done
 
-`mimo26_manifest.{c,h}` with the index-driven shard and span planner;
-tokenizer, chat-template and generation fixtures; the static
-allocation/cache/KV budget; and the C official-metadata test that needs the
-manifest's opener. M0 does not exit until those exist.
-
-Memory planning starts from 8.284 GiB of static text tensors and 12.75 MiB per
-expert, against 149.8 GiB of experts total — so experts stream and the resident
-cache size is an audited choice, not a maximum. At an assumed ~5 GiB/s from the
-local SSD, a 0%-hit token costs ~0.94 s of expert traffic; roughly an 80% hit
-rate is needed for ~5 tok/s. Those are arithmetic bounds from unmeasured
-bandwidth, recorded before results exist, not predictions.
+M0 does not exit until these land: `tests/test_mimo26_manifest` covers parse,
+reconcile and span-planner rejection but not a fault-injected shard file; and
+the next-stage input list for M1 is still implicit rather than written down.
+Beyond M0, nothing in M1's numerical contract past the MXFP4 expert path has
+an oracle yet.

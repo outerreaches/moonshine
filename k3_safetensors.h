@@ -103,6 +103,19 @@ bool k3_st_model_open_file(k3_st_model *model,
                            char        *error,
                            size_t       error_size);
 
+/*
+ * Open an explicit, caller-ordered list of shard paths as one model. Needed by
+ * checkpoints whose shard filenames do not follow the numbered
+ * model-NNNNN-of-NNNNN family, so that the shard set has to come from the
+ * index instead. Shard indices in the resulting directory match the order of
+ * the paths argument.
+ */
+bool k3_st_model_open_paths(k3_st_model       *model,
+                            const char *const *paths,
+                            size_t             path_count,
+                            char              *error,
+                            size_t             error_size);
+
 void k3_st_model_close(k3_st_model *model);
 
 const k3_st_tensor *k3_st_find(const k3_st_model *model, const char *name);
