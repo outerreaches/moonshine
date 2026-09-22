@@ -63,18 +63,50 @@ the real checkpoint; ignoring them silently would hide a changed artifact.
 
 ## Layout traps
 
-**Global QKV carries an over-provisioned FP8 scale grid.** SWA layers hold
-`qkv_proj.weight [14848,4096]` with `weight_scale_inv [116,32]`, exactly
-`ceil(14848/128)`. Global layers hold `[13568,4096]` with `[108,32]`, but
-`ceil(13568/128)` is 106. Block rows 106 and 107 contain live plausible scale
-values, not padding: the grid was built for a 13,824-row layout, with V sized
-as if `head_dim` were 192, and the weights were later sliced to 13,568.
+**The fused QKV is sharded by TP rank.** This is the trap that cost this lane
+the most, and it was misdiagnosed twice before the arithmetic settled it.
 
-Flat `row / 128` scale indexing stays correct, because every Q/K/V segment
-boundary lands on a block boundary. But a validator asserting
-`scale_rows == ceil(rows / 128)` rejects the real checkpoint, and reading 108
-as the QKV width mis-splits Q, K and V. Both failure modes are covered by
-negative tests.
+The checkpoint's `metadata.tp_size` is 4. It was written by a tensor-parallel
+deployment, so `qkv_proj.weight` is **4 rank slices concatenated, each
+already de-interleaved to `[Q | K | V]`** — not `[all Q | all K | all V]`,
+and not `num_kv_heads` groups of `[Q_g | K_g | V_g]` either. Rank `s` owns
+query heads `[16s, 16s+16)` and KV heads `[s·kv/4, …)`, which preserves the
+standard `repeat_kv` mapping.
+
+The FP8 block scales tile each rank slice independently, padded up to a whole
+block. That one rule reproduces both grids exactly, and nothing else does:
+
+| Layer | Rank slice rows | Blocks | × 4 | Observed |
+| --- | --- | --- | ---: | ---: |
+| global | 16·192 + 1·192 + 1·128 = 3392 | 26.5 → 27 | 108 | `[108, 32]` |
+| SWA | 16·192 + 2·192 + 2·128 = 3712 | 24 + 3 + 2 = **29** | 116 | `[116, 32]` |
+
+Three readings have to be rejected to get here:
+
+1. `[all Q | all K | all V]`, which the shipped `modeling_mimo_v2.py`
+   assumes. Scrambles every head.
+2. `num_kv_heads` groups of `[Q_g | K_g | V_g]`, which vLLM's
+   `_shard_fp8_qkv_proj` **docstring** states. Correct only when a rank owns
+   exactly one KV head — true for the 9 global layers, false for the 39 SWA
+   layers. Its own code cannot run on the SWA shape: `116 // 8 = 14` scale
+   rows expand to 1792 and multiply against an 1856-row group.
+3. The earlier guess recorded here, that `[108,32]` was an over-provisioned
+   grid left from a 13,824-row layout with V sized as if `head_dim` were 192,
+   and that flat `row / 128` indexing stayed correct. Flat indexing is **not**
+   correct for global layers: it misassociates the scales of every rank after
+   the first, and rows 106-107 are per-rank padding, not stale live values.
+
+A validator asserting `scale_rows == ceil(rows / 128)` rejects the real
+checkpoint, and reading 108 as the QKV width mis-splits Q, K and V. Both
+failure modes are covered by negative tests, and loading now fails closed
+unless the row total is `tp` slices *and* the grid is `tp` times the padded
+per-slice block count.
+
+The general lesson, which applies to the next architecture too: **derive the
+block-scale geometry from first principles and require it to come out
+exactly.** Four numbers discriminated three readings that all produced
+plausible-looking weights, and two of those readings came from reading source
+code rather than bytes.
 
 **`quantization_config.ignored_layers` names 49 modules.** All 48 text
 `o_proj` plus `model.decoder.self_attn.o_proj`, which has no counterpart in
@@ -160,10 +192,38 @@ At an assumed ~5 GiB/s from the local SSD — unmeasured — a 0%-hit token cost
 4.68 GiB and ~936 ms, so ~1.07 tok/s; an 80% hit rate gives ~5.3 tok/s and 90%
 gives ~10.7. Arithmetic bounds recorded before results exist, not predictions.
 
+## Status
+
+M0 through M3 are complete and M4 is qualified at the **worker** level. The
+48-layer CPU worker generates correct text: given "The quick brown fox
+jumps." twice plus "The quick brown fox" it continues with all 12 tokens
+right, and induction strengthens with repetition.
+
+`make mimo26-qualify MIMO26_ROOT=...` passes 15/15 against the real
+checkpoint — determinism, rollback replay, reset, fault containment and
+cache-size independence, all bit-exact on the full 152,576-entry logit
+vector. `make mimo26-eval MIMO26_ROOT=...` runs the teacher-forced quality
+gate whose corpus and thresholds are frozen in `tests/mimo26_eval_spec.json`.
+
 ## Not done
 
-M0 does not exit until these land: `tests/test_mimo26_manifest` covers parse,
-reconcile and span-planner rejection but not a fault-injected shard file; and
-the next-stage input list for M1 is still implicit rather than written down.
-Beyond M0, nothing in M1's numerical contract past the MXFP4 expert path has
-an oracle yet.
+**M4's slot-level gates.** Busy-slot rejection, cancellation and worker
+quarantine are named in the plan's M4 gate but are properties of a serving
+slot, not of this worker, which has no concurrency. They belong with the
+server work.
+
+**M5 entirely.** It needs a GPU path, and the MiMo lane is CPU-only: the
+worker decodes at roughly a minute per token, so the context ladder, prefill
+latency budgets and the sustained soak are not reachable on this host. A GPU
+window is a prerequisite, not a scheduling preference.
+
+**Two loose ends from M0/M1.** `tests/test_mimo26_manifest` still covers
+parse, reconcile and span-planner rejection but not a fault-injected shard
+file. Sparky's copy of the shards remains unhashed, so equality with the
+local copy is unproven at whole-file level.
+
+**One fidelity question left open.** `moe_router_dtype` is `bfloat16` in the
+config; vLLM honours it and the shipped reference hardcodes F32, which is
+what this lane implements. It was measured and is not the bug — it moves
+ranks marginally — but the checkpoint says what it says. Changing it needs an
+oracle this host cannot run, so it is recorded rather than guessed at.
