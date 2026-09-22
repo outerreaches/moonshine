@@ -117,5 +117,10 @@ Whether that alignment is the disease or a symptom is the open question.
 2. **Layers 1-3 specifically.** The residual grows 0.18 → 0.58 → 1.91 → 14.67
    across them and then stays flat. Compare against a known-good run rather
    than judging plausibility.
-3. **The attention path across positions**, since the failure is
-   distance-dependent and RoPE has now been eliminated as the cause.
+3. **The rope slice**, tested properly this time by patching the split in
+   `_forward_attention`. RoPE is *not* fully eliminated: only the pairing
+   convention and the theta have been checked, and the failure is
+   position-dependent, which is exactly RoPE's signature.
+4. **The attention path across positions** more broadly, including whether
+   `cache_position` and `position_ids` are being threaded the way the model
+   expects during a prefill.
