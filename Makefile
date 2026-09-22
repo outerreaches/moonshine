@@ -969,6 +969,19 @@ tests/test_mimo26_gpu_layer: tests/test_mimo26_gpu_layer.o \
 mimo26-gpu-layer: tests/test_mimo26_gpu_layer
 	MIMO26_ROOT=$(MIMO26_ROOT) ./tests/test_mimo26_gpu_layer
 
+mimo26_gpu_worker.o: mimo26_gpu_worker.cu mimo26_gpu_worker.h \
+	mimo26_rocm_layer.h mimo26_rocm_ops.h k3_rocm_ops.h mimo26_weights.h \
+	mimo26_kv.h mimo26_manifest.h mimo26_attention.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tools/mimo26_gpu_run.o: tools/mimo26_gpu_run.cu mimo26_gpu_worker.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tools/mimo26_gpu_run: tools/mimo26_gpu_run.o mimo26_gpu_worker.o \
+		mimo26_rocm_layer.o mimo26_rocm_ops.o k3_rocm_ops.o \
+		mimo26_weights.o mimo26_kv.o mimo26_manifest.o \
+		mimo26_architecture.o mimo26_attention.o mimo26_ops.o \
+		mimo26_router.o glm53_fp8_oracle.o k3_safetensors.o k3_json.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+
 # The whole GPU gate set, in dependency order.
 mimo26-gpu: mimo26-gpu-ops mimo26-gpu-attention mimo26-gpu-mxfp4 \
 	mimo26-gpu-layer

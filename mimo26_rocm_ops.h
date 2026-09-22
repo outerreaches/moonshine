@@ -76,6 +76,11 @@ bool mimo26_rocm_residual_add_bf16(void *output, const void *residual,
  * The exactness is free -- the router is negligible beside the 4.68 GiB of
  * expert reads in the same token.
  */
+bool mimo26_rocm_ordered_gemv_f32(float *output, const void *weights,
+                                  const void *input, uint32_t rows,
+                                  uint32_t columns, void *stream);
+
+/* The router's use of it, named for what it computes. */
 bool mimo26_rocm_router_logits_f32(float *logits, const void *weight,
                                    const void *hidden, uint32_t experts,
                                    uint32_t hidden_size, void *stream);

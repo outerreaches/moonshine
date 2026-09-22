@@ -12,6 +12,7 @@ core.*
 /tools/mimo26_run
 /tools/mimo26_eval
 /tools/mimo26_gpu_bench
+/tools/mimo26_gpu_run
 mimo26-eval.jsonl
 mimo26-eval-tokens.txt
 /tools/transcode_mzg2_layer

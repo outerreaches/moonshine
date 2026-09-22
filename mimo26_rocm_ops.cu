@@ -485,36 +485,44 @@ __global__ static void mimo26_rope_apply_kernel(uint16_t *heads,
 
 
 /*
- * Router logits, summed in ascending column order to match the CPU exactly.
+ * F32 GEMV whose rows are summed in ascending column order, matching the CPU.
  *
- * K3's F32-output GEMV tree-reduces, which is fine for a well-conditioned
- * row. This row is not: the logits land around -2 while the summands total
- * far more in absolute value, so the cancellation amplifies any difference
- * in association. Measured through the mixing weights, the tree reduction
- * put them 4.5e-04 from the CPU's -- about 3800x libm's last ulp, and enough
- * to move every element of an expert-weighted sum.
+ * Two rows in this model need that and K3's tree-reducing GEMV cannot give
+ * it. Router logits land near -2 while their summands total far more in
+ * absolute value, so the sum cancels and association matters: measured
+ * through the mixing weights, tree reduction sat 4.5e-04 from the CPU, about
+ * 3800x libm's last ulp and enough to move every element of an
+ * expert-weighted sum. The lm_head rows have the same shape of problem and
+ * their output is the answer itself, where a reassociation can flip a
+ * near-tie into a different token.
  *
- * One thread per expert row, each summing its 4096 terms sequentially. 256
- * threads is small for this GPU, but the router is a rounding error next to
- * the 4.68 GiB of expert reads the same token performs, so the exactness is
- * free.
+ * One block per row. Every thread helps stage the row coalesced into shared
+ * memory, then one thread sums it in order. The naive alternative -- one
+ * thread per row walking global memory -- strides by a whole row between
+ * neighbouring threads and wastes almost all of the bandwidth, which matters
+ * at lm_head's 152,576 rows and 1.25 GiB per token.
  */
-__global__ static void mimo26_router_logits_kernel(float *logits,
-                                                   const uint16_t *weight,
-                                                   const uint16_t *hidden,
-                                                   uint32_t experts,
-                                                   uint32_t hidden_size)
+__global__ static void mimo26_ordered_gemv_f32_kernel(float *output,
+                                                      const uint16_t *weights,
+                                                      const uint16_t *input,
+                                                      uint32_t columns)
 {
-    const uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= experts) {
-        return;
+    extern __shared__ float staged[];
+    const uint32_t row = blockIdx.x;
+    const uint16_t *w = weights + (uint64_t)row * columns;
+
+    for (uint32_t c = threadIdx.x; c < columns; c += blockDim.x) {
+        staged[c] = mimo26_bf16_to_f32_d(w[c]) * mimo26_bf16_to_f32_d(input[c]);
     }
-    const uint16_t *w = weight + (uint64_t)row * hidden_size;
-    float sum = 0.0f;
-    for (uint32_t c = 0; c < hidden_size; c++) {
-        sum += mimo26_bf16_to_f32_d(w[c]) * mimo26_bf16_to_f32_d(hidden[c]);
+    __syncthreads();
+
+    if (threadIdx.x == 0u) {
+        float sum = 0.0f;
+        for (uint32_t c = 0; c < columns; c++) {
+            sum += staged[c];
+        }
+        output[row] = sum;
     }
-    logits[row] = sum;
 }
 
 static inline uint32_t blocks_for(uint64_t count)
@@ -750,19 +758,33 @@ bool mimo26_rocm_rope_apply(void *heads, const void *cos_table,
     return hipGetLastError() == hipSuccess;
 }
 
+bool mimo26_rocm_ordered_gemv_f32(float *output, const void *weights,
+                                  const void *input, uint32_t rows,
+                                  uint32_t columns, void *stream)
+{
+    if (output == NULL || weights == NULL || input == NULL || rows == 0u ||
+        columns == 0u) {
+        return false;
+    }
+    /* One float of shared memory per column; 4096 columns is 16 KiB of the
+     * 64 KiB available, so both users fit comfortably. */
+    const size_t shared = (size_t)columns * sizeof(float);
+    if (shared > 65536u) {
+        return false;
+    }
+    hipLaunchKernelGGL(mimo26_ordered_gemv_f32_kernel, dim3(rows),
+                       dim3(MIMO26_ROCM_THREADS), shared, (hipStream_t)stream,
+                       output, (const uint16_t *)weights,
+                       (const uint16_t *)input, columns);
+    return hipGetLastError() == hipSuccess;
+}
+
 bool mimo26_rocm_router_logits_f32(float *logits, const void *weight,
                                    const void *hidden, uint32_t experts,
                                    uint32_t hidden_size, void *stream)
 {
-    if (logits == NULL || weight == NULL || hidden == NULL || experts == 0u ||
-        hidden_size == 0u) {
-        return false;
-    }
-    hipLaunchKernelGGL(mimo26_router_logits_kernel, dim3(blocks_for(experts)),
-                       dim3(MIMO26_ROCM_THREADS), 0, (hipStream_t)stream,
-                       logits, (const uint16_t *)weight,
-                       (const uint16_t *)hidden, experts, hidden_size);
-    return hipGetLastError() == hipSuccess;
+    return mimo26_rocm_ordered_gemv_f32(logits, weight, hidden, experts,
+                                        hidden_size, stream);
 }
 
 }  /* extern "C" */
