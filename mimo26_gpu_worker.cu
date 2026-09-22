@@ -59,6 +59,9 @@ typedef struct {
     uint16_t     count;
 } layer_cache;
 
+/* Accumulated inside prepare_batch, read out per token by the profiler. */
+static double g_upload_seconds = 0.0;
+
 struct mimo26_gpu_worker {
     mimo26_gpu_worker_config config;
     mimo26_manifest          manifest;
@@ -244,6 +247,9 @@ static bool ensure_expert(mimo26_gpu_worker *worker, uint32_t layer,
     }
     victim->occupied = false;
 
+    struct timespec upload_start;
+    clock_gettime(CLOCK_MONOTONIC, &upload_start);
+
     static const char *kinds[3] = {"gate_proj", "up_proj", "down_proj"};
     for (size_t j = 0; j < 3; j++) {
         for (size_t half = 0; half < 2; half++) {
@@ -276,6 +282,12 @@ static bool ensure_expert(mimo26_gpu_worker *worker, uint32_t layer,
             }
         }
     }
+    struct timespec upload_end;
+    clock_gettime(CLOCK_MONOTONIC, &upload_end);
+    g_upload_seconds +=
+        (double)(upload_end.tv_sec - upload_start.tv_sec) +
+        (double)(upload_end.tv_nsec - upload_start.tv_nsec) / 1e9;
+
     victim->expert = expert;
     victim->occupied = true;
     victim->pinned = true;
@@ -630,6 +642,7 @@ mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
     const bool profile = getenv("MIMO26_GPU_PROFILE") != NULL;
     double kv_seconds = 0.0, layer_seconds = 0.0, head_seconds = 0.0;
     double stage_seconds = 0.0;
+    g_upload_seconds = 0.0;
     struct timespec mark, mark2;
     #define TICK() do { if (profile) { hipDeviceSynchronize(); \
         clock_gettime(CLOCK_MONOTONIC, &mark); } } while (0)
@@ -767,10 +780,12 @@ mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
         logits[row] = -INFINITY;
     }
     if (profile) {
-        fprintf(stderr, "    profile pos %llu: kv-up %.3f s, layers %.3f s, "
-                        "kv-down %.3f s, head %.3f s\n",
-                (unsigned long long)position, kv_seconds, layer_seconds,
-                stage_seconds, head_seconds);
+        fprintf(stderr, "    profile pos %llu: layers %.3f s (of which "
+                        "expert admission %.3f s, compute %.3f s), "
+                        "kv-up %.3f s, kv-down %.3f s, head %.3f s\n",
+                (unsigned long long)position, layer_seconds,
+                g_upload_seconds, layer_seconds - g_upload_seconds,
+                kv_seconds, stage_seconds, head_seconds);
     }
     #undef TICK
     #undef TOCK
