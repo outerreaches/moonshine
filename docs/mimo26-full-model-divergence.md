@@ -42,7 +42,8 @@ Each of these was tested, not assumed. Recorded so they are not re-tried.
 | The padded vocabulary tail is real data | Rows 151,675+ have absmax 1.3e-5, numerically zero |
 | FP8 block geometry or scale association | Every sampled 128×128 block has amax/448 exactly 1.0000, so blocks use the full E4M3 range |
 | MXFP4 is packed as two half-rows | Interleaved layouts leave 100% of blocks normalized to max code 4 or 6; half-split layouts only 95.58%, with ragged maxima |
-| MXFP4 within-byte nibble order is reversed | Swapping it makes full-model output clearly worse — rare high-id tokens instead of common ones |
+| MXFP4 within-byte nibble order is reversed | **Independently confirmed** by `transformers/integrations/mxfp4.py`, which does `out[..., 0::2] = lut[blk & 0x0F]` and `out[..., 1::2] = lut[blk >> 4]` — identical to ours, with an identical value table. Swapping it also makes full-model output clearly worse |
+| E8M0 bias is not 127 (second check) | The same transformers routine does `scales.to(int32) - 127` then `ldexp`, identical to ours |
 | E8M0 bias is not 127 | Dequantized expert magnitudes (rms 0.003-0.021) match the dense FP8 MLPs (0.010-0.037); a wrong bias would show as a clean factor of two |
 | RoPE uses interleaved (GPT-J) pairing | Interleaved destroys the one prediction that currently works — position 1 goes from rank 1 to rank 513 |
 | RoPE theta is not per layer type | Measured from the reference's own `inv_freq`: 1e7 global, 1e4 SWA, dim 64 |
