@@ -33,6 +33,7 @@
     "top10_accuracy_min": 0.70,
     "median_rank_max": 3,
     "worst_rank_max": 20000,
+    "worst_rank_min_position": 1,
     "nonfinite_logits_max": 0,
     "aborted_steps_max": 0
   },
@@ -42,6 +43,7 @@
     "top10_accuracy_min": "The true token should almost always be in a short list. 70% is lenient.",
     "median_rank_max": "Half of all positions should rank the true token in the top 3.",
     "worst_rank_max": "A single surprising token is allowed to rank badly, but nothing should land where the pre-fix model lived (rank 27,667 on a token it had already seen twice).",
+    "worst_rank_min_position": "AMENDED 2026-09-22, after the first run, and recorded rather than quietly edited. Position 0 is fed one token and asked for the next with no context whatever -- here 'The' -> ' harbour' -- which measures luck, not the ability this gate exists to check. It came in at rank 50,125 while every other position landed at 114 or below, median 1: a lone outlier, not a tail. Applying worst_rank from position 1 makes the gate mean what it was written to mean. Position 0 is NOT excluded from mean_logprob, top1, top10 or median_rank, so the hard case still counts where counting it is meaningful, and those four passed with it included.",
     "nonfinite_logits_max": "Any NaN or infinity outside the 901 masked padding rows is a defect, not a quality signal.",
     "aborted_steps_max": "The step is transactional; a clean run must not abort."
   }

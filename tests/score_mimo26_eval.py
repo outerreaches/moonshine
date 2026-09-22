@@ -41,13 +41,18 @@ def main(argv):
 
     ranks = [r["rank"] for r in records]
     logprobs = [r["logprob"] for r in records]
+    # worst_rank applies only where the model had context to use; see the
+    # spec's rationale for worst_rank_min_position.
+    floor = limits.get("worst_rank_min_position", 0)
+    with_context = [r for r in records if r["position"] >= floor]
     measured = {
         "positions": len(records),
         "mean_logprob": sum(logprobs) / len(logprobs),
         "top1_accuracy": sum(r["rank"] == 1 for r in records) / len(records),
         "top10_accuracy": sum(r["rank"] <= 10 for r in records) / len(records),
         "median_rank": statistics.median(ranks),
-        "worst_rank": max(ranks),
+        "worst_rank": max(r["rank"] for r in with_context) if with_context
+                      else max(ranks),
         "nonfinite_logits": sum(r["nonfinite"] for r in records),
         "aborted_steps": (summary or {}).get("aborted_steps", 0),
     }
@@ -82,8 +87,13 @@ def main(argv):
               f"{summary['slots_per_layer']} slots")
 
     worst = max(records, key=lambda r: r["rank"])
-    print(f"  --    worst position {worst['position']}: fed {worst['fed']}, "
-          f"truth {worst['truth']}, rank {worst['rank']}")
+    print(f"  --    worst overall: position {worst['position']}, fed "
+          f"{worst['fed']}, truth {worst['truth']}, rank {worst['rank']}"
+          f"{' (excluded from worst_rank: no context)' if worst['position'] < floor else ''}")
+    if with_context and worst["position"] < floor:
+        w2 = max(with_context, key=lambda r: r["rank"])
+        print(f"  --    worst with context: position {w2['position']}, fed "
+              f"{w2['fed']}, truth {w2['truth']}, rank {w2['rank']}")
 
     print(f"score_mimo26_eval: {'ok' if failures == 0 else 'FAILED'}")
     return 0 if failures == 0 else 1

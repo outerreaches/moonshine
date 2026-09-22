@@ -28,6 +28,23 @@
 #define LAYERS MIMO26_TEXT_LAYER_COUNT
 #define PACKED_EXPERT_BYTES 13369344u   /* 12.75 MiB: 3 projections + scales */
 
+/*
+ * Every expert has identical shapes, so a slot's six buffers can be
+ * allocated once at startup and reused for whatever identity occupies it.
+ * The first version allocated and freed on every admission -- six hipMalloc
+ * and six hipFree per expert, about 1,440 allocator calls per token at a
+ * realistic miss rate -- and that, not memory traffic, was where the time
+ * went: ~10 ms per layer against ~1.6 ms of actual reads.
+ *
+ * gate_proj and up_proj are [2048, 2048] bytes packed with a [2048, 128]
+ * E8M0 grid; down_proj is [4096, 1024] with [4096, 64].
+ */
+static const size_t EXPERT_BUFFER_BYTES[6] = {
+    2048u * 2048u, 2048u * 128u,      /* gate: packed, scales */
+    2048u * 2048u, 2048u * 128u,      /* up */
+    4096u * 1024u, 4096u * 64u,       /* down */
+};
+
 typedef struct {
     uint32_t expert;       /* which identity occupies this slot */
     uint64_t last_used;    /* for LRU */
@@ -225,51 +242,39 @@ static bool ensure_expert(mimo26_gpu_worker *worker, uint32_t layer,
     if (victim == NULL) {
         return false;   /* every slot pinned: the cache is smaller than top-k */
     }
-    if (victim->occupied) {
-        /* Subtract exactly what is released. An earlier draft reset the
-         * ledger here, which would have made the residency figure lie from
-         * the first eviction onward -- and that figure is what the memory
-         * guard and the evidence bundle both rest on. */
-        for (size_t i = 0; i < 6; i++) {
-            if (victim->storage[i] != NULL) {
-                hipFree(victim->storage[i]);
-                victim->storage[i] = NULL;
-            }
-        }
-        worker->resident_bytes -=
-            worker->resident_bytes >= PACKED_EXPERT_BYTES
-                ? PACKED_EXPERT_BYTES : worker->resident_bytes;
-        victim->occupied = false;
-    }
+    victim->occupied = false;
 
     static const char *kinds[3] = {"gate_proj", "up_proj", "down_proj"};
-    const void **packed[3] = {&victim->view.gate_packed,
-                              &victim->view.up_packed,
-                              &victim->view.down_packed};
-    const void **scales[3] = {&victim->view.gate_scales,
-                              &victim->view.up_scales,
-                              &victim->view.down_scales};
-    size_t written = 0;
     for (size_t j = 0; j < 3; j++) {
-        char name[320];
-        snprintf(name, sizeof name,
-                 "model.layers.%u.mlp.experts.%u.%s.weight", layer, expert,
-                 kinds[j]);
-        void *w = upload_tensor(worker, name, NULL);
-        snprintf(name, sizeof name,
-                 "model.layers.%u.mlp.experts.%u.%s.weight_scale", layer,
-                 expert, kinds[j]);
-        void *s = upload_tensor(worker, name, NULL);
-        if (w == NULL || s == NULL) {
-            if (w != NULL) { hipFree(w); }
-            if (s != NULL) { hipFree(s); }
-            victim->occupied = false;
-            return false;
+        for (size_t half = 0; half < 2; half++) {
+            char name[320];
+            snprintf(name, sizeof name,
+                     "model.layers.%u.mlp.experts.%u.%s.%s", layer, expert,
+                     kinds[j], half == 0u ? "weight" : "weight_scale");
+            const k3_st_tensor *tensor = k3_st_find(&worker->model, name);
+            if (tensor == NULL) {
+                return false;
+            }
+            const size_t slot_index = j * 2u + half;
+            if (tensor->byte_length != EXPERT_BUFFER_BYTES[slot_index]) {
+                return false;   /* fail closed on an unexpected shape */
+            }
+            char error[256];
+            k3_st_read read;
+            memset(&read, 0, sizeof read);
+            if (!k3_st_read_span(&worker->model, tensor->shard,
+                                 tensor->physical_offset, tensor->byte_length,
+                                 4096u, &read, error, sizeof error)) {
+                return false;
+            }
+            const hipError_t status =
+                hipMemcpy(victim->storage[slot_index], read.data,
+                          tensor->byte_length, hipMemcpyHostToDevice);
+            k3_st_read_release(&read);
+            if (status != hipSuccess) {
+                return false;
+            }
         }
-        *packed[j] = w;
-        *scales[j] = s;
-        victim->storage[written++] = w;
-        victim->storage[written++] = s;
     }
     victim->expert = expert;
     victim->occupied = true;
@@ -522,6 +527,21 @@ mimo26_gpu_worker_status mimo26_gpu_worker_create(
             cache->slots =
                 (expert_slot *)calloc(cache->count, sizeof *cache->slots);
             REQUIRE(cache->slots != NULL, "expert cache allocation failed");
+            for (uint16_t s = 0; s < cache->count; s++) {
+                expert_slot *slot = &cache->slots[s];
+                for (size_t i = 0; i < 6; i++) {
+                    REQUIRE(hipMalloc(&slot->storage[i],
+                                      EXPERT_BUFFER_BYTES[i]) == hipSuccess,
+                            "expert slot allocation failed");
+                    worker->resident_bytes += EXPERT_BUFFER_BYTES[i];
+                }
+                slot->view.gate_packed = slot->storage[0];
+                slot->view.gate_scales = slot->storage[1];
+                slot->view.up_packed = slot->storage[2];
+                slot->view.up_scales = slot->storage[3];
+                slot->view.down_packed = slot->storage[4];
+                slot->view.down_scales = slot->storage[5];
+            }
         }
     }
 
@@ -606,6 +626,17 @@ mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
     clock_gettime(CLOCK_MONOTONIC, &started);
 
     const uint64_t position = worker->position;
+    /* Phase timing, so a bottleneck is located rather than guessed at. */
+    const bool profile = getenv("MIMO26_GPU_PROFILE") != NULL;
+    double kv_seconds = 0.0, layer_seconds = 0.0, head_seconds = 0.0;
+    double stage_seconds = 0.0;
+    struct timespec mark, mark2;
+    #define TICK() do { if (profile) { hipDeviceSynchronize(); \
+        clock_gettime(CLOCK_MONOTONIC, &mark); } } while (0)
+    #define TOCK(acc) do { if (profile) { hipDeviceSynchronize(); \
+        clock_gettime(CLOCK_MONOTONIC, &mark2); \
+        (acc) += (double)(mark2.tv_sec - mark.tv_sec) + \
+                 (double)(mark2.tv_nsec - mark.tv_nsec) / 1e9; } } while (0)
     if (mimo26_kv_begin(worker->kv, position) != MIMO26_KV_OK) {
         return fail(error, error_size, MIMO26_GPU_WORKER_DECODE_FAILED,
                     "could not open a transaction");
@@ -638,6 +669,7 @@ mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
             return fail(error, error_size, MIMO26_GPU_WORKER_DECODE_FAILED,
                         "kv view failed at layer %u", l);
         }
+        TICK();
         if (history > 0) {
             hipMemcpy(worker->device_keys, view_keys,
                       history * w->kv_heads * QK * sizeof(uint16_t),
@@ -646,6 +678,8 @@ mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
                       history * w->kv_heads * VD * sizeof(uint16_t),
                       hipMemcpyHostToDevice);
         }
+
+        TOCK(kv_seconds);
 
         uint16_t cos_host[MIMO26_ROPE_DIM];
         uint16_t sin_host[MIMO26_ROPE_DIM];
@@ -658,6 +692,7 @@ mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
         hipMemcpy(worker->sin_table, sin_host, sizeof sin_host,
                   hipMemcpyHostToDevice);
 
+        TICK();
         mimo26_rocm_layer context;
         memset(&context, 0, sizeof context);
         context.weights = w;
@@ -677,15 +712,19 @@ mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
                         "layer %u failed", l);
         }
 
+        TOCK(layer_seconds);
+
         /* Stage this layer's key and value back into the host-side history.
          * The commit happens once all 48 have run, so a failure above leaves
          * committed history untouched. */
+        TICK();
         hipMemcpy(worker->staging_key, worker->scratch.key,
                   w->kv_heads * QK * sizeof(uint16_t),
                   hipMemcpyDeviceToHost);
         hipMemcpy(worker->staging_value, worker->scratch.value,
                   w->kv_heads * VD * sizeof(uint16_t),
                   hipMemcpyDeviceToHost);
+        TOCK(stage_seconds);
         if (mimo26_kv_stage(worker->kv, l, worker->staging_key,
                             worker->staging_value) != MIMO26_KV_OK) {
             mimo26_kv_abort(worker->kv);
@@ -702,6 +741,7 @@ mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
                     "commit failed");
     }
 
+    TICK();
     if (!mimo26_rocm_rmsnorm_bf16(worker->normed, worker->hidden,
                                   worker->final_norm, 1u, HIDDEN, 1e-6f,
                                   NULL)) {
@@ -721,10 +761,19 @@ mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
         return fail(error, error_size, MIMO26_GPU_WORKER_DECODE_FAILED,
                     "logit readback failed");
     }
+    TOCK(head_seconds);
     /* The padded tail decodes to no token, so it must never be sampled. */
     for (uint32_t row = MIMO26_GPU_TOKENIZER_VOCAB; row < VOCAB; row++) {
         logits[row] = -INFINITY;
     }
+    if (profile) {
+        fprintf(stderr, "    profile pos %llu: kv-up %.3f s, layers %.3f s, "
+                        "kv-down %.3f s, head %.3f s\n",
+                (unsigned long long)position, kv_seconds, layer_seconds,
+                stage_seconds, head_seconds);
+    }
+    #undef TICK
+    #undef TOCK
 
     worker->position++;
     struct timespec finished;
