@@ -1,5 +1,6 @@
 #include "mimo26_gpu_worker.h"
 
+#include "k3_io_uring.h"
 #include "k3_rocm_ops.h"
 #include "k3_safetensors.h"
 #include "mimo26_architecture.h"
@@ -13,6 +14,8 @@
 #include "mimo26_weights.h"
 
 #include <hip/hip_runtime.h>
+
+#include <sys/uio.h>
 
 #include <math.h>
 #include <stdarg.h>
@@ -29,20 +32,39 @@
 #define PACKED_EXPERT_BYTES 13369344u   /* 12.75 MiB: 3 projections + scales */
 
 /*
- * Every expert has identical shapes, so a slot's six buffers can be
- * allocated once at startup and reused for whatever identity occupies it.
- * The first version allocated and freed on every admission -- six hipMalloc
- * and six hipFree per expert, about 1,440 allocator calls per token at a
- * realistic miss rate -- and that, not memory traffic, was where the time
- * went: ~10 ms per layer against ~1.6 ms of actual reads.
+ * Every expert has identical shapes, so a slot's storage can be allocated
+ * once at startup and reused for whatever identity occupies it. The first
+ * version allocated and freed on every admission -- six hipMalloc and six
+ * hipFree per expert, about 1,440 allocator calls per token at a realistic
+ * miss rate.
  *
- * gate_proj and up_proj are [2048, 2048] bytes packed with a [2048, 128]
- * E8M0 grid; down_proj is [4096, 1024] with [4096, 64].
+ * The six tensors are also CONTIGUOUS on disk, in one shard, in this order,
+ * with no padding between them -- verified across 40 experts spanning five
+ * layers, and re-verified for every expert at admission. So the slot is one
+ * device block laid out exactly as the file is, admission is a single
+ * 12.75 MiB read and a single copy, and the six views are just offsets into
+ * it. That replaces six O_DIRECT reads and six copies per expert, which
+ * matters because profiling puts the read at 82% of admission and admission
+ * at ~70% of a token.
+ *
+ * Note the order is down, gate, up -- alphabetical, not the order the MLP
+ * evaluates them in. Assuming the logical order here would transpose
+ * projections and produce a model that still runs.
  */
-static const size_t EXPERT_BUFFER_BYTES[6] = {
-    2048u * 2048u, 2048u * 128u,      /* gate: packed, scales */
-    2048u * 2048u, 2048u * 128u,      /* up */
-    4096u * 1024u, 4096u * 64u,       /* down */
+typedef struct {
+    const char *projection;
+    const char *suffix;
+    uint64_t    offset;
+    uint64_t    bytes;
+} expert_block_entry;
+
+static const expert_block_entry EXPERT_BLOCK[6] = {
+    {"down_proj", "weight",              0u, 4194304u},
+    {"down_proj", "weight_scale",  4194304u,  262144u},
+    {"gate_proj", "weight",        4456448u, 4194304u},
+    {"gate_proj", "weight_scale",  8650752u,  262144u},
+    {"up_proj",   "weight",        8912896u, 4194304u},
+    {"up_proj",   "weight_scale", 13107200u,  262144u},
 };
 
 typedef struct {
@@ -51,7 +73,7 @@ typedef struct {
     bool     occupied;
     bool     pinned;       /* needed by the step in flight */
     mimo26_rocm_expert view;
-    void    *storage[6];   /* the six allocations backing `view` */
+    void    *block;        /* one PACKED_EXPERT_BYTES allocation */
 } expert_slot;
 
 typedef struct {
@@ -59,8 +81,39 @@ typedef struct {
     uint16_t     count;
 } layer_cache;
 
+/*
+ * Expert reads go through K3's io_uring rather than a synchronous read per
+ * tensor, because the profile said to: the read was 82% of admission and
+ * admission ~70% of a token, and the reads were being issued one at a time
+ * against an NVMe that wants a queue.
+ *
+ * Staging is hipHostMalloc'd mapped, the same thing K3's engine does. Two
+ * things follow. The io_uring registers GPU-visible buffers directly, and
+ * the copy out of them is a pinned host-to-device transfer rather than a
+ * pageable one.
+ *
+ * The pool is small and separate from the cache. Registering every cache
+ * slot would be the zero-copy version, but 47 layers x tens of slots is
+ * thousands of buffers, past what a ring will register, and a registered
+ * buffer may carry only one outstanding request.
+ */
+#define MIMO26_STAGING_SLOTS 8u
+/* 12.75 MiB plus a page, since a span's start is not 4096-aligned. */
+#define MIMO26_STAGING_BYTES (PACKED_EXPERT_BYTES + 4096u)
+
+typedef struct {
+    expert_slot *victim;      /* where this read lands */
+    uint64_t     aligned_start;
+    uint32_t     aligned_bytes;
+    uint32_t     offset_in_buffer;
+    int          fd;
+    uint32_t     expert;
+} pending_read;
+
 /* Accumulated inside prepare_batch, read out per token by the profiler. */
 static double g_upload_seconds = 0.0;
+static double g_read_seconds = 0.0;   /* disk/page-cache portion */
+static double g_copy_seconds = 0.0;   /* host-to-device portion */
 
 struct mimo26_gpu_worker {
     mimo26_gpu_worker_config config;
@@ -88,6 +141,12 @@ struct mimo26_gpu_worker {
     void            *sin_table;
     uint16_t        *staging_key;
     uint16_t        *staging_value;
+
+    /* io_uring staging pool. */
+    k3_io_uring *ring;
+    void        *staging_host[MIMO26_STAGING_SLOTS];
+    struct iovec staging_iov[MIMO26_STAGING_SLOTS];
+    bool         staging_ready;
 
     uint64_t resident_bytes;
     uint64_t position;
@@ -199,18 +258,49 @@ static void *upload_tensor(mimo26_gpu_worker *worker, const char *name,
 
 /* ---- bounded packed-expert cache ---- */
 
-static bool ensure_expert(mimo26_gpu_worker *worker, uint32_t layer,
-                          uint32_t expert, mimo26_rocm_expert *out)
+/*
+ * Resolve an expert's physical span and require the layout the block
+ * assumes: one shard, expected sizes, contiguous, in the order recorded in
+ * EXPERT_BLOCK. Checked per expert rather than trusted from a sample -- the
+ * same discipline the fused-QKV layout had to be taught. A mismatch is a
+ * hard failure, never a silent fallback to a different reading.
+ */
+static bool resolve_expert_span(mimo26_gpu_worker *worker, uint32_t layer,
+                                uint32_t expert, uint16_t *shard_out,
+                                uint64_t *start_out)
+{
+    uint64_t base_offset = 0u;
+    uint16_t shard = 0u;
+    for (size_t i = 0; i < 6u; i++) {
+        char name[320];
+        snprintf(name, sizeof name, "model.layers.%u.mlp.experts.%u.%s.%s",
+                 layer, expert, EXPERT_BLOCK[i].projection,
+                 EXPERT_BLOCK[i].suffix);
+        const k3_st_tensor *tensor = k3_st_find(&worker->model, name);
+        if (tensor == NULL || tensor->byte_length != EXPERT_BLOCK[i].bytes) {
+            return false;
+        }
+        if (i == 0u) {
+            base_offset = tensor->physical_offset;
+            shard = tensor->shard;
+        } else if (tensor->shard != shard ||
+                   tensor->physical_offset !=
+                       base_offset + EXPERT_BLOCK[i].offset) {
+            return false;
+        }
+    }
+    *shard_out = shard;
+    *start_out = base_offset;
+    return true;
+}
+
+/* Find a resident slot, or choose a victim to overwrite. A pinned slot holds
+ * an expert the token in flight will still consume, so taking it would mean
+ * reading it back later in the same step. */
+static expert_slot *find_or_evict(mimo26_gpu_worker *worker, uint32_t layer,
+                                  uint32_t expert, bool *already_resident)
 {
     layer_cache *cache = &worker->caches[layer];
-
-    /*
-     * Counted here, in admission, not in the provider. The provider runs
-     * after prepare_batch has already made the whole selection resident, so
-     * it hits by construction -- an earlier version reported its hit rate
-     * and printed a meaningless 100%. What a caller needs to know is how
-     * often an expert had to be fetched, which is exactly this decision.
-     */
     worker->stats.expert_accesses++;
     for (uint16_t s = 0; s < cache->count; s++) {
         expert_slot *slot = &cache->slots[s];
@@ -218,85 +308,34 @@ static bool ensure_expert(mimo26_gpu_worker *worker, uint32_t layer,
             slot->last_used = ++worker->clock;
             slot->pinned = true;
             worker->stats.expert_hits++;
-            if (out != NULL) {
-                *out = slot->view;
-            }
-            return true;
+            *already_resident = true;
+            return slot;
         }
     }
-
-    /* Evict the least recently used slot that this step does not need. A
-     * pinned slot holds an expert the token in flight will still consume, so
-     * taking it would mean reading it back in later in the same step. */
     expert_slot *victim = NULL;
     for (uint16_t s = 0; s < cache->count; s++) {
         expert_slot *slot = &cache->slots[s];
+        /*
+         * Pinned is checked BEFORE empty, and the order is load-bearing.
+         * A slot claimed earlier in this same batch is marked pinned and
+         * cleared to unoccupied while its read is in flight; testing empty
+         * first hands it straight back as a victim, so two reads target one
+         * slot and the first expert silently never lands. That is exactly
+         * what happened when the batched path was first wired up.
+         */
+        if (slot->pinned) {
+            continue;
+        }
         if (!slot->occupied) {
             victim = slot;
             break;
-        }
-        if (slot->pinned) {
-            continue;
         }
         if (victim == NULL || slot->last_used < victim->last_used) {
             victim = slot;
         }
     }
-    if (victim == NULL) {
-        return false;   /* every slot pinned: the cache is smaller than top-k */
-    }
-    victim->occupied = false;
-
-    struct timespec upload_start;
-    clock_gettime(CLOCK_MONOTONIC, &upload_start);
-
-    static const char *kinds[3] = {"gate_proj", "up_proj", "down_proj"};
-    for (size_t j = 0; j < 3; j++) {
-        for (size_t half = 0; half < 2; half++) {
-            char name[320];
-            snprintf(name, sizeof name,
-                     "model.layers.%u.mlp.experts.%u.%s.%s", layer, expert,
-                     kinds[j], half == 0u ? "weight" : "weight_scale");
-            const k3_st_tensor *tensor = k3_st_find(&worker->model, name);
-            if (tensor == NULL) {
-                return false;
-            }
-            const size_t slot_index = j * 2u + half;
-            if (tensor->byte_length != EXPERT_BUFFER_BYTES[slot_index]) {
-                return false;   /* fail closed on an unexpected shape */
-            }
-            char error[256];
-            k3_st_read read;
-            memset(&read, 0, sizeof read);
-            if (!k3_st_read_span(&worker->model, tensor->shard,
-                                 tensor->physical_offset, tensor->byte_length,
-                                 4096u, &read, error, sizeof error)) {
-                return false;
-            }
-            const hipError_t status =
-                hipMemcpy(victim->storage[slot_index], read.data,
-                          tensor->byte_length, hipMemcpyHostToDevice);
-            k3_st_read_release(&read);
-            if (status != hipSuccess) {
-                return false;
-            }
-        }
-    }
-    struct timespec upload_end;
-    clock_gettime(CLOCK_MONOTONIC, &upload_end);
-    g_upload_seconds +=
-        (double)(upload_end.tv_sec - upload_start.tv_sec) +
-        (double)(upload_end.tv_nsec - upload_start.tv_nsec) / 1e9;
-
-    victim->expert = expert;
-    victim->occupied = true;
-    victim->pinned = true;
-    victim->last_used = ++worker->clock;
-    worker->stats.expert_uploads++;
-    if (out != NULL) {
-        *out = victim->view;
-    }
-    return true;
+    *already_resident = false;
+    return victim;
 }
 
 static bool prepare_batch(void *context, uint32_t layer,
@@ -304,6 +343,7 @@ static bool prepare_batch(void *context, uint32_t layer,
 {
     mimo26_gpu_worker *worker = (mimo26_gpu_worker *)context;
     layer_cache *cache = &worker->caches[layer];
+
     /*
      * Two phases, as the CPU worker does. Unpin first so last step's
      * residents are all evictable, then admit the whole batch before a
@@ -313,11 +353,137 @@ static bool prepare_batch(void *context, uint32_t layer,
     for (uint16_t s = 0; s < cache->count; s++) {
         cache->slots[s].pinned = false;
     }
+
+    pending_read pending[MIMO26_ROUTER_TOP_K];
+    size_t pending_count = 0u;
     for (size_t k = 0; k < count; k++) {
-        if (!ensure_expert(worker, layer, experts[k], NULL)) {
+        bool resident = false;
+        expert_slot *slot = find_or_evict(worker, layer, experts[k],
+                                          &resident);
+        if (slot == NULL) {
+            fprintf(stderr, "mimo26 layer %u: every expert slot is pinned; the "
+                    "cache is smaller than the router's top-k\n", layer);
             return false;
         }
+        if (resident) {
+            continue;
+        }
+        uint16_t shard = 0u;
+        uint64_t start = 0u;
+        if (!resolve_expert_span(worker, layer, experts[k], &shard, &start)) {
+            return false;
+        }
+        const int fd = worker->model.shards[shard].direct_fd >= 0
+                           ? worker->model.shards[shard].direct_fd
+                           : worker->model.shards[shard].fd;
+        if (fd < 0) {
+            fprintf(stderr, "mimo26 layer %u: expert %u has an unexpected "
+                    "on-disk layout\n", layer, experts[k]);
+            return false;
+        }
+        const uint64_t aligned_start = start & ~UINT64_C(4095);
+        const uint64_t aligned_end =
+            (start + PACKED_EXPERT_BYTES + UINT64_C(4095)) &
+            ~UINT64_C(4095);
+        if (aligned_end - aligned_start > MIMO26_STAGING_BYTES) {
+            fprintf(stderr, "mimo26 layer %u: shard for expert %u is not open\n",
+                    layer, experts[k]);
+            return false;
+        }
+        /* Claim the slot now so a later expert in this same batch cannot
+         * pick it as its own victim. */
+        slot->occupied = false;
+        slot->pinned = true;
+        slot->expert = experts[k];
+        pending[pending_count].victim = slot;
+        pending[pending_count].aligned_start = aligned_start;
+        pending[pending_count].aligned_bytes =
+            (uint32_t)(aligned_end - aligned_start);
+        pending[pending_count].offset_in_buffer =
+            (uint32_t)(start - aligned_start);
+        pending[pending_count].fd = fd;
+        pending[pending_count].expert = experts[k];
+        pending_count++;
     }
+    if (pending_count == 0u) {
+        return true;
+    }
+
+    struct timespec t0, t1, t2;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+
+    /*
+     * Submit every miss at once so the drive has a queue to work with, then
+     * copy each out of its staging slot as it lands. Issuing these one at a
+     * time was the single largest cost in a token.
+     */
+    size_t done = 0u;
+    while (done < pending_count) {
+        const size_t batch =
+            (pending_count - done) < MIMO26_STAGING_SLOTS
+                ? (pending_count - done) : MIMO26_STAGING_SLOTS;
+        k3_io_request requests[MIMO26_STAGING_SLOTS];
+        for (size_t i = 0; i < batch; i++) {
+            requests[i].fd = pending[done + i].fd;
+            requests[i].offset = pending[done + i].aligned_start;
+            requests[i].bytes = pending[done + i].aligned_bytes;
+            requests[i].buffer_index = (uint16_t)i;
+            requests[i].user_data = (uint64_t)i;
+        }
+        char error[256];
+        if (!k3_io_uring_submit(worker->ring, requests, (uint16_t)batch,
+                                error, sizeof error)) {
+            fprintf(stderr, "mimo26 layer %u: io_uring submit failed: %s\n",
+                    layer, error);
+            return false;
+        }
+        size_t completed = 0u;
+        while (completed < batch) {
+            k3_io_completion completions[MIMO26_STAGING_SLOTS];
+            uint16_t got = 0u;
+            if (!k3_io_uring_wait(worker->ring, completions,
+                                  MIMO26_STAGING_SLOTS, &got, error,
+                                  sizeof error)) {
+                return false;
+            }
+            for (uint16_t c = 0; c < got; c++) {
+                const size_t index = (size_t)completions[c].user_data;
+                pending_read *entry = &pending[done + index];
+                if (completions[c].result < 0 ||
+                    (uint32_t)completions[c].result <
+                        entry->offset_in_buffer + PACKED_EXPERT_BYTES) {
+                    fprintf(stderr, "mimo26 layer %u: short read for expert "
+                            "%u (%d bytes)\n", layer, entry->expert,
+                            (int)completions[c].result);
+                    return false;
+                }
+                const uint8_t *source =
+                    (const uint8_t *)worker->staging_host[index] +
+                    entry->offset_in_buffer;
+                if (hipMemcpy(entry->victim->block, source,
+                              PACKED_EXPERT_BYTES,
+                              hipMemcpyHostToDevice) != hipSuccess) {
+                    fprintf(stderr, "mimo26 layer %u: staging copy failed "
+                            "for expert %u\n", layer, entry->expert);
+                    return false;
+                }
+                entry->victim->occupied = true;
+                entry->victim->last_used = ++worker->clock;
+                worker->stats.expert_uploads++;
+                completed++;
+            }
+        }
+        done += batch;
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    t2 = t1;
+    g_read_seconds += (double)(t1.tv_sec - t0.tv_sec) +
+                      (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
+    g_copy_seconds += (double)(t2.tv_sec - t1.tv_sec) +
+                      (double)(t2.tv_nsec - t1.tv_nsec) / 1e9;
+    g_upload_seconds += (double)(t1.tv_sec - t0.tv_sec) +
+                        (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
     return true;
 }
 
@@ -333,7 +499,11 @@ static bool provide_expert(void *context, uint32_t layer, uint32_t expert,
             return true;
         }
     }
-    return false;   /* prepare_batch should have admitted it */
+    /* prepare_batch admits the whole selection before anything is read, so
+     * reaching here is a logic error in admission rather than a miss. */
+    fprintf(stderr, "mimo26 layer %u: expert %u was not admitted\n", layer,
+            expert);
+    return false;
 }
 
 /* ---- lifecycle ---- */
@@ -346,10 +516,8 @@ void mimo26_gpu_worker_destroy(mimo26_gpu_worker *worker)
     for (uint32_t l = 0; l < LAYERS; l++) {
         layer_cache *cache = &worker->caches[l];
         for (uint16_t s = 0; s < cache->count; s++) {
-            for (size_t i = 0; i < 6; i++) {
-                if (cache->slots[s].storage[i] != NULL) {
-                    hipFree(cache->slots[s].storage[i]);
-                }
+            if (cache->slots[s].block != NULL) {
+                hipFree(cache->slots[s].block);
             }
         }
         free(cache->slots);
@@ -391,6 +559,14 @@ void mimo26_gpu_worker_destroy(mimo26_gpu_worker *worker)
     hipFree(worker->scratch.router_weights);
     hipFree(worker->scratch.router_ids);
     hipFree(worker->scratch.attention_scratch);
+    if (worker->ring != NULL) {
+        k3_io_uring_destroy(worker->ring);
+    }
+    for (uint16_t s = 0; s < MIMO26_STAGING_SLOTS; s++) {
+        if (worker->staging_host[s] != NULL) {
+            hipHostFree(worker->staging_host[s]);
+        }
+    }
     free(worker->staging_key);
     free(worker->staging_value);
     if (worker->kv != NULL) {
@@ -541,18 +717,18 @@ mimo26_gpu_worker_status mimo26_gpu_worker_create(
             REQUIRE(cache->slots != NULL, "expert cache allocation failed");
             for (uint16_t s = 0; s < cache->count; s++) {
                 expert_slot *slot = &cache->slots[s];
-                for (size_t i = 0; i < 6; i++) {
-                    REQUIRE(hipMalloc(&slot->storage[i],
-                                      EXPERT_BUFFER_BYTES[i]) == hipSuccess,
-                            "expert slot allocation failed");
-                    worker->resident_bytes += EXPERT_BUFFER_BYTES[i];
-                }
-                slot->view.gate_packed = slot->storage[0];
-                slot->view.gate_scales = slot->storage[1];
-                slot->view.up_packed = slot->storage[2];
-                slot->view.up_scales = slot->storage[3];
-                slot->view.down_packed = slot->storage[4];
-                slot->view.down_scales = slot->storage[5];
+                REQUIRE(hipMalloc(&slot->block, PACKED_EXPERT_BYTES) ==
+                            hipSuccess,
+                        "expert slot allocation failed");
+                worker->resident_bytes += PACKED_EXPERT_BYTES;
+                /* Views into the block, at the file's own offsets. */
+                uint8_t *base = (uint8_t *)slot->block;
+                slot->view.down_packed = base + EXPERT_BLOCK[0].offset;
+                slot->view.down_scales = base + EXPERT_BLOCK[1].offset;
+                slot->view.gate_packed = base + EXPERT_BLOCK[2].offset;
+                slot->view.gate_scales = base + EXPERT_BLOCK[3].offset;
+                slot->view.up_packed = base + EXPERT_BLOCK[4].offset;
+                slot->view.up_scales = base + EXPERT_BLOCK[5].offset;
             }
         }
     }
@@ -594,6 +770,24 @@ mimo26_gpu_worker_status mimo26_gpu_worker_create(
     SCRATCH(attention_scratch,
             mimo26_rocm_attention_scratch_floats(capacity) * sizeof(float));
     #undef SCRATCH
+
+    /*
+     * Mapped staging plus a registered ring, following K3's engine. The
+     * buffers are GPU-visible, so the copy out of them is a pinned transfer
+     * rather than a pageable one, and O_DIRECT reads land straight in them.
+     */
+    for (uint16_t s = 0; s < MIMO26_STAGING_SLOTS; s++) {
+        REQUIRE(hipHostMalloc(&worker->staging_host[s],
+                              MIMO26_STAGING_BYTES,
+                              hipHostMallocMapped) == hipSuccess,
+                "staging allocation failed");
+        worker->staging_iov[s].iov_base = worker->staging_host[s];
+        worker->staging_iov[s].iov_len = MIMO26_STAGING_BYTES;
+    }
+    REQUIRE(k3_io_uring_create(&worker->ring, worker->staging_iov,
+                               MIMO26_STAGING_SLOTS, error, error_size),
+            "io_uring creation failed");
+    worker->staging_ready = true;
 
     worker->staging_key = (uint16_t *)calloc(
         (size_t)MIMO26_SWA_KV_HEADS * QK, sizeof *worker->staging_key);
@@ -643,6 +837,8 @@ mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
     double kv_seconds = 0.0, layer_seconds = 0.0, head_seconds = 0.0;
     double stage_seconds = 0.0;
     g_upload_seconds = 0.0;
+    g_read_seconds = 0.0;
+    g_copy_seconds = 0.0;
     struct timespec mark, mark2;
     #define TICK() do { if (profile) { hipDeviceSynchronize(); \
         clock_gettime(CLOCK_MONOTONIC, &mark); } } while (0)
@@ -730,16 +926,18 @@ mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
         context.provider = w->is_moe ? provide_expert : NULL;
         context.provider_context = worker;
 
-        if (mimo26_rocm_layer_decode(&context, &worker->scratch,
+        const mimo26_rocm_layer_status layer_status =
+            mimo26_rocm_layer_decode(&context, &worker->scratch,
                                      worker->hidden, worker->device_keys,
                                      worker->device_values, worker->cos_table,
                                      worker->sin_table, history,
-                                     first_position, position, NULL,
-                                     NULL) != MIMO26_ROCM_LAYER_OK) {
+                                     first_position, position, NULL, NULL);
+        if (layer_status != MIMO26_ROCM_LAYER_OK) {
             mimo26_kv_abort(worker->kv);
             worker->stats.aborted_steps++;
             return fail(error, error_size, MIMO26_GPU_WORKER_DECODE_FAILED,
-                        "layer %u failed", l);
+                        "layer %u failed with status %d", l,
+                        (int)layer_status);
         }
 
         TOCK(layer_seconds);
@@ -803,10 +1001,12 @@ mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
     }
     if (profile) {
         fprintf(stderr, "    profile pos %llu: layers %.3f s (of which "
-                        "expert admission %.3f s, compute %.3f s), "
+                        "expert admission %.3f s [read %.3f, copy %.3f], "
+                        "compute %.3f s), "
                         "kv-up %.3f s, kv-down %.3f s, head %.3f s\n",
                 (unsigned long long)position, layer_seconds,
-                g_upload_seconds, layer_seconds - g_upload_seconds,
+                g_upload_seconds, g_read_seconds, g_copy_seconds,
+                layer_seconds - g_upload_seconds,
                 kv_seconds, stage_seconds, head_seconds);
     }
     #undef TICK

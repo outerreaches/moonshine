@@ -987,7 +987,8 @@ tools/mimo26_gpu_run: tools/mimo26_gpu_run.o mimo26_gpu_worker.o \
 		mimo26_rocm_layer.o mimo26_rocm_ops.o k3_rocm_ops.o \
 		mimo26_weights.o mimo26_kv.o mimo26_manifest.o \
 		mimo26_architecture.o mimo26_attention.o mimo26_ops.o \
-		mimo26_router.o glm53_fp8_oracle.o k3_safetensors.o k3_json.o
+		mimo26_router.o glm53_fp8_oracle.o k3_safetensors.o k3_json.o \
+		k3_io_uring.o
 	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
 
 tests/test_mimo26_gpu_qualify.o: tests/test_mimo26_gpu_qualify.cu \
@@ -997,7 +998,8 @@ tests/test_mimo26_gpu_qualify: tests/test_mimo26_gpu_qualify.o \
 		mimo26_gpu_worker.o mimo26_rocm_layer.o mimo26_rocm_ops.o \
 		k3_rocm_ops.o mimo26_weights.o mimo26_kv.o mimo26_manifest.o \
 		mimo26_architecture.o mimo26_attention.o mimo26_ops.o \
-		mimo26_router.o glm53_fp8_oracle.o k3_safetensors.o k3_json.o
+		mimo26_router.o glm53_fp8_oracle.o k3_safetensors.o k3_json.o \
+		k3_io_uring.o
 	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
 
 # GPU operational qualification, mirroring mimo26-qualify on the CPU.
