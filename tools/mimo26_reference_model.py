@@ -131,7 +131,27 @@ def main():
             rotary = reference.MiMoV2RotaryEmbedding(config, is_swa=is_swa)
             position_embeddings = rotary(hidden, position_ids)
 
-            if os.environ.get("MIMO26_ROPE_INTERLEAVED") == "1":
+            if os.environ.get("MIMO26_ROPE_TAIL") == "1":
+                # Rotate the LAST rope_dim coordinates instead of the first.
+                # Identity at distance 0 either way, so only a distance-
+                # dependent test distinguishes them.
+                def tail_rope(q, k, cos, sin, position_ids=None,
+                              unsqueeze_dim=1):
+                    cos = cos.unsqueeze(unsqueeze_dim)
+                    sin = sin.unsqueeze(unsqueeze_dim)
+                    d = cos.shape[-1]
+                    half = d // 2
+                    def rot(x):
+                        head = x[..., :-d]
+                        tail = x[..., -d:]
+                        x1 = tail[..., :half]
+                        x2 = tail[..., half:]
+                        rotated = torch.cat((-x2, x1), dim=-1)
+                        return torch.cat((head, tail * cos + rotated * sin),
+                                         dim=-1)
+                    return rot(q), rot(k)
+                reference.apply_rotary_pos_emb = tail_rope
+            elif os.environ.get("MIMO26_ROPE_INTERLEAVED") == "1":
                 # The shipped reference uses split-half (NeoX) pairing. Test
                 # interleaved (GPT-J) pairing instead: pairs (2p, 2p+1) rather
                 # than (p, p+32). Identity at distance 0 either way, so only a
@@ -201,6 +221,11 @@ def main():
                 moe.eval()
                 with torch.no_grad():
                     mlp_out = moe(normed)
+                    if os.environ.get("MIMO26_SKIP_MOE") == "1":
+                        # Zero the MoE contribution. If ranks improve, the
+                        # expert path is actively harmful; if they collapse,
+                        # it is contributing real signal.
+                        mlp_out = torch.zeros_like(mlp_out)
                     if os.environ.get("MIMO26_MOE_DETAIL") == str(layer):
                         idx, wts = gate(normed)
                         print(f"      normed rms "

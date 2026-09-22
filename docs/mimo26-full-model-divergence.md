@@ -53,6 +53,28 @@ Each of these was tested, not assumed. Recorded so they are not re-tried.
 | Routing is degenerate | Three tokens select 20-22 distinct experts of 256; router weights sum to 1.0000 |
 | Expert weights are corrupt | On a unit-rms random input an expert gives out rms 0.066, exactly what its weight magnitudes predict |
 | The architecture is misread | The shipped technical report's table matches on every parameter: 48/39/9 layers, 64/8 SWA heads, 64/4 GA, QK/V 192/128, window 128, 256/8 experts |
+| The MoE path is actively harmful | Zeroing every MoE contribution collapses all ranks past 68,000, far worse than keeping it, so the experts carry real signal |
+
+## The sharpest unexplained observation
+
+Positions 6 and 12 of the natural-text run feed the **same token** (`.`) and
+expect the **same token** (` The`). They get rank **5** and rank **100,421**.
+Identical local context, different absolute position, wildly different
+quality. Whatever is wrong is a function of position, not of content.
+
+RoPE is the obvious suspect and has survived every test so far: the theta per
+layer type is measured correct, and interleaved pairing destroys the one
+prediction that currently works. But note the elimination is not complete —
+see below.
+
+## Not yet tested, despite an earlier attempt
+
+**Rotating a different 64-dim slice.** An attempt to rotate the last 64
+coordinates instead of the first was a **no-op** and proves nothing: the
+reference splits the rope slice *before* calling `apply_rotary_pos_emb`, so
+patching that function received only the 64 rope dims and rotated all of them.
+The unchanged ranks confirm the patch did nothing. Testing this properly means
+patching the split in `_forward_attention`, not the rotation helper.
 
 ## Two real bugs found and fixed on the way
 
