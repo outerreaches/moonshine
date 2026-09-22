@@ -946,6 +946,9 @@ mimo26-gpu-attention: tests/test_mimo26_gpu_attention
 mimo26-gpu-ops: tests/test_mimo26_gpu_ops
 	./tests/test_mimo26_gpu_ops
 
+# The whole GPU gate set, in dependency order.
+mimo26-gpu: mimo26-gpu-ops mimo26-gpu-attention mimo26-gpu-mxfp4
+
 # G1: the MiMo expert path on the GPU against the verified CPU dequantizer.
 mimo26-gpu-mxfp4: tests/test_mimo26_gpu_mxfp4
 	MIMO26_ROOT=$(MIMO26_ROOT) ./tests/test_mimo26_gpu_mxfp4
