@@ -59,7 +59,10 @@ GLM53_OBJS := \
 
 MIMO26_CPU_TESTS := \
 	tests/test_mimo26_architecture \
-	tests/test_mimo26_manifest
+	tests/test_mimo26_manifest \
+	tests/test_mimo26_fp8 \
+	tests/test_mimo26_router \
+	tests/test_mimo26_ops
 
 GLM53_CPU_TESTS := \
 	tests/test_glm53_arch_math \
@@ -312,6 +315,7 @@ glm53_fp8_dynamic.o: glm53_fp8_dynamic.c glm53_fp8_dynamic.h
 glm53_fp8_dynamic.o: CFLAGS += -fno-fast-math
 glm53_fp8_oracle.o: glm53_fp8_oracle.c glm53_fp8_oracle.h
 glm53_fp8_oracle.o: CFLAGS += -fno-fast-math
+tests/test_mimo26_fp8.o: CFLAGS += -fno-fast-math
 glm53_manifest.o: glm53_manifest.c glm53_manifest.h k3_json.h \
 	k3_safetensors.h
 glm53_official_tensor.o: glm53_official_tensor.c glm53_official_tensor.h \
@@ -445,6 +449,26 @@ tests/test_mimo26_official.o: tests/test_mimo26_official.c \
 	mimo26_manifest.h mimo26_architecture.h k3_safetensors.h
 tests/test_mimo26_official: tests/test_mimo26_official.o \
 		mimo26_manifest.o mimo26_architecture.o k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+mimo26_ops.o: mimo26_ops.c mimo26_ops.h
+mimo26_ops.o: CFLAGS += -fno-fast-math
+tests/test_mimo26_ops.o: tests/test_mimo26_ops.c mimo26_ops.h \
+	glm53_arch_math.h
+tests/test_mimo26_ops.o: CFLAGS += -fno-fast-math
+tests/test_mimo26_ops: tests/test_mimo26_ops.o mimo26_ops.o \
+		glm53_arch_math.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+mimo26_router.o: mimo26_router.c mimo26_router.h
+mimo26_router.o: CFLAGS += -fno-fast-math
+tests/test_mimo26_router.o: tests/test_mimo26_router.c \
+	mimo26_router.h glm53_arch_math.h
+tests/test_mimo26_router.o: CFLAGS += -fno-fast-math
+tests/test_mimo26_router: tests/test_mimo26_router.o mimo26_router.o \
+		glm53_arch_math.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_mimo26_fp8.o: tests/test_mimo26_fp8.c \
+	glm53_fp8_oracle.h mimo26_architecture.h
+tests/test_mimo26_fp8: tests/test_mimo26_fp8.o glm53_fp8_oracle.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 mimo26_manifest.o: mimo26_manifest.c mimo26_manifest.h \
 	mimo26_architecture.h k3_safetensors.h k3_json.h
@@ -752,6 +776,9 @@ test-mimo26-schema: tests/test_mimo26_architecture \
 		tests/test_mimo26_manifest
 	./tests/test_mimo26_architecture
 	./tests/test_mimo26_manifest
+	./tests/test_mimo26_fp8
+	./tests/test_mimo26_router
+	./tests/test_mimo26_ops
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/test_mimo26_audit.py
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/test_mimo26_tokenizer.py
 

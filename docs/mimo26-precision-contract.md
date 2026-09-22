@@ -105,7 +105,7 @@ the others, and reject disagreement rather than picking silently.
 | `routed_scaling_factor` | DECLARED | absent from config, so 1.0 |
 | Group masking | DECLARED | `n_group = topk_group = 1`; assert, do not assume |
 | Expert accumulation order | DECLARED | ascending expert id |
-| Expert accumulation dtype | OPEN | reference uses F32; do not inherit GLM BF16 |
+| Expert accumulation dtype | SETTLED | F32 accumulator, **one** BF16 cast at the end |
 
 `moe_router_dtype: bfloat16` contradicts the reference forward, which does
 `F.linear(x.float(), w.float())` unconditionally. The reference wins.
@@ -113,6 +113,42 @@ the others, and reject disagreement rather than picking silently.
 The reference calls `topk(..., sorted=False)`, leaving expert order
 unspecified. Floating-point accumulation is order-sensitive, so an order is
 declared here rather than inherited from a library's scheduling.
+
+## Norms, activations, accumulation and residual
+
+Implemented in `mimo26_ops.{c,h}`, tested by `tests/test_mimo26_ops.c`. Each
+row was confirmed against a double-precision reference, and each is also shown
+to differ measurably from its natural-looking alternative — the contract
+distinctions are demonstrated, not asserted.
+
+| Item | Status | Value |
+| --- | --- | --- |
+| RMSNorm epsilon | SETTLED | 1e-6, from `layernorm_epsilon` |
+| RMSNorm accumulation | SETTLED | F32 mean of squares, index order |
+| RMSNorm cast order | SETTLED | round to BF16 **then** multiply by weight |
+| Activation | SETTLED | plain `silu(gate) * up`, unclamped |
+| Expert accumulation | SETTLED | F32, one BF16 cast after the weighted sum |
+| Residual | SETTLED | BF16 + BF16, single rounding |
+| BF16 rounding | SETTLED | round-to-nearest-even everywhere |
+
+**RMSNorm rounds twice.** The reference is
+`return self.weight * hidden_states.to(input_dtype)` — the normalized value is
+cast back to BF16 *before* the weight multiply, and the weight is BF16, so the
+product is BF16×BF16. Multiplying in F32 and rounding once is the natural
+implementation and it is wrong: **1029 of 4096** elements differ in the test.
+
+**GLM's limited SwiGLU is not reusable.** `glm53_limited_swiglu_f32` caps gate
+above and clamps up to a symmetric range; MiMo's reference MLP does neither.
+They differ on **1681 of 4096** elements at a limit of 7.0. This is the clearest
+example of a primitive that looks reusable and is not.
+
+**Expert outputs accumulate in F32 with exactly one cast.** The reference
+allocates the accumulator as `zeros_like(hidden_states, dtype=topk_weights.dtype)`
+and the gate runs in F32, so the accumulator is F32; each BF16 expert output is
+promoted, multiplied by its F32 router weight, added in F32, and the result is
+cast once by `final_hidden_states.type(hidden_states.dtype)`. Rounding after
+each expert instead changes **35 of 64** elements. This is what the feasibility
+note meant by not inheriting GLM's BF16 accumulation boundaries.
 
 ## Numerical evidence
 
@@ -169,12 +205,22 @@ Tool calls are **not** JSON: arguments are nested parameter tags. A parser and
 a round-trip test are required before tool support is offered, and rendering
 fixtures are not evidence that tool execution works.
 
+## Reuse decisions
+
+| Primitive | Verdict |
+| --- | --- |
+| `k3_rocm_mxfp4_*` expert kernels | Reusable, verified on real bytes at both geometries |
+| `glm53_fp8_oracle` block-FP8 | Reusable, verified at all four MiMo geometries including the `[108,32]` overhang |
+| `glm53_router_topk_f32` | Contract-identical including the `1e-20` epsilon; used as a cross-check oracle, but MiMo declares ascending-id order so `mimo26_router` owns the accumulation |
+| `glm53_limited_swiglu_f32` | **Not reusable** — clamps where MiMo does not |
+| `k3_st_model_open*` | **Not applicable** — MiMo's shard names need `k3_st_model_open_paths` |
+
 ## Open items blocking M1 exit
 
-1. Expert accumulation dtype and the exact cast points for RMSNorm, SiLU and
-   residual boundaries.
-2. Window boundary semantics at positions 127/128/129 and 255/256/257.
-3. Dense and QKV FP8 dequantization, including the global QKV scale-grid
-   overhang described in `mimo26-bringup.md`.
-4. The independent full-model reference path. An opaque chat API cannot
+1. Window boundary semantics at positions 127/128/129 and 255/256/257, and
+   whether the window count is inclusive of the current token.
+2. Attention primitives: the 192^-0.5 scale, partial RoPE on 64 coordinates,
+   the pre-cache 0.707 V scale and the per-head SWA sink logit are specified
+   above but not yet implemented or tested.
+3. The independent full-model reference path. An opaque chat API cannot
    establish logit, route or precision parity.
