@@ -1,0 +1,39 @@
+vLLM 0.30.0, vllm/model_executor/models/mimo_v2.py
+Quoted for provenance of the fused QKV layout. Apache-2.0; not vendored
+into runtime code. This docstring is the source of the grouped-QKV fix.
+
+def _shard_fp8_qkv_proj(
+    w_full: torch.Tensor,
+    s_full: torch.Tensor,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    v_head_dim: int,
+    tp_rank: int,
+    tp_size: int,
+    block: int = 128,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Shard the fp8 qkv_proj weights for ``tp_rank``.
+
+    The checkpoint stores the fused QKV as ``num_kv_heads`` contiguous groups
+    (one per KV head; ``n`` below), each ordered ``[Q | K | V]``:
+
+        [Q_1 | K_1 | V_1 | Q_2 | K_2 | V_2 | ... | Q_n | K_n | V_n]
+
+    Per group, Q has ``(num_heads / num_kv_heads) * head_dim`` rows, K has
+    ``head_dim`` rows, and V has ``v_head_dim`` rows.
+
+    Each TP rank owns ``g = num_kv_heads / tp_size`` of these groups, and the
+    forward expects them de-interleaved into a single Q, K, and V block:
+
+        [Q_1 | Q_2 | ... | Q_g | K_1 | K_2 | ... | K_g | V_1 | V_2 | ... | V_g]
+
+    When ``g == 1`` the rank's slice is already ``[Q | K | V]``, so a plain
+    chunk suffices. When ``g > 1`` we cannot reach the de-interleaved layout by
+    re-permuting the fp8 block scales: each scale covers a 128-row block, and
+    since K is 192 rows (1.5 blocks) a block straddles the K/V boundary, so no
+    whole-block permutation produces it. Instead we dequantize this rank's
+    groups to float (dropping the block constraint), reorder the rows into the
+    layout above (Q, K, and V then each span a whole number of blocks), and
+    re-quantize to fp8.
+    """

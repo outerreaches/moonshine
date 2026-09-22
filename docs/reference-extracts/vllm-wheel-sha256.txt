@@ -1,0 +1,1 @@
+ef52ee58c410ead0b8afb190838fa4cbcb52075596f67862a03859d984966ac4  vllm-0.30.0-cp38-abi3-manylinux_2_28_x86_64.whl

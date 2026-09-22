@@ -250,7 +250,7 @@ def main():
                 # Reproduce the pre-softmax scores to see their spread. A
                 # uniform softmax means the scores barely differ.
                 with torch.no_grad():
-                    qkv = attention.qkv_proj(normed)
+                    qkv = attention.qkv_proj(normed)  # weights already de-interleaved
                     qs, ks, vs = qkv.split([attention.q_size, attention.k_size,
                                             attention.v_size], dim=-1)
                     qh = qs.view(1, -1, attention.num_attention_heads,
@@ -285,12 +285,17 @@ def main():
                              last.clamp_min(1e-9).log()).sum(dim=-1)
                 import math
                 uniform = math.log(last.shape[-1])
+                sharp = int(per_head.argmin())
+                where = int(last[sharp].argmax())
+                # Induction on this prompt needs a head at the final token to
+                # attend to the position right after an earlier match.
+                top3 = torch.topk(last[sharp], 3)
                 print(f"      attn@last layer {layer:2d} "
-                      f"{'SWA' if is_swa else 'GLB'}: mass {float(last.sum(-1).mean()):.4f} "
-                      f"per-head entropy mean {float(per_head.mean()):.3f} "
-                      f"min {float(per_head.min()):.3f} (uniform {uniform:.3f}) "
-                      f"sharpest head max-weight {float(last.max()):.4f}",
-                      flush=True)
+                      f"{'SWA' if is_swa else 'GLB'}: entropy mean "
+                      f"{float(per_head.mean()):.3f} min {float(per_head.min()):.3f} "
+                      f"(uniform {uniform:.3f}) | sharpest head {sharp} -> pos "
+                      f"{where} w={float(last[sharp].max()):.3f}  top3 pos "
+                      f"{[int(i) for i in top3.indices]}", flush=True)
             attn_contrib = attention_out
             hidden = residual + attention_out
             del attention, input_norm, normed
