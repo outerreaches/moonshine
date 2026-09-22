@@ -100,7 +100,6 @@ void mimo26_slot_finish(mimo26_slot *slot)
         slot->phase = MIMO26_SLOT_IDLE;
     }
     slot->cancel_requested = false;
-    slot->request_id = 0u;
 }
 
 void mimo26_slot_fault(mimo26_slot *slot)
@@ -110,7 +109,6 @@ void mimo26_slot_fault(mimo26_slot *slot)
     }
     slot->faults++;
     slot->cancel_requested = false;
-    slot->request_id = 0u;
     /*
      * Quarantine even while draining. The process is going away, but a
      * shutdown that keeps serving from a worker whose KV history may be
@@ -147,6 +145,20 @@ bool mimo26_slot_drain(mimo26_slot *slot)
     }
     slot->phase = MIMO26_SLOT_DRAINING;
     return false;
+}
+
+void mimo26_slot_count_rejection(mimo26_slot *slot,
+                                 mimo26_slot_admission reason)
+{
+    if (slot == NULL) {
+        return;
+    }
+    switch (reason) {
+    case MIMO26_SLOT_REJECT_BUSY:        slot->rejected_busy++; break;
+    case MIMO26_SLOT_REJECT_QUARANTINED: slot->rejected_quarantined++; break;
+    case MIMO26_SLOT_REJECT_DRAINING:    slot->rejected_draining++; break;
+    case MIMO26_SLOT_ADMIT_OK:           break;
+    }
 }
 
 bool mimo26_slot_busy(const mimo26_slot *slot)

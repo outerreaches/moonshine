@@ -1007,6 +1007,17 @@ tests/test_mimo26_gpu_qualify: tests/test_mimo26_gpu_qualify.o \
 mimo26-gpu-qualify: tests/test_mimo26_gpu_qualify
 	MIMO26_ROOT=$(MIMO26_ROOT) ./tests/test_mimo26_gpu_qualify
 
+mimo26_server.o: mimo26_server.cu mimo26_gpu_worker.h \
+	mimo26_server_slot.h mimo26_tokenizer.h k3_json.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tools/mimo26_server: mimo26_server.o mimo26_server_slot.o \
+		mimo26_tokenizer.o mimo26_gpu_worker.o mimo26_rocm_layer.o \
+		mimo26_rocm_ops.o k3_rocm_ops.o mimo26_weights.o mimo26_kv.o \
+		mimo26_manifest.o mimo26_architecture.o mimo26_attention.o \
+		mimo26_ops.o mimo26_router.o glm53_fp8_oracle.o \
+		k3_safetensors.o k3_json.o k3_io_uring.o k3_expert_cache.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS) $(ICU_LDLIBS)
+
 # The whole GPU gate set, in dependency order.
 mimo26-gpu: mimo26-gpu-ops mimo26-gpu-attention mimo26-gpu-mxfp4 \
 	mimo26-gpu-layer mimo26-gpu-qualify

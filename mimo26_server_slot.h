@@ -59,7 +59,10 @@ typedef enum {
 
 typedef struct {
     mimo26_slot_phase phase;
-    uint64_t request_id;        /* increments per admission; 0 when idle */
+    /* Monotonic across the process; identifies the most recent admission.
+     * Not cleared on finish -- it is a correlation id, and reusing it would
+     * make two different requests share a log line and a response id. */
+    uint64_t request_id;
     double   started_seconds;   /* caller's clock at admission */
     double   deadline_seconds;  /* 0 disables */
     uint32_t max_tokens;
@@ -122,6 +125,14 @@ bool mimo26_slot_recover(mimo26_slot *slot);
 /* Stop accepting work. Returns true when the slot is already idle, so the
  * caller knows whether it must wait for an in-flight request. */
 bool mimo26_slot_drain(mimo26_slot *slot);
+
+/*
+ * Record a rejection the caller issued without going through admit. The
+ * server refuses queued connections directly, and without this the health
+ * endpoint under-reports exactly the pressure an operator is looking for.
+ */
+void mimo26_slot_count_rejection(mimo26_slot *slot,
+                                 mimo26_slot_admission reason);
 
 bool mimo26_slot_busy(const mimo26_slot *slot);
 /* Ready means: healthy, accepting, and able to start work now. */
