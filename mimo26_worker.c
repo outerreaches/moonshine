@@ -260,6 +260,19 @@ mimo26_worker_status mimo26_worker_create(mimo26_worker **out, const char *root,
         return fail(error, error_size, MIMO26_WORKER_INVALID_ARGUMENT,
                     "invalid worker configuration");
     }
+    /*
+     * One token routes to MIMO26_ROUTER_TOP_K distinct experts per MoE layer
+     * and needs them resident together, so a cache smaller than that cannot
+     * serve even a single step: the plan phase admits k entries into fewer
+     * slots and the commit phase finds one missing. Refuse here rather than
+     * let it surface as a failed decode partway through the first token.
+     */
+    if (config->expert_slots_per_layer < MIMO26_ROUTER_TOP_K) {
+        return fail(error, error_size, MIMO26_WORKER_INVALID_ARGUMENT,
+                    "%u expert slots per layer cannot hold the %u experts one "
+                    "token routes to", (unsigned)config->expert_slots_per_layer,
+                    (unsigned)MIMO26_ROUTER_TOP_K);
+    }
     *out = NULL;
 
     const uint64_t planned = mimo26_worker_planned_bytes(config);

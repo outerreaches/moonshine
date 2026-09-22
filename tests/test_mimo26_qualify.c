@@ -218,29 +218,48 @@ int main(void)
 
     mimo26_worker_destroy(worker);
 
-    /* 2. The expert cache is a cache. Halving it changes the hit rate and the
-     * number of dequantizations, and must change nothing else. */
+    /* A cache smaller than one token's working set must be refused at create.
+     * Found by this test: with 4 slots the first decode failed with "expert 14
+     * was neither hit nor admitted", a mid-token failure for a configuration
+     * that was never viable. */
     {
-        mimo26_worker_config small = config;
-        small.expert_slots_per_layer = 4;
-        mimo26_worker *lean = NULL;
-        status = mimo26_worker_create(&lean, root, &small, error,
+        mimo26_worker_config starved = config;
+        starved.expert_slots_per_layer = 4;
+        mimo26_worker *refused = NULL;
+        status = mimo26_worker_create(&refused, root, &starved, error,
+                                      sizeof error);
+        ok("fewer slots than the router's top-k is refused",
+           status == MIMO26_WORKER_INVALID_ARGUMENT && refused == NULL,
+           status == MIMO26_WORKER_INVALID_ARGUMENT ? error : "accepted");
+        if (refused != NULL) {
+            mimo26_worker_destroy(refused);
+        }
+    }
+
+    /* 2. Above that floor the expert cache is a cache. Doubling it changes
+     * the hit rate and the number of dequantizations, and must change
+     * nothing else. */
+    {
+        mimo26_worker_config roomy = config;
+        roomy.expert_slots_per_layer = 16;
+        mimo26_worker *wide = NULL;
+        status = mimo26_worker_create(&wide, root, &roomy, error,
                                       sizeof error);
         if (status != MIMO26_WORKER_OK) {
-            fprintf(stderr, "lean worker create failed: %s\n", error);
+            fprintf(stderr, "wide worker create failed: %s\n", error);
             return 1;
         }
-        if (!decode_run(lean, PROMPT, tokens, b, VOCAB)) {
+        if (!decode_run(wide, PROMPT, tokens, b, VOCAB)) {
             return 1;
         }
-        mimo26_worker_stats lean_stats;
-        mimo26_worker_get_stats(lean, &lean_stats);
-        compare_logits("4 expert slots match 8 exactly", a, b,
+        mimo26_worker_stats wide_stats;
+        mimo26_worker_get_stats(wide, &wide_stats);
+        compare_logits("16 expert slots match 8 exactly", a, b,
                        tokens * VOCAB);
-        ok("the lean worker did more dequantizations",
-           lean_stats.expert_loads > 0, NULL);
-        ok("no step aborted", lean_stats.aborted_steps == 0, NULL);
-        mimo26_worker_destroy(lean);
+        ok("the wider worker still dequantized experts",
+           wide_stats.expert_loads > 0, NULL);
+        ok("no step aborted", wide_stats.aborted_steps == 0, NULL);
+        mimo26_worker_destroy(wide);
     }
 
     free(a);

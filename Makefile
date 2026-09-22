@@ -902,6 +902,26 @@ mimo26-layer-parity: tests/test_mimo26_layer_parity
 mimo26-qualify: tests/test_mimo26_qualify
 	MIMO26_ROOT=$(MIMO26_ROOT) ./tests/test_mimo26_qualify
 
+tools/mimo26_eval.o: tools/mimo26_eval.c mimo26_worker.h
+tools/mimo26_eval.o: CFLAGS += -fno-fast-math
+tools/mimo26_eval: tools/mimo26_eval.o \
+		mimo26_worker.o mimo26_layer.o mimo26_weights.o mimo26_kv.o \
+		mimo26_manifest.o mimo26_architecture.o mimo26_attention.o \
+		mimo26_ops.o mimo26_router.o k3_expert_cache.o \
+		glm53_fp8_oracle.o k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+# M4 functional-quality gate. Teacher-forced over the corpus frozen in
+# tests/mimo26_eval_spec.json, scored against thresholds frozen with it.
+# Hours on CPU at roughly a minute per token.
+mimo26-eval: tools/mimo26_eval
+	MIMO26_ROOT=$(MIMO26_ROOT) PYTHONDONTWRITEBYTECODE=1 \
+	  $(PYTHON) tests/mimo26_eval_tokens.py > mimo26-eval-tokens.txt
+	./tools/mimo26_eval $(MIMO26_ROOT) < mimo26-eval-tokens.txt \
+	  > mimo26-eval.jsonl
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/score_mimo26_eval.py \
+	  mimo26-eval.jsonl
+
 mimo26-budget:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tools/mimo26_budget.py \
 		$(MIMO26_ROOT)

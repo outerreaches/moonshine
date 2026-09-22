@@ -1,0 +1,48 @@
+{
+  "_comment": [
+    "M4 functional-quality gate for the MiMo V2.6 Flash text lane.",
+    "",
+    "Frozen 2026-09-22, before any evaluation was run, and committed in the",
+    "same commit as the tool that produces the numbers. The thresholds below",
+    "were chosen from what a working 15B-active MoE should do on natural",
+    "English, not from observed output.",
+    "",
+    "WHAT THIS GATE IS. It discriminates a working model from a broken one.",
+    "Before the TP-shard QKV fix this lane produced true-token ranks in the",
+    "tens of thousands; after it, rank 1 on a repetition probe. A gate at",
+    "mean log-prob -4.0 nats separates those by a wide margin. It is NOT a",
+    "quality benchmark and must not be reported as one.",
+    "",
+    "CORPUS PROVENANCE AND ITS BIAS. The passage was written for this gate on",
+    "2026-09-22 and was not used in any debugging probe, so it is held out",
+    "from the work that produced the implementation. It is not held out from",
+    "the model's training distribution in any controlled sense, and being",
+    "plain expository English it is probably easier than average web text.",
+    "That bias runs toward passing, which is acceptable for a broken/working",
+    "discriminator and would not be acceptable for a quality claim.",
+    "",
+    "Scoring is teacher-forced: every position is fed the true token, so a",
+    "single wrong prediction cannot cascade. Position 0 has no prediction to",
+    "score and is excluded."
+  ],
+  "frozen": "2026-09-22",
+  "text": "The harbour master kept a logbook for thirty years. Every morning he wrote the tide, the wind, and the names of the boats that had gone out before dawn. He did not consider this work important, and no one asked him for it. When the new pier was proposed, the engineers wanted to know how often the water rose above the old sea wall. There was no other record. They read his handwriting for three weeks and built the pier a metre higher than they had planned.",
+  "thresholds": {
+    "mean_logprob_min": -4.0,
+    "top1_accuracy_min": 0.35,
+    "top10_accuracy_min": 0.70,
+    "median_rank_max": 3,
+    "worst_rank_max": 20000,
+    "nonfinite_logits_max": 0,
+    "aborted_steps_max": 0
+  },
+  "_threshold_rationale": {
+    "mean_logprob_min": "A working model on easy expository English should reach -2 to -3 nats. -4.0 leaves room for a hard passage while still being far from the -9 or worse a scrambled model gives.",
+    "top1_accuracy_min": "Greedy agreement with the true continuation. 35% is below what a healthy model does on prose and far above chance.",
+    "top10_accuracy_min": "The true token should almost always be in a short list. 70% is lenient.",
+    "median_rank_max": "Half of all positions should rank the true token in the top 3.",
+    "worst_rank_max": "A single surprising token is allowed to rank badly, but nothing should land where the pre-fix model lived (rank 27,667 on a token it had already seen twice).",
+    "nonfinite_logits_max": "Any NaN or infinity outside the 901 masked padding rows is a defect, not a quality signal.",
+    "aborted_steps_max": "The step is transactional; a clean run must not abort."
+  }
+}

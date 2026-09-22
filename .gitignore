@@ -10,6 +10,9 @@ core.*
 /tools/mimo26_dump_rope
 /tools/mimo26_dump_weights
 /tools/mimo26_run
+/tools/mimo26_eval
+mimo26-eval.jsonl
+mimo26-eval-tokens.txt
 /tools/transcode_mzg2_layer
 tests/test_k3_*
 !tests/test_k3_*.c
