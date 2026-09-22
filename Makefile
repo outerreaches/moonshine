@@ -63,7 +63,8 @@ MIMO26_CPU_TESTS := \
 	tests/test_mimo26_fp8 \
 	tests/test_mimo26_router \
 	tests/test_mimo26_ops \
-	tests/test_mimo26_attention
+	tests/test_mimo26_attention \
+	tests/test_mimo26_kv
 
 GLM53_CPU_TESTS := \
 	tests/test_glm53_arch_math \
@@ -457,6 +458,14 @@ tools/mimo26_dump_rope.o: CFLAGS += -fno-fast-math
 tools/mimo26_dump_rope: tools/mimo26_dump_rope.o mimo26_attention.o \
 		mimo26_ops.o mimo26_architecture.o k3_safetensors.o k3_json.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+mimo26_kv.o: mimo26_kv.c mimo26_kv.h mimo26_attention.h \
+	mimo26_architecture.h
+tests/test_mimo26_kv.o: tests/test_mimo26_kv.c mimo26_kv.h \
+	mimo26_architecture.h mimo26_ops.h
+tests/test_mimo26_kv: tests/test_mimo26_kv.o mimo26_kv.o \
+		mimo26_attention.o mimo26_ops.o mimo26_architecture.o \
+		k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 mimo26_attention.o: mimo26_attention.c mimo26_attention.h \
 	mimo26_architecture.h mimo26_ops.h
 mimo26_attention.o: CFLAGS += -fno-fast-math
@@ -797,6 +806,7 @@ test-mimo26-schema: tools/mimo26_dump_rope tests/test_mimo26_architecture \
 	./tests/test_mimo26_router
 	./tests/test_mimo26_ops
 	./tests/test_mimo26_attention
+	./tests/test_mimo26_kv
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/test_mimo26_rope_vs_torch.py
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/test_mimo26_audit.py
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/test_mimo26_tokenizer.py
