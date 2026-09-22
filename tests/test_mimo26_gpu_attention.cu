@@ -421,6 +421,118 @@ int main(void)
            100.0 * (double)total_differing_elements / (double)total_elements,
            worst_relative_overall);
 
+    /*
+     * Prefill must equal decode. A chunk of queries processed together has
+     * to give exactly what the same tokens give one at a time, or a prompt
+     * answers differently depending on how it was fed -- and the difference
+     * would only appear at depth, where it is hardest to attribute.
+     *
+     * Bit-exact, with no tolerance: both paths run the same kernel, so any
+     * difference is a masking or indexing fault rather than arithmetic.
+     */
+    for (size_t trial = 0; trial < 4u; trial++) {
+        const bool is_swa = (trial & 1u) != 0u;
+        const size_t kv_heads = is_swa ? 8u : 4u;
+        const size_t kv_groups = QH / kv_heads;
+        const size_t window = is_swa ? MIMO26_SLIDING_WINDOW : 0u;
+        const size_t prior = trial < 2u ? 0u : 200u;   /* cross the window */
+        const size_t chunk = 24u;
+        const size_t total = prior + chunk;
+
+        rng_state = 0xC0FFEEu + (uint32_t)trial * 7919u;
+        uint16_t *keys = (uint16_t *)malloc(total * kv_heads * QK *
+                                            sizeof *keys);
+        uint16_t *values = (uint16_t *)malloc(total * kv_heads * VD *
+                                              sizeof *values);
+        uint16_t *queries = (uint16_t *)malloc(chunk * QH * QK *
+                                               sizeof *queries);
+        uint16_t *sink = (uint16_t *)malloc(QH * sizeof *sink);
+        if (!keys || !values || !queries || !sink) { exit(1); }
+        for (size_t i = 0; i < total * kv_heads * QK; i++) {
+            keys[i] = mimo26_f32_to_bf16(next_uniform(-1.5f, 1.5f));
+        }
+        for (size_t i = 0; i < total * kv_heads * VD; i++) {
+            values[i] = mimo26_f32_to_bf16(next_uniform(-2.0f, 2.0f));
+        }
+        for (size_t i = 0; i < chunk * QH * QK; i++) {
+            queries[i] = mimo26_f32_to_bf16(next_uniform(-1.5f, 1.5f));
+        }
+        for (size_t i = 0; i < QH; i++) {
+            sink[i] = mimo26_f32_to_bf16(next_uniform(-2.0f, 2.0f));
+        }
+
+        uint16_t *d_keys = NULL, *d_values = NULL, *d_queries = NULL;
+        uint16_t *d_sink = NULL, *d_batched = NULL, *d_single = NULL;
+        float *d_scratch = NULL;
+        HIP_OK(hipMalloc(&d_keys, total * kv_heads * QK * sizeof *keys));
+        HIP_OK(hipMalloc(&d_values, total * kv_heads * VD * sizeof *values));
+        HIP_OK(hipMalloc(&d_queries, chunk * QH * QK * sizeof *queries));
+        HIP_OK(hipMalloc(&d_sink, QH * sizeof *sink));
+        HIP_OK(hipMalloc(&d_batched, chunk * QH * VD * sizeof *d_batched));
+        HIP_OK(hipMalloc(&d_single, QH * VD * sizeof *d_single));
+        HIP_OK(hipMalloc(&d_scratch,
+                         chunk * mimo26_rocm_attention_scratch_floats(total) *
+                             sizeof(float)));
+        HIP_OK(hipMemcpy(d_keys, keys, total * kv_heads * QK * sizeof *keys,
+                         hipMemcpyHostToDevice));
+        HIP_OK(hipMemcpy(d_values, values,
+                         total * kv_heads * VD * sizeof *values,
+                         hipMemcpyHostToDevice));
+        HIP_OK(hipMemcpy(d_queries, queries,
+                         chunk * QH * QK * sizeof *queries,
+                         hipMemcpyHostToDevice));
+        HIP_OK(hipMemcpy(d_sink, sink, QH * sizeof *sink,
+                         hipMemcpyHostToDevice));
+
+        const bool launched = mimo26_rocm_attention_prefill(
+            d_batched, d_queries, d_keys, d_values, is_swa ? d_sink : NULL,
+            d_scratch, (uint32_t)kv_heads, (uint32_t)kv_groups,
+            (uint32_t)window, total, 0u, prior, (uint32_t)chunk,
+            mimo26_attention_scale(), NULL);
+        HIP_OK(hipDeviceSynchronize());
+
+        size_t differing = 0;
+        uint16_t *batched = (uint16_t *)malloc(chunk * QH * VD *
+                                               sizeof *batched);
+        uint16_t *single = (uint16_t *)malloc(QH * VD * sizeof *single);
+        if (!batched || !single) { exit(1); }
+        HIP_OK(hipMemcpy(batched, d_batched,
+                         chunk * QH * VD * sizeof *batched,
+                         hipMemcpyDeviceToHost));
+        for (size_t b = 0; launched && b < chunk; b++) {
+            /* Decode sees only what precedes it: prior history plus the
+             * chunk entries already committed, with its own as current. */
+            mimo26_rocm_attention_decode(
+                d_single, (const uint8_t *)d_queries + b * QH * QK * 2u,
+                (prior + b) ? d_keys : NULL, (prior + b) ? d_values : NULL,
+                (const uint8_t *)d_keys + (prior + b) * kv_heads * QK * 2u,
+                (const uint8_t *)d_values + (prior + b) * kv_heads * VD * 2u,
+                is_swa ? d_sink : NULL, d_scratch, (uint32_t)kv_heads,
+                (uint32_t)kv_groups, (uint32_t)window, prior + b, 0u,
+                prior + b, mimo26_attention_scale(), NULL);
+            HIP_OK(hipDeviceSynchronize());
+            HIP_OK(hipMemcpy(single, d_single, QH * VD * sizeof *single,
+                             hipMemcpyDeviceToHost));
+            for (size_t i = 0; i < (size_t)QH * VD; i++) {
+                differing += batched[b * QH * VD + i] != single[i];
+            }
+        }
+        char label[96];
+        char detail[96];
+        snprintf(label, sizeof label, "prefill %zu == decode x%zu, %s, prior %zu",
+                 chunk, chunk, is_swa ? "swa" : "global", prior);
+        snprintf(detail, sizeof detail, "%zu of %zu differ", differing,
+                 chunk * QH * VD);
+        ok(label, launched && differing == 0, detail);
+
+        free(keys); free(values); free(queries); free(sink);
+        free(batched); free(single);
+        HIP_OK(hipFree(d_keys)); HIP_OK(hipFree(d_values));
+        HIP_OK(hipFree(d_queries)); HIP_OK(hipFree(d_sink));
+        HIP_OK(hipFree(d_batched)); HIP_OK(hipFree(d_single));
+        HIP_OK(hipFree(d_scratch));
+    }
+
     printf("test_mimo26_gpu_attention: %s\n", failures == 0 ? "ok" : "FAILED");
     return failures == 0 ? 0 : 1;
 }

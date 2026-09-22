@@ -149,6 +149,27 @@ bool mimo26_rocm_attention_decode(void *out, const void *query,
                                   void *stream);
 
 /*
+ * Attention for a whole chunk of queries at once.
+ *
+ * query is [count][64][192], out [count][64][128]. keys and values must
+ * already include the chunk's own entries appended to the prior history,
+ * and `history` counts both -- causal masking within the chunk then falls
+ * out of the same absolute-position predicate the decode path uses, so
+ * prefilling N tokens is bit-identical to decoding them one at a time.
+ *
+ * scratch needs count * 64 * (history + 2) floats.
+ */
+bool mimo26_rocm_attention_prefill(void *out, const void *query,
+                                   const void *keys, const void *values,
+                                   const void *sink_bias, float *scratch,
+                                   uint32_t kv_heads, uint32_t kv_groups,
+                                   uint32_t window, uint64_t history,
+                                   uint64_t first_position,
+                                   uint64_t first_query_position,
+                                   uint32_t query_count, float scale,
+                                   void *stream);
+
+/*
  * Split a fused QKV projection output into per-head Q, K and V, scaling V by
  * 0.707 on the way so a cache downstream holds pre-scaled V -- as the
  * reference does. Layout in is [q | k | v] with q = 64*192, k = kv*192,

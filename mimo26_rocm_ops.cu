@@ -273,6 +273,16 @@ __device__ static inline bool mimo26_visible_d(uint64_t kv_position,
  * it is: every reduction that the CPU performs in a specific order is
  * performed in that same order here.
  */
+/*
+ * Prefill reuses this kernel unchanged, with blockIdx.y selecting the query.
+ *
+ * That is deliberate rather than convenient: the masking already works on
+ * absolute positions, so a chunk of tokens whose keys and values are simply
+ * appended to the history is masked causally by the same predicate that
+ * masks a single decode step. Writing a second kernel would mean two copies
+ * of the cast points and the summation order, and the guarantee that
+ * prefilling N tokens equals decoding them one at a time would become a hope.
+ */
 __global__ static void mimo26_attention_decode_kernel(
         uint16_t *out, const uint16_t *query, const uint16_t *keys,
         const uint16_t *values, const uint16_t *current_keys,
@@ -282,6 +292,15 @@ __global__ static void mimo26_attention_decode_kernel(
         uint64_t query_position, float scale, uint32_t have_current,
         uint32_t has_sink, uint32_t scores_only)
 {
+    /* Batch index: 0 for decode, the token's offset within the chunk for
+     * prefill. Each advances the query, the output and the scratch row, and
+     * shifts this query's absolute position. */
+    const uint32_t batch = blockIdx.y;
+    query += (uint64_t)batch * MIMO26_ROCM_QUERY_HEADS * MIMO26_ROCM_QK_DIM;
+    out += (uint64_t)batch * MIMO26_ROCM_QUERY_HEADS * MIMO26_ROCM_V_DIM;
+    scratch += (uint64_t)batch * MIMO26_ROCM_QUERY_HEADS * (history + 2u);
+    query_position += batch;
+
     const uint32_t head = blockIdx.x;
     const uint32_t tid = threadIdx.x;
     const uint32_t kv_head = head / kv_groups;
@@ -644,7 +663,8 @@ static bool attention_launch(void *out, const void *query, const void *keys,
                              uint32_t kv_heads, uint32_t kv_groups,
                              uint32_t window, uint64_t history,
                              uint64_t first_position, uint64_t query_position,
-                             float scale, bool scores_only, void *stream)
+                             float scale, bool scores_only, void *stream,
+                             uint32_t batch)
 {
     const bool have_current =
         (current_keys != NULL && current_values != NULL);
@@ -669,7 +689,15 @@ static bool attention_launch(void *out, const void *query, const void *keys,
         if (first_position > query_position) {
             return false;
         }
-        const uint64_t span = query_position - first_position + 1u;
+        /*
+         * The span is measured to the LAST query in the batch, not the
+         * first. A prefill chunk deliberately carries keys for tokens that
+         * come after the earliest query -- the causal predicate excludes
+         * them per query -- so checking against the first would reject
+         * every batch larger than one.
+         */
+        const uint64_t last_position = query_position + (batch - 1u);
+        const uint64_t span = last_position - first_position + 1u;
         if (span < history) {
             return false;
         }
@@ -678,7 +706,7 @@ static bool attention_launch(void *out, const void *query, const void *keys,
         }
     }
     hipLaunchKernelGGL(mimo26_attention_decode_kernel,
-                       dim3(MIMO26_ROCM_QUERY_HEADS),
+                       dim3(MIMO26_ROCM_QUERY_HEADS, batch),
                        dim3(MIMO26_ROCM_THREADS), 0, (hipStream_t)stream,
                        (uint16_t *)out, (const uint16_t *)query,
                        (const uint16_t *)keys, (const uint16_t *)values,
@@ -706,7 +734,32 @@ bool mimo26_rocm_attention_decode(void *out, const void *query,
     return attention_launch(out, query, keys, values, current_keys,
                             current_values, sink_bias, scratch, kv_heads,
                             kv_groups, window, history, first_position,
-                            query_position, scale, false, stream);
+                            query_position, scale, false, stream, 1u);
+}
+
+bool mimo26_rocm_attention_prefill(void *out, const void *query,
+                                   const void *keys, const void *values,
+                                   const void *sink_bias, float *scratch,
+                                   uint32_t kv_heads, uint32_t kv_groups,
+                                   uint32_t window, uint64_t history,
+                                   uint64_t first_position,
+                                   uint64_t first_query_position,
+                                   uint32_t query_count, float scale,
+                                   void *stream)
+{
+    if (query_count == 0u) {
+        return false;
+    }
+    /*
+     * The chunk's own keys and values are expected to be appended to the
+     * history the caller passes, so `history` counts both. Causal masking
+     * inside the chunk then falls out of the absolute-position predicate --
+     * token b sees history plus chunk entries 0..b and nothing after.
+     */
+    return attention_launch(out, query, keys, values, NULL, NULL, sink_bias,
+                            scratch, kv_heads, kv_groups, window, history,
+                            first_position, first_query_position, scale,
+                            false, stream, query_count);
 }
 
 bool mimo26_rocm_attention_scores(const void *query, const void *keys,
@@ -723,7 +776,7 @@ bool mimo26_rocm_attention_scores(const void *query, const void *keys,
     return attention_launch(NULL, query, keys, keys, current_keys,
                             current_keys, sink_bias, scratch, kv_heads,
                             kv_groups, window, history, first_position,
-                            query_position, scale, true, stream);
+                            query_position, scale, true, stream, 1u);
 }
 
 bool mimo26_rocm_split_qkv(void *q, void *k, void *v, const void *fused,
