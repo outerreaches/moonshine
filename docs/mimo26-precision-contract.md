@@ -319,11 +319,24 @@ rather than materialize. That is the same constraint the production path has.
 
 ## Open items
 
-1. Full-model, all-48-layer reference parity, which needs a streaming
-   reference rather than a per-layer one.
-2. M3 layer parity: the C side has operators, attention and KV but no weight
-   loading or layer composition yet, so there is nothing to compare against
-   the layer fixtures the reference tool can now produce.
+Both items that stood here are closed. The streaming 48-layer reference
+exists (`tools/mimo26_reference_model.py`) and layer parity runs against
+real weights at every position, with layer 0 bit-exact. They are recorded
+as closed rather than deleted, because the second one is what eventually
+exposed the fused-QKV layout: a parity test that only ran at position 0
+passed while a position-dependent error sat underneath it.
+
+What is genuinely open:
+
+1. **`moe_router_dtype`** is `bfloat16` in the config while this lane
+   computes the router in F32, following the reference's executed
+   arithmetic rather than its declared dtype. Measured and marginal -- it
+   moves ranks by one or two places -- but settling it properly needs an
+   oracle this host cannot run, so it is recorded rather than guessed at.
+2. **Long-context RoPE conditioning.** cos error reaches 8.1e-3 at position
+   2^20, twice a BF16 ulp. That bounds qualified context on numerical
+   grounds independently of anything measured here, and nothing above 8K
+   has been tested.
 
 ## Where the contract stops being bit-exact
 
