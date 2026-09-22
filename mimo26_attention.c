@@ -158,12 +158,23 @@ mimo26_attention_status mimo26_rope_apply(
 
 mimo26_attention_status mimo26_attention_decode(
     uint16_t *out, const uint16_t *query, const uint16_t *keys,
-    const uint16_t *values, const uint16_t *sink_bias,
+    const uint16_t *values, const uint16_t *current_keys,
+    const uint16_t *current_values, const uint16_t *sink_bias,
     const mimo26_attention_config *config, size_t history,
     uint64_t first_position, uint64_t query_position)
 {
-    if (out == NULL || query == NULL || keys == NULL || values == NULL ||
-        config == NULL || config->kv_heads == 0u || history == 0u) {
+    const bool have_current = (current_keys != NULL && current_values != NULL);
+    if (out == NULL || query == NULL || config == NULL ||
+        config->kv_heads == 0u) {
+        return MIMO26_ATTENTION_INVALID_ARGUMENT;
+    }
+    if ((current_keys == NULL) != (current_values == NULL)) {
+        return MIMO26_ATTENTION_INVALID_ARGUMENT;
+    }
+    if (history > 0u && (keys == NULL || values == NULL)) {
+        return MIMO26_ATTENTION_INVALID_ARGUMENT;
+    }
+    if (history == 0u && !have_current) {
         return MIMO26_ATTENTION_INVALID_ARGUMENT;
     }
     if (config->has_sink && sink_bias == NULL) {
@@ -173,23 +184,37 @@ mimo26_attention_status mimo26_attention_decode(
         config->kv_groups * config->kv_heads != MIMO26_QUERY_HEADS) {
         return MIMO26_ATTENTION_INVALID_ARGUMENT;
     }
-    if (first_position > query_position ||
-        query_position - first_position + 1u < (uint64_t)history) {
-        /* History must not extend past the query position. */
-        return MIMO26_ATTENTION_INVALID_ARGUMENT;
+    /*
+     * The committed history covers first_position .. first_position+history-1
+     * and must not reach past the query. When the current token is supplied
+     * separately the history stops one short of it, so the bound tightens.
+     */
+    if (history > 0u) {
+        if (first_position > query_position) {
+            return MIMO26_ATTENTION_INVALID_ARGUMENT;
+        }
+        const uint64_t span = query_position - first_position + 1u;
+        if (span < (uint64_t)history) {
+            return MIMO26_ATTENTION_INVALID_ARGUMENT;
+        }
+        if (have_current && span - 1u < (uint64_t)history) {
+            return MIMO26_ATTENTION_INVALID_ARGUMENT;
+        }
     }
+    /* One virtual slot for the uncommitted token, one for the sink. */
+    const size_t slot_total = history + (have_current ? 1u : 0u);
 
     const float scale = mimo26_attention_scale();
     const size_t kv_heads = config->kv_heads;
 
     /* Scores for one query head, plus one slot for the sink logit. */
     float *scores = NULL;
-    float stack_scores[MIMO26_SLIDING_WINDOW + 1u];
+    float stack_scores[MIMO26_SLIDING_WINDOW + 2u];
     float *heap_scores = NULL;
-    if (history + 1u <= sizeof stack_scores / sizeof stack_scores[0]) {
+    if (slot_total + 1u <= sizeof stack_scores / sizeof stack_scores[0]) {
         scores = stack_scores;
     } else {
-        heap_scores = (float *)calloc(history + 1u, sizeof *heap_scores);
+        heap_scores = (float *)calloc(slot_total + 1u, sizeof *heap_scores);
         if (heap_scores == NULL) {
             return MIMO26_ATTENTION_INVALID_ARGUMENT;
         }
@@ -204,15 +229,19 @@ mimo26_attention_status mimo26_attention_decode(
 
         size_t visible = 0;
         float maximum = -INFINITY;
-        for (size_t t = 0; t < history; t++) {
-            const uint64_t kv_position = first_position + (uint64_t)t;
+        for (size_t t = 0; t < slot_total; t++) {
+            const bool is_current = (have_current && t == history);
+            const uint64_t kv_position =
+                is_current ? query_position : first_position + (uint64_t)t;
             if (!mimo26_attention_visible(kv_position, query_position,
                                           config->window)) {
                 scores[t] = -INFINITY;
                 continue;
             }
             const uint16_t *k_head =
-                keys + (t * kv_heads + kv_head) * MIMO26_QK_HEAD_DIM;
+                is_current
+                    ? current_keys + kv_head * MIMO26_QK_HEAD_DIM
+                    : keys + (t * kv_heads + kv_head) * MIMO26_QK_HEAD_DIM;
             float dot = 0.0f;
             for (size_t d = 0; d < MIMO26_QK_HEAD_DIM; d++) {
                 dot += mimo26_bf16_to_f32(q_head[d]) *
@@ -243,18 +272,18 @@ mimo26_attention_status mimo26_attention_decode(
             }
         }
 
-        size_t slots = history;
+        size_t slots = slot_total;
         if (config->has_sink) {
             const float sink = mimo26_bf16_to_f32(sink_bias[h]);
             if (!isfinite(sink)) {
                 status = MIMO26_ATTENTION_NONFINITE_VALUE;
                 break;
             }
-            scores[history] = sink;
+            scores[slot_total] = sink;
             if (sink > maximum) {
                 maximum = sink;
             }
-            slots = history + 1u;
+            slots = slot_total + 1u;
         }
 
         /* Explicit max subtraction, as the reference does, before softmax. */
@@ -280,7 +309,7 @@ mimo26_attention_status mimo26_attention_decode(
          * deliberately sum to less than one. */
         float accumulator[MIMO26_V_HEAD_DIM];
         memset(accumulator, 0, sizeof accumulator);
-        for (size_t t = 0; t < history; t++) {
+        for (size_t t = 0; t < slot_total; t++) {
             if (scores[t] == 0.0f) {
                 continue;
             }
@@ -291,7 +320,9 @@ mimo26_attention_status mimo26_attention_decode(
                 continue;
             }
             const uint16_t *v_head =
-                values + (t * kv_heads + kv_head) * MIMO26_V_HEAD_DIM;
+                (have_current && t == history)
+                    ? current_values + kv_head * MIMO26_V_HEAD_DIM
+                    : values + (t * kv_heads + kv_head) * MIMO26_V_HEAD_DIM;
             for (size_t d = 0; d < MIMO26_V_HEAD_DIM; d++) {
                 accumulator[d] += probability * mimo26_bf16_to_f32(v_head[d]);
             }

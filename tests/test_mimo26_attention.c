@@ -262,7 +262,7 @@ static void check_decode(void)
             values[i] = mimo26_f32_to_bf16((unit_random(&state) - 0.5f) * 2.0f);
         }
 
-        assert(mimo26_attention_decode(out, query, keys, values, sink,
+        assert(mimo26_attention_decode(out, query, keys, values, NULL, NULL, sink,
                                        &swa_config, history, 0u,
                                        history - 1u) == MIMO26_ATTENTION_OK);
 
@@ -281,7 +281,7 @@ static void check_decode(void)
                     mimo26_f32_to_bf16(-99.0f);
             }
         }
-        assert(mimo26_attention_decode(out, query, keys, values, sink,
+        assert(mimo26_attention_decode(out, query, keys, values, NULL, NULL, sink,
                                        &swa_config, history, 0u,
                                        history - 1u) == MIMO26_ATTENTION_OK);
         assert(memcmp(out, reference, sizeof reference) == 0);
@@ -295,7 +295,7 @@ static void check_decode(void)
             large_sink[h] = mimo26_f32_to_bf16(30.0f);
         }
         uint16_t damped[MIMO26_QUERY_HEADS * MIMO26_V_HEAD_DIM];
-        assert(mimo26_attention_decode(damped, query, keys, values, large_sink,
+        assert(mimo26_attention_decode(damped, query, keys, values, NULL, NULL, large_sink,
                                        &swa_config, history, 0u,
                                        history - 1u) == MIMO26_ATTENTION_OK);
         double sum_reference = 0.0;
@@ -310,7 +310,7 @@ static void check_decode(void)
                100.0 * sum_damped / sum_reference);
 
         /* A sink is mandatory on a windowed layer. */
-        assert(mimo26_attention_decode(out, query, keys, values, NULL,
+        assert(mimo26_attention_decode(out, query, keys, values, NULL, NULL, NULL,
                                        &swa_config, history, 0u,
                                        history - 1u) ==
                MIMO26_ATTENTION_INVALID_ARGUMENT);
@@ -330,7 +330,7 @@ static void check_decode(void)
         for (size_t i = 0; i < history * kv * MIMO26_V_HEAD_DIM; i++) {
             values[i] = mimo26_f32_to_bf16((unit_random(&state) - 0.5f) * 2.0f);
         }
-        assert(mimo26_attention_decode(out, query, keys, values, NULL,
+        assert(mimo26_attention_decode(out, query, keys, values, NULL, NULL, NULL,
                                        &global_config, history, 0u,
                                        history - 1u) == MIMO26_ATTENTION_OK);
         uint16_t reference[MIMO26_QUERY_HEADS * MIMO26_V_HEAD_DIM];
@@ -343,7 +343,7 @@ static void check_decode(void)
         for (size_t i = 0; i < kv * MIMO26_V_HEAD_DIM; i++) {
             values[i] = mimo26_f32_to_bf16(5.0f);
         }
-        assert(mimo26_attention_decode(out, query, keys, values, NULL,
+        assert(mimo26_attention_decode(out, query, keys, values, NULL, NULL, NULL,
                                        &global_config, history, 0u,
                                        history - 1u) == MIMO26_ATTENTION_OK);
         assert(memcmp(out, reference, sizeof reference) != 0);
@@ -355,7 +355,7 @@ static void check_decode(void)
         for (size_t i = 0; i < history * kv * MIMO26_V_HEAD_DIM; i++) {
             values[i] = mimo26_f32_to_bf16(1.0f);
         }
-        assert(mimo26_attention_decode(reference, query, keys, values, NULL,
+        assert(mimo26_attention_decode(reference, query, keys, values, NULL, NULL, NULL,
                                        &global_config, history, 0u,
                                        history - 1u) == MIMO26_ATTENTION_OK);
         const size_t target_kv_head = 2u;
@@ -365,7 +365,7 @@ static void check_decode(void)
                     mimo26_f32_to_bf16(-1.0f);
             }
         }
-        assert(mimo26_attention_decode(out, query, keys, values, NULL,
+        assert(mimo26_attention_decode(out, query, keys, values, NULL, NULL, NULL,
                                        &global_config, history, 0u,
                                        history - 1u) == MIMO26_ATTENTION_OK);
         for (size_t h = 0; h < MIMO26_QUERY_HEADS; h++) {
@@ -382,15 +382,90 @@ static void check_decode(void)
                (target_kv_head + 1u) * global_config.kv_groups - 1u);
 
         /* History must not claim to extend past the query position. */
-        assert(mimo26_attention_decode(out, query, keys, values, NULL,
+        assert(mimo26_attention_decode(out, query, keys, values, NULL, NULL, NULL,
                                        &global_config, history, 0u, 10u) ==
                MIMO26_ATTENTION_INVALID_ARGUMENT);
-        assert(mimo26_attention_decode(out, query, keys, values, NULL,
+        assert(mimo26_attention_decode(out, query, keys, values, NULL, NULL, NULL,
                                        &global_config, history, 50u, 10u) ==
                MIMO26_ATTENTION_INVALID_ARGUMENT);
         free(keys);
         free(values);
     }
+}
+
+/*
+ * The uncommitted-token path must be exactly equivalent to having that token
+ * in the history. If it were not, a transactional KV would silently change
+ * the arithmetic relative to the reference.
+ */
+static void check_current_token_equivalence(void)
+{
+    for (uint32_t layer = 0; layer <= 1u; layer++) {
+        mimo26_attention_config config;
+        assert(mimo26_attention_config_for_layer(layer, &config) ==
+               MIMO26_ATTENTION_OK);
+        const size_t kv = config.kv_heads;
+        const size_t total = 200u; /* past the window, so eviction is live */
+        uint32_t state = 4242u + layer;
+
+        uint16_t query[MIMO26_QUERY_HEADS * MIMO26_QK_HEAD_DIM];
+        for (size_t i = 0; i < sizeof query / sizeof query[0]; i++) {
+            query[i] = mimo26_f32_to_bf16((unit_random(&state) - 0.5f) * 2.0f);
+        }
+        uint16_t sink[MIMO26_QUERY_HEADS];
+        for (size_t h = 0; h < MIMO26_QUERY_HEADS; h++) {
+            sink[h] = mimo26_f32_to_bf16((unit_random(&state) - 0.5f) * 2.0f);
+        }
+        uint16_t *keys = malloc(total * kv * MIMO26_QK_HEAD_DIM * sizeof *keys);
+        uint16_t *values = malloc(total * kv * MIMO26_V_HEAD_DIM * sizeof *values);
+        assert(keys && values);
+        for (size_t i = 0; i < total * kv * MIMO26_QK_HEAD_DIM; i++) {
+            keys[i] = mimo26_f32_to_bf16((unit_random(&state) - 0.5f) * 2.0f);
+        }
+        for (size_t i = 0; i < total * kv * MIMO26_V_HEAD_DIM; i++) {
+            values[i] = mimo26_f32_to_bf16((unit_random(&state) - 0.5f) * 2.0f);
+        }
+
+        uint16_t joined[MIMO26_QUERY_HEADS * MIMO26_V_HEAD_DIM];
+        uint16_t split[MIMO26_QUERY_HEADS * MIMO26_V_HEAD_DIM];
+        const uint16_t *sink_arg = config.has_sink ? sink : NULL;
+
+        /* All `total` positions in the history, query at the last one. */
+        assert(mimo26_attention_decode(joined, query, keys, values, NULL, NULL,
+                                       sink_arg, &config, total, 0u,
+                                       total - 1u) == MIMO26_ATTENTION_OK);
+        /* The last position supplied separately instead. */
+        assert(mimo26_attention_decode(
+                   split, query, keys, values,
+                   keys + (total - 1u) * kv * MIMO26_QK_HEAD_DIM,
+                   values + (total - 1u) * kv * MIMO26_V_HEAD_DIM, sink_arg,
+                   &config, total - 1u, 0u, total - 1u) ==
+               MIMO26_ATTENTION_OK);
+        assert(memcmp(joined, split, sizeof joined) == 0);
+
+        /* A history claiming to already cover the query is refused when a
+         * current token is also supplied -- that would double-count it. */
+        assert(mimo26_attention_decode(
+                   split, query, keys, values,
+                   keys + (total - 1u) * kv * MIMO26_QK_HEAD_DIM,
+                   values + (total - 1u) * kv * MIMO26_V_HEAD_DIM, sink_arg,
+                   &config, total, 0u, total - 1u) ==
+               MIMO26_ATTENTION_INVALID_ARGUMENT);
+        /* Only one of the pair is not enough. */
+        assert(mimo26_attention_decode(split, query, keys, values,
+                                       keys, NULL, sink_arg, &config,
+                                       total - 1u, 0u, total - 1u) ==
+               MIMO26_ATTENTION_INVALID_ARGUMENT);
+        /* The very first token has no history at all. */
+        assert(mimo26_attention_decode(split, query, NULL, NULL, keys, values,
+                                       sink_arg, &config, 0u, 0u, 0u) ==
+               MIMO26_ATTENTION_OK);
+
+        free(keys);
+        free(values);
+    }
+    printf("  ok  an uncommitted current token is exactly equivalent to one "
+           "already in history (both layer kinds)\n");
 }
 
 int main(void)
@@ -400,6 +475,7 @@ int main(void)
     check_qkv_split();
     check_rope();
     check_decode();
+    check_current_token_equivalence();
     printf("test_mimo26_attention: ok\n");
     return 0;
 }

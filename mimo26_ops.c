@@ -150,3 +150,45 @@ mimo26_ops_status mimo26_residual_add_bf16(uint16_t *out, const uint16_t *residu
     }
     return MIMO26_OPS_OK;
 }
+
+mimo26_ops_status mimo26_silu_product_bf16(uint16_t *out, const uint16_t *gate,
+                                           const uint16_t *up, size_t count)
+{
+    if (out == NULL || gate == NULL || up == NULL || count == 0u) {
+        return MIMO26_OPS_INVALID_ARGUMENT;
+    }
+    for (size_t i = 0; i < count; i++) {
+        const float g = mimo26_bf16_to_f32(gate[i]);
+        const float u = mimo26_bf16_to_f32(up[i]);
+        if (!isfinite(g) || !isfinite(u)) {
+            return MIMO26_OPS_NONFINITE_VALUE;
+        }
+        /* silu rounds to BF16 first, then the product rounds again. */
+        const float activated = g * (1.0f / (1.0f + expf(-g)));
+        const float rounded = mimo26_bf16_to_f32(mimo26_f32_to_bf16(activated));
+        out[i] = mimo26_f32_to_bf16(rounded * u);
+    }
+    return MIMO26_OPS_OK;
+}
+
+mimo26_ops_status mimo26_matmul_bf16(uint16_t *y, const uint16_t *weights,
+                                     const uint16_t *x, size_t rows,
+                                     size_t cols)
+{
+    if (y == NULL || weights == NULL || x == NULL || rows == 0u ||
+        cols == 0u) {
+        return MIMO26_OPS_INVALID_ARGUMENT;
+    }
+    for (size_t r = 0; r < rows; r++) {
+        const uint16_t *row = weights + r * cols;
+        float sum = 0.0f;
+        for (size_t c = 0; c < cols; c++) {
+            sum += mimo26_bf16_to_f32(row[c]) * mimo26_bf16_to_f32(x[c]);
+        }
+        if (!isfinite(sum)) {
+            return MIMO26_OPS_NONFINITE_VALUE;
+        }
+        y[r] = mimo26_f32_to_bf16(sum);
+    }
+    return MIMO26_OPS_OK;
+}

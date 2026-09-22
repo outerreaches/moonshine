@@ -52,6 +52,27 @@ mimo26_ops_status mimo26_silu_product_f32(float *out, const float *gate,
                                           const float *up, size_t count);
 
 /*
+ * BF16 form of the same expression, for composing a real MLP.
+ *
+ * The reference evaluates act_fn(gate_proj(x)) * up_proj(x) with BF16
+ * operands, so silu rounds to BF16 and the product rounds again -- two
+ * roundings. The F32 form above is the operator oracle; this is what a layer
+ * must call.
+ */
+mimo26_ops_status mimo26_silu_product_bf16(uint16_t *out, const uint16_t *gate,
+                                           const uint16_t *up, size_t count);
+
+/*
+ * y = W x with BF16 operands. W is [rows][cols] row-major, x is [cols], y is
+ * [rows]. Accumulation is F32 with a single BF16 rounding of each output,
+ * matching nn.Linear on BF16 inputs. Summation runs in ascending column order
+ * so results are reproducible.
+ */
+mimo26_ops_status mimo26_matmul_bf16(uint16_t *y, const uint16_t *weights,
+                                     const uint16_t *x, size_t rows,
+                                     size_t cols);
+
+/*
  * Weighted expert accumulation. The reference allocates the accumulator with
  * the router weight dtype, which is f32, multiplies each BF16 expert output
  * by its f32 weight, accumulates in f32, and casts to BF16 once at the end.

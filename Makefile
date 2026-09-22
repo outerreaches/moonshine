@@ -190,6 +190,7 @@ ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS) \
 
 .PHONY: all help tests test test-cpu check-model \
 	test-mimo26-schema test-mimo26-checkpoint mimo26-budget \
+	mimo26-layer-parity \
 	test-model-layout test-model-components test-engine-init \
 	test-engine-hello test-chat-hello test-state-checkpoint test-tokenizer \
 	test-prefill-2 test-prefill-scale test-prefill-kda-blas \
@@ -480,6 +481,18 @@ tools/mimo26_dump_weights: tools/mimo26_dump_weights.o \
 		mimo26_weights.o mimo26_manifest.o mimo26_architecture.o \
 		mimo26_attention.o mimo26_ops.o mimo26_router.o \
 		glm53_fp8_oracle.o k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+mimo26_layer.o: mimo26_layer.c mimo26_layer.h mimo26_weights.h \
+	mimo26_kv.h mimo26_router.h mimo26_ops.h mimo26_architecture.h
+mimo26_layer.o: CFLAGS += -fno-fast-math
+tests/test_mimo26_layer_parity.o: tests/test_mimo26_layer_parity.c \
+	mimo26_layer.h mimo26_weights.h mimo26_manifest.h mimo26_ops.h \
+	mimo26_architecture.h
+tests/test_mimo26_layer_parity.o: CFLAGS += -fno-fast-math
+tests/test_mimo26_layer_parity: tests/test_mimo26_layer_parity.o \
+		mimo26_layer.o mimo26_weights.o mimo26_kv.o mimo26_manifest.o \
+		mimo26_architecture.o mimo26_attention.o mimo26_ops.o \
+		mimo26_router.o glm53_fp8_oracle.o k3_safetensors.o k3_json.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 mimo26_weights.o: mimo26_weights.c mimo26_weights.h \
 	mimo26_architecture.h mimo26_attention.h mimo26_ops.h \
@@ -851,6 +864,19 @@ test-mimo26-checkpoint: tests/test_mimo26_official \
 		$(PYTHON) tests/test_mimo26_tokenizer.py
 	MIMO26_ROOT=$(MIMO26_ROOT) PYTHONDONTWRITEBYTECODE=1 \
 		$(PYTHON) tests/test_mimo26_weights_vs_reference.py
+
+# Layer parity against the reference. Needs a checkpoint and a fixture
+# from tools/mimo26_reference_layer.py, so it is separate from the
+# checkpoint schema target.
+mimo26-layer-parity: tests/test_mimo26_layer_parity
+	@for layer in 0 1 5; do \
+	  PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tools/mimo26_reference_layer.py \
+	    --root $(MIMO26_ROOT) --layer $$layer --tokens 1 \
+	    --out mimo26-layer$$layer.bin >/dev/null 2>&1 || exit 1; \
+	  ./tests/test_mimo26_layer_parity $(MIMO26_ROOT) \
+	    mimo26-layer$$layer.bin || exit 1; \
+	  rm -f mimo26-layer$$layer.bin; \
+	done
 
 mimo26-budget:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tools/mimo26_budget.py \

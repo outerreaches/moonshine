@@ -103,6 +103,14 @@ mimo26_attention_status mimo26_rope_apply(
  * kv_position <= query_position and, for a windowed layer,
  * kv_position > query_position - window.
  *
+ * current_keys and current_values carry the token at query_position when it
+ * is not yet part of the committed history -- which is the normal decode case,
+ * since a transactional KV holds the step's own keys outside the visible
+ * arrays until commit. Pass NULL for both when the history already includes
+ * query_position. Supplying them avoids copying the whole history into scratch
+ * on every step, which at 64K context would be hundreds of megabytes of moves
+ * per token.
+ *
  * sink_bias is [64] per-head BF16 and required when config->has_sink. Its
  * logit participates in the softmax and its probability is then discarded,
  * so the surviving probabilities deliberately sum to less than one.
@@ -114,7 +122,8 @@ mimo26_attention_status mimo26_rope_apply(
  */
 mimo26_attention_status mimo26_attention_decode(
     uint16_t *out, const uint16_t *query, const uint16_t *keys,
-    const uint16_t *values, const uint16_t *sink_bias,
+    const uint16_t *values, const uint16_t *current_keys,
+    const uint16_t *current_values, const uint16_t *sink_bias,
     const mimo26_attention_config *config, size_t history,
     uint64_t first_position, uint64_t query_position);
 
