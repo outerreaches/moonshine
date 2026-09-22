@@ -684,12 +684,24 @@ mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
         }
         TICK();
         if (history > 0) {
-            hipMemcpy(worker->device_keys, view_keys,
-                      history * w->kv_heads * QK * sizeof(uint16_t),
-                      hipMemcpyHostToDevice);
-            hipMemcpy(worker->device_values, view_values,
-                      history * w->kv_heads * VD * sizeof(uint16_t),
-                      hipMemcpyHostToDevice);
+            /*
+             * Checked, because a silently failed copy here does not crash --
+             * it attends over stale or uninitialized history and returns a
+             * plausible wrong answer, which is the worst failure mode this
+             * worker has.
+             */
+            if (hipMemcpy(worker->device_keys, view_keys,
+                          history * w->kv_heads * QK * sizeof(uint16_t),
+                          hipMemcpyHostToDevice) != hipSuccess ||
+                hipMemcpy(worker->device_values, view_values,
+                          history * w->kv_heads * VD * sizeof(uint16_t),
+                          hipMemcpyHostToDevice) != hipSuccess) {
+                mimo26_kv_abort(worker->kv);
+                worker->stats.aborted_steps++;
+                return fail(error, error_size,
+                            MIMO26_GPU_WORKER_DECODE_FAILED,
+                            "history upload failed at layer %u", l);
+            }
         }
 
         TOCK(kv_seconds);
@@ -700,10 +712,15 @@ mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
         mimo26_attention_config_for_layer(l, &attention_config);
         mimo26_rope_table(cos_host, sin_host, position,
                           attention_config.rope_theta);
-        hipMemcpy(worker->cos_table, cos_host, sizeof cos_host,
-                  hipMemcpyHostToDevice);
-        hipMemcpy(worker->sin_table, sin_host, sizeof sin_host,
-                  hipMemcpyHostToDevice);
+        if (hipMemcpy(worker->cos_table, cos_host, sizeof cos_host,
+                      hipMemcpyHostToDevice) != hipSuccess ||
+            hipMemcpy(worker->sin_table, sin_host, sizeof sin_host,
+                      hipMemcpyHostToDevice) != hipSuccess) {
+            mimo26_kv_abort(worker->kv);
+            worker->stats.aborted_steps++;
+            return fail(error, error_size, MIMO26_GPU_WORKER_DECODE_FAILED,
+                        "rope table upload failed at layer %u", l);
+        }
 
         TICK();
         mimo26_rocm_layer context;
@@ -731,12 +748,17 @@ mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
          * The commit happens once all 48 have run, so a failure above leaves
          * committed history untouched. */
         TICK();
-        hipMemcpy(worker->staging_key, worker->scratch.key,
-                  w->kv_heads * QK * sizeof(uint16_t),
-                  hipMemcpyDeviceToHost);
-        hipMemcpy(worker->staging_value, worker->scratch.value,
-                  w->kv_heads * VD * sizeof(uint16_t),
-                  hipMemcpyDeviceToHost);
+        if (hipMemcpy(worker->staging_key, worker->scratch.key,
+                      w->kv_heads * QK * sizeof(uint16_t),
+                      hipMemcpyDeviceToHost) != hipSuccess ||
+            hipMemcpy(worker->staging_value, worker->scratch.value,
+                      w->kv_heads * VD * sizeof(uint16_t),
+                      hipMemcpyDeviceToHost) != hipSuccess) {
+            mimo26_kv_abort(worker->kv);
+            worker->stats.aborted_steps++;
+            return fail(error, error_size, MIMO26_GPU_WORKER_DECODE_FAILED,
+                        "key/value readback failed at layer %u", l);
+        }
         TOCK(stage_seconds);
         if (mimo26_kv_stage(worker->kv, l, worker->staging_key,
                             worker->staging_value) != MIMO26_KV_OK) {
@@ -816,6 +838,29 @@ uint32_t mimo26_gpu_worker_argmax(const float *logits)
 uint64_t mimo26_gpu_worker_position(const mimo26_gpu_worker *worker)
 {
     return worker == NULL ? 0u : worker->position;
+}
+
+mimo26_gpu_worker_status mimo26_gpu_worker_rollback(mimo26_gpu_worker *worker,
+                                                    size_t count)
+{
+    if (worker == NULL) {
+        return MIMO26_GPU_WORKER_INVALID_ARGUMENT;
+    }
+    if (count > worker->position) {
+        return MIMO26_GPU_WORKER_INVALID_ARGUMENT;
+    }
+    /*
+     * The KV journal is the source of truth for history, and the device
+     * copies are re-mirrored from it at the top of every layer, so rewinding
+     * the host side is sufficient -- there is no device state to unwind
+     * separately. That is a property worth keeping if the mirroring is ever
+     * removed for speed.
+     */
+    if (mimo26_kv_rollback(worker->kv, count) != MIMO26_KV_OK) {
+        return MIMO26_GPU_WORKER_DECODE_FAILED;
+    }
+    worker->position -= count;
+    return MIMO26_GPU_WORKER_OK;
 }
 
 void mimo26_gpu_worker_reset(mimo26_gpu_worker *worker)

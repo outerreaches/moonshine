@@ -101,6 +101,14 @@ mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
                                                   size_t error_size);
 
 uint32_t mimo26_gpu_worker_argmax(const float *logits);
+
+/*
+ * Rewind committed steps, for a rejected speculative block. Mirrors
+ * mimo26_worker_rollback so a caller written against the CPU backend works
+ * against this one unchanged.
+ */
+mimo26_gpu_worker_status mimo26_gpu_worker_rollback(mimo26_gpu_worker *worker,
+                                                    size_t count);
 uint64_t mimo26_gpu_worker_position(const mimo26_gpu_worker *worker);
 void mimo26_gpu_worker_reset(mimo26_gpu_worker *worker);
 void mimo26_gpu_worker_get_stats(const mimo26_gpu_worker *worker,

@@ -504,6 +504,13 @@ tests/test_mimo26_layer_parity: tests/test_mimo26_layer_parity.o \
 		mimo26_architecture.o mimo26_attention.o mimo26_ops.o \
 		mimo26_router.o glm53_fp8_oracle.o k3_safetensors.o k3_json.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+mimo26_server_slot.o: mimo26_server_slot.c mimo26_server_slot.h
+tests/test_mimo26_server_slot.o: tests/test_mimo26_server_slot.c \
+	mimo26_server_slot.h
+tests/test_mimo26_server_slot: tests/test_mimo26_server_slot.o \
+		mimo26_server_slot.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
 tests/test_mimo26_qualify.o: tests/test_mimo26_qualify.c mimo26_worker.h
 tests/test_mimo26_qualify.o: CFLAGS += -fno-fast-math
 tests/test_mimo26_qualify: tests/test_mimo26_qualify.o \
@@ -857,9 +864,10 @@ test-mzg-transcoder:
 		$(PYTHON) -m unittest -v tests/test_transcode_mzg.py
 
 test-mimo26-schema: tools/mimo26_dump_rope tools/mimo26_dump_ops tests/test_mimo26_architecture \
-		tests/test_mimo26_manifest
+		tests/test_mimo26_manifest tests/test_mimo26_server_slot
 	./tests/test_mimo26_architecture
 	./tests/test_mimo26_manifest
+	./tests/test_mimo26_server_slot
 	./tests/test_mimo26_fp8
 	./tests/test_mimo26_router
 	./tests/test_mimo26_ops
@@ -982,9 +990,23 @@ tools/mimo26_gpu_run: tools/mimo26_gpu_run.o mimo26_gpu_worker.o \
 		mimo26_router.o glm53_fp8_oracle.o k3_safetensors.o k3_json.o
 	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
 
+tests/test_mimo26_gpu_qualify.o: tests/test_mimo26_gpu_qualify.cu \
+	mimo26_gpu_worker.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/test_mimo26_gpu_qualify: tests/test_mimo26_gpu_qualify.o \
+		mimo26_gpu_worker.o mimo26_rocm_layer.o mimo26_rocm_ops.o \
+		k3_rocm_ops.o mimo26_weights.o mimo26_kv.o mimo26_manifest.o \
+		mimo26_architecture.o mimo26_attention.o mimo26_ops.o \
+		mimo26_router.o glm53_fp8_oracle.o k3_safetensors.o k3_json.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+
+# GPU operational qualification, mirroring mimo26-qualify on the CPU.
+mimo26-gpu-qualify: tests/test_mimo26_gpu_qualify
+	MIMO26_ROOT=$(MIMO26_ROOT) ./tests/test_mimo26_gpu_qualify
+
 # The whole GPU gate set, in dependency order.
 mimo26-gpu: mimo26-gpu-ops mimo26-gpu-attention mimo26-gpu-mxfp4 \
-	mimo26-gpu-layer
+	mimo26-gpu-layer mimo26-gpu-qualify
 
 # G1: the MiMo expert path on the GPU against the verified CPU dequantizer.
 mimo26-gpu-mxfp4: tests/test_mimo26_gpu_mxfp4
