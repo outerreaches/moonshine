@@ -193,6 +193,17 @@ static mimo26_layer_status run_moe(const mimo26_layer *layer,
         route->routed = true;
     }
 
+    /* Offer the whole batch before fetching any of it, so a cache can plan
+     * admissions that do not collide with experts still being read. */
+    if (layer->prepare != NULL) {
+        const mimo26_layer_status prepared = layer->prepare(
+            layer->provider_context, weights->layer, experts,
+            MIMO26_ROUTER_TOP_K, error, error_size);
+        if (prepared != MIMO26_LAYER_OK) {
+            return prepared;
+        }
+    }
+
     memset(scratch->accumulator, 0,
            MIMO26_HIDDEN_SIZE * sizeof *scratch->accumulator);
     /* Ascending expert id, matching the declared accumulation order. */

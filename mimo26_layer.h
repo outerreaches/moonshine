@@ -35,8 +35,21 @@ typedef mimo26_layer_status (*mimo26_expert_provider)(
     void *context, uint32_t layer, uint32_t expert,
     const mimo26_expert_weights **weights, char *error, size_t error_size);
 
+/*
+ * Announces the whole routed batch before any expert is fetched.
+ *
+ * A residency cache plans an entire batch at once, so that an admission never
+ * targets a slot another selected expert is still reading. Fetching one
+ * expert at a time cannot express that, so the batch is offered here first.
+ * Optional: a caller holding every expert in memory can leave it NULL.
+ */
+typedef mimo26_layer_status (*mimo26_expert_prepare)(
+    void *context, uint32_t layer, const uint32_t *experts, size_t count,
+    char *error, size_t error_size);
+
 typedef struct {
     const mimo26_layer_weights *weights;
+    mimo26_expert_prepare       prepare;       /* optional */
     mimo26_expert_provider      provider;      /* required on MoE layers */
     void                       *provider_context;
 } mimo26_layer;

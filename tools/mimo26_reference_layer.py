@@ -149,10 +149,15 @@ class Checkpoint:
         rows, packed_cols = shape
         cols = packed_cols * 2
         codes = np.empty((rows, cols), dtype=np.uint8)
-        # Element 2k is the low nibble of byte k, settled against the report's
-        # vLLM citation and SGLang's matching interleave.
-        codes[:, 0::2] = packed & 0x0F
-        codes[:, 1::2] = packed >> 4
+        # Element 2k is the low nibble of byte k, per SGLang's interleave.
+        # MIMO26_SWAP_NIBBLES=1 tests the opposite convention end to end.
+        import os
+        if os.environ.get("MIMO26_SWAP_NIBBLES") == "1":
+            codes[:, 0::2] = packed >> 4
+            codes[:, 1::2] = packed & 0x0F
+        else:
+            codes[:, 0::2] = packed & 0x0F
+            codes[:, 1::2] = packed >> 4
         values = e2m1_table()[codes]
         if (scales == 0xFF).any():
             raise RuntimeError(f"{prefix} has an E8M0 NaN scale byte")
@@ -248,13 +253,29 @@ def main():
         position_ids = torch.arange(args.tokens).unsqueeze(0)
         position_embeddings = rotary(hidden, position_ids)
 
+        # Build the additive mask explicitly. Passing attention_mask=None
+        # leaves eager attention completely unmasked, which is invisible at one
+        # token and silently bidirectional beyond that -- every position but
+        # the last then disagrees with causal decoding.
+        window = config.sliding_window if is_swa else None
+        q = torch.arange(args.tokens).view(-1, 1)
+        kv = torch.arange(args.tokens).view(1, -1)
+        visible = kv <= q
+        if window is not None:
+            visible = visible & (kv > q - window)
+        attention_mask = torch.zeros(1, 1, args.tokens, args.tokens,
+                                     dtype=hidden.dtype)
+        attention_mask = attention_mask.masked_fill(
+            ~visible.view(1, 1, args.tokens, args.tokens),
+            torch.finfo(hidden.dtype).min)
+
         residual = hidden
         normed = input_norm(hidden)
         with torch.no_grad():
             attention_out, _ = attention(
                 normed,
                 position_embeddings=position_embeddings,
-                attention_mask=None,
+                attention_mask=attention_mask,
                 past_key_values=None,
                 cache_position=position_ids[0],
                 position_ids=position_ids,

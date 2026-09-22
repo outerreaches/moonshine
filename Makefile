@@ -482,6 +482,16 @@ tools/mimo26_dump_weights: tools/mimo26_dump_weights.o \
 		mimo26_attention.o mimo26_ops.o mimo26_router.o \
 		glm53_fp8_oracle.o k3_safetensors.o k3_json.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tools/mimo26_run.o: tools/mimo26_run.c mimo26_worker.h
+tools/mimo26_run: tools/mimo26_run.o mimo26_worker.o mimo26_layer.o \
+		mimo26_weights.o mimo26_kv.o mimo26_manifest.o \
+		mimo26_architecture.o mimo26_attention.o mimo26_ops.o \
+		mimo26_router.o k3_expert_cache.o glm53_fp8_oracle.o \
+		k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+mimo26_worker.o: mimo26_worker.c mimo26_worker.h mimo26_layer.h \
+	mimo26_weights.h mimo26_manifest.h mimo26_ops.h k3_expert_cache.h
+mimo26_worker.o: CFLAGS += -fno-fast-math
 mimo26_layer.o: mimo26_layer.c mimo26_layer.h mimo26_weights.h \
 	mimo26_kv.h mimo26_router.h mimo26_ops.h mimo26_architecture.h
 mimo26_layer.o: CFLAGS += -fno-fast-math

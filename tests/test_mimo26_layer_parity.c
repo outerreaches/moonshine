@@ -120,9 +120,9 @@ int main(int argc, char **argv)
     const uint32_t layer_index = header[0];
     const uint32_t tokens = header[1];
     const uint32_t hidden_size = header[2];
-    if (hidden_size != MIMO26_HIDDEN_SIZE || tokens != 1u) {
-        fprintf(stderr, "fixture must be a single token at hidden size %u "
-                        "(got %u tokens, hidden %u)\n",
+    if (hidden_size != MIMO26_HIDDEN_SIZE || tokens == 0u) {
+        fprintf(stderr, "fixture must have hidden size %u and at least one "
+                        "token (got %u tokens, hidden %u)\n",
                 MIMO26_HIDDEN_SIZE, tokens, hidden_size);
         fclose(handle);
         return 2;
@@ -211,28 +211,70 @@ int main(int argc, char **argv)
     if (hidden == NULL) {
         goto done;
     }
-    memcpy(hidden, hidden_in, MIMO26_HIDDEN_SIZE * sizeof *hidden);
 
     mimo26_layer layer_context;
     memset(&layer_context, 0, sizeof layer_context);
     layer_context.weights = &weights;
     layer_context.provider = provide_expert;
     layer_context.provider_context = &store;
-
     mimo26_layer_route route;
-    const mimo26_layer_status status = mimo26_layer_decode(
-        &layer_context, scratch, hidden, kv, 0u, &route, error, sizeof error);
-    if (status != MIMO26_LAYER_OK) {
-        fprintf(stderr, "layer decode failed (%d): %s\n", (int)status, error);
-        free(hidden);
-        goto done;
+    memset(&route, 0, sizeof route);
+
+    /*
+     * The reference prefills all `tokens` positions at once under a causal
+     * mask. Feeding them one at a time must give the same answer at every
+     * position -- that equivalence is the whole basis of incremental decode,
+     * and a position-dependent bug (RoPE, history bounds, window edges) only
+     * shows once tokens > 1.
+     */
+    printf("\n  %-18s %-20s %s\n", "stage", "bit differences", "verdict");
+    for (uint32_t step = 0; step < tokens; step++) {
+        memcpy(hidden, hidden_in + (size_t)step * MIMO26_HIDDEN_SIZE,
+               MIMO26_HIDDEN_SIZE * sizeof *hidden);
+        const mimo26_layer_status status = mimo26_layer_decode(
+            &layer_context, scratch, hidden, kv, step, &route, error,
+            sizeof error);
+        if (status != MIMO26_LAYER_OK) {
+            fprintf(stderr, "layer decode failed at step %u (%d): %s\n", step,
+                    (int)status, error);
+            free(hidden);
+            goto done;
+        }
+        /* Publish this position so the next step sees it as history. */
+        for (uint32_t other = 0; other < MIMO26_TEXT_LAYER_COUNT; other++) {
+            if (other == layer_index) {
+                continue;
+            }
+            static uint16_t filler_keys[MIMO26_SWA_KV_HEADS *
+                                        MIMO26_QK_HEAD_DIM];
+            static uint16_t filler_values[MIMO26_SWA_KV_HEADS *
+                                          MIMO26_V_HEAD_DIM];
+            if (mimo26_kv_stage(kv, other, filler_keys, filler_values) !=
+                MIMO26_KV_OK) {
+                fprintf(stderr, "filler stage failed\n");
+                free(hidden);
+                goto done;
+            }
+        }
+        if (mimo26_kv_commit(kv) != MIMO26_KV_OK) {
+            fprintf(stderr, "commit failed at step %u\n", step);
+            free(hidden);
+            goto done;
+        }
+        char label[32];
+        snprintf(label, sizeof label, "final[%u]", step);
+        compare(label, hidden, final + (size_t)step * MIMO26_HIDDEN_SIZE,
+                MIMO26_HIDDEN_SIZE, &failures);
+        if (step + 1u < tokens && mimo26_kv_begin(kv, step + 1u) !=
+                                      MIMO26_KV_OK) {
+            fprintf(stderr, "begin failed at step %u\n", step + 1u);
+            free(hidden);
+            goto done;
+        }
     }
     printf("  loaded %zu experts on demand\n", store.loaded);
 
-    printf("\n  %-18s %-20s %s\n", "stage", "bit differences", "verdict");
-    compare("final", hidden, final, MIMO26_HIDDEN_SIZE, &failures);
-
-    if (route.routed && route_count > 0u) {
+    if (route.routed && route_count > 0u && tokens == 1u) {
         size_t matched = 0;
         for (uint32_t i = 0; i < route_count; i++) {
             for (size_t j = 0; j < MIMO26_ROUTER_TOP_K; j++) {
