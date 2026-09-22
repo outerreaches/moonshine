@@ -882,12 +882,13 @@ test-mimo26-schema: tools/mimo26_dump_rope tools/mimo26_dump_ops tests/test_mimo
 # Full-metadata audit against a real checkpoint. Header-only and read-only;
 # requires MIMO26_ROOT to point at an official download.
 test-mimo26-checkpoint: tests/test_mimo26_official \
-		tools/mimo26_dump_weights
+		tools/mimo26_dump_weights tests/test_mimo26_tokenizer_c
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/audit_mimo26_checkpoint.py \
 		$(MIMO26_ROOT)
 	./tests/test_mimo26_official $(MIMO26_ROOT)
 	MIMO26_ROOT=$(MIMO26_ROOT) PYTHONDONTWRITEBYTECODE=1 \
 		$(PYTHON) tests/test_mimo26_tokenizer.py
+	MIMO26_ROOT=$(MIMO26_ROOT) ./tests/test_mimo26_tokenizer_c
 	MIMO26_ROOT=$(MIMO26_ROOT) PYTHONDONTWRITEBYTECODE=1 \
 		$(PYTHON) tests/test_mimo26_weights_vs_reference.py
 
@@ -1219,3 +1220,10 @@ clean:
 		tools/transcode_mzg2_layer tools/transcode_mzg2_layer.o \
 		tools/screen_static_q8 tools/screen_static_q8.o \
 		$(K3_OBJS) $(GLM53_OBJS) tests/*.o $(ALL_TESTS)
+
+mimo26_tokenizer.o: mimo26_tokenizer.c mimo26_tokenizer.h k3_json.h
+tests/test_mimo26_tokenizer_c.o: tests/test_mimo26_tokenizer_c.c \
+	mimo26_tokenizer.h
+tests/test_mimo26_tokenizer_c: tests/test_mimo26_tokenizer_c.o \
+		mimo26_tokenizer.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) $(ICU_LDLIBS)
