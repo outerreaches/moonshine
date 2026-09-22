@@ -80,6 +80,13 @@ bool mimo26_rocm_ordered_gemv_f32(float *output, const void *weights,
                                   const void *input, uint32_t rows,
                                   uint32_t columns, void *stream);
 
+/* Batched form: `count` inputs against the same weights, each row summed in
+ * its own ascending order. */
+bool mimo26_rocm_ordered_gemv_f32_batch(float *output, const void *weights,
+                                        const void *input, uint32_t rows,
+                                        uint32_t columns, uint32_t count,
+                                        void *stream);
+
 /* The router's use of it, named for what it computes. */
 bool mimo26_rocm_router_logits_f32(float *logits, const void *weight,
                                    const void *hidden, uint32_t experts,
@@ -192,6 +199,22 @@ bool mimo26_rocm_split_qkv(void *q, void *k, void *v, const void *fused,
 bool mimo26_rocm_rope_apply(void *heads, const void *cos_table,
                             const void *sin_table, uint32_t head_count,
                             void *stream);
+
+/* Batched forms for prefill: one chunk of tokens at a time. The cos/sin
+ * tables are [count][64], one pair per token, built on the host. */
+bool mimo26_rocm_split_qkv_batch(void *q, void *k, void *v,
+                                 const void *fused, uint32_t kv_heads,
+                                 uint32_t qkv_width, uint32_t count,
+                                 void *stream);
+bool mimo26_rocm_rope_apply_batch(void *heads, const void *cos_tables,
+                                  const void *sin_tables,
+                                  uint32_t head_count, uint32_t count,
+                                  void *stream);
+/* Append a chunk's rotated keys and scaled values into the history at
+ * `offset`, so attention sees them through the same arrays decode uses. */
+bool mimo26_rocm_append_kv(void *keys, void *values, const void *chunk_keys,
+                           const void *chunk_values, uint32_t kv_heads,
+                           uint64_t offset, uint32_t count, void *stream);
 
 /*
  * Run only the score pass, leaving the raw per-slot scores in scratch:

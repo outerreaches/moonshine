@@ -54,6 +54,16 @@ typedef struct {
     /* Refuse to start if the planned footprint exceeds this. 0 means use the
      * device's measured free memory instead. */
     uint64_t memory_limit_bytes;
+    /*
+     * Tokens per layer-major prefill chunk. 0 disables prefill and falls
+     * back to feeding the prompt through decode, which is what this worker
+     * did before and is kept as a reference path rather than deleted.
+     *
+     * Larger chunks amortize the BF16 projections further -- they are read
+     * once per chunk rather than once per token -- at the cost of scratch
+     * that scales with the chunk.
+     */
+    uint16_t prefill_chunk;
 } mimo26_gpu_worker_config;
 
 void mimo26_gpu_worker_config_defaults(mimo26_gpu_worker_config *config);
@@ -95,6 +105,24 @@ uint64_t mimo26_gpu_worker_resident_bytes(const mimo26_gpu_worker *worker);
  * and committed together, so a failure leaves committed history and the
  * position counter untouched and the caller may retry or cancel.
  */
+/*
+ * Feed a prompt layer-major, in chunks.
+ *
+ * Equivalent to calling decode once per token -- gated as such at the layer
+ * level -- but reads the BF16 projections once per chunk instead of once per
+ * token, which is the dominant cost of a prompt. logits receives the
+ * distribution after the LAST token, which is all a prompt needs.
+ *
+ * Transactional per chunk: a failure leaves committed history and the
+ * position at the last completed chunk, so a caller may retry the rest.
+ */
+mimo26_gpu_worker_status mimo26_gpu_worker_prefill(mimo26_gpu_worker *worker,
+                                                   const uint32_t *tokens,
+                                                   size_t count,
+                                                   float *logits,
+                                                   char *error,
+                                                   size_t error_size);
+
 mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
                                                   uint32_t token_id,
                                                   float *logits, char *error,

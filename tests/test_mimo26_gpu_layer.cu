@@ -591,6 +591,189 @@ int main(int argc, char **argv)
             ok(label, 0, "gpu selected different experts than the cpu");
         }
 
+        /*
+         * Layer-major prefill must equal the decode path on the same tokens.
+         * This is the gate that makes the optimization safe to adopt: if a
+         * chunk answers differently from the same tokens fed one at a time,
+         * a prompt's meaning depends on how it was submitted, and the
+         * difference would only surface at depth where it is hardest to
+         * attribute.
+         */
+        {
+            const uint32_t chunk = 6u;
+            void *d_chunk_hidden = NULL;
+            void *d_chunk_keys = NULL, *d_chunk_values = NULL;
+            void *d_cos_tables = NULL, *d_sin_tables = NULL;
+            HIP_OK(hipMalloc(&d_chunk_hidden,
+                             (size_t)chunk * HIDDEN * sizeof(uint16_t)));
+            HIP_OK(hipMalloc(&d_chunk_keys,
+                             (size_t)64 * 8 * QK * sizeof(uint16_t)));
+            HIP_OK(hipMalloc(&d_chunk_values,
+                             (size_t)64 * 8 * VD * sizeof(uint16_t)));
+            HIP_OK(hipMalloc(&d_cos_tables,
+                             (size_t)chunk * MIMO26_ROPE_DIM *
+                                 sizeof(uint16_t)));
+            HIP_OK(hipMalloc(&d_sin_tables,
+                             (size_t)chunk * MIMO26_ROPE_DIM *
+                                 sizeof(uint16_t)));
+
+            /* Same starting states for both paths. */
+            uint16_t *chunk_hidden = (uint16_t *)malloc(
+                (size_t)chunk * HIDDEN * sizeof *chunk_hidden);
+            uint32_t seed = 0x51ED270Bu ^ (layer_index * 40503u);
+            for (size_t i = 0; i < (size_t)chunk * HIDDEN; i++) {
+                seed = seed * 1664525u + 1013904223u;
+                const float unit = (float)((seed >> 8) & 0xFFFFu) / 65535.0f;
+                chunk_hidden[i] = mimo26_f32_to_bf16((unit - 0.5f) * 0.06f);
+            }
+            uint16_t cos_host[MIMO26_ROPE_DIM * 8];
+            uint16_t sin_host[MIMO26_ROPE_DIM * 8];
+            for (uint32_t b = 0; b < chunk; b++) {
+                mimo26_rope_table(cos_host + b * MIMO26_ROPE_DIM,
+                                  sin_host + b * MIMO26_ROPE_DIM, b,
+                                  weights.attention.rope_theta);
+            }
+            HIP_OK(hipMemcpy(d_cos_tables, cos_host,
+                             (size_t)chunk * MIMO26_ROPE_DIM *
+                                 sizeof(uint16_t), hipMemcpyHostToDevice));
+            HIP_OK(hipMemcpy(d_sin_tables, sin_host,
+                             (size_t)chunk * MIMO26_ROPE_DIM *
+                                 sizeof(uint16_t), hipMemcpyHostToDevice));
+            HIP_OK(hipMemcpy(d_chunk_hidden, chunk_hidden,
+                             (size_t)chunk * HIDDEN * sizeof(uint16_t),
+                             hipMemcpyHostToDevice));
+
+            scratch.batch_capacity = chunk;
+            /* Prefill scratch has to be wide enough for the chunk. */
+            hipFree(scratch.normed);
+            hipFree(scratch.fused);
+            hipFree(scratch.query);
+            hipFree(scratch.key);
+            hipFree(scratch.value);
+            hipFree(scratch.attention);
+            hipFree(scratch.projected);
+            hipFree(scratch.accumulator);
+            hipFree(scratch.router_logits);
+            hipFree(scratch.router_weights);
+            hipFree(scratch.router_ids);
+            hipFree(scratch.attention_scratch);
+            hipFree(scratch.mlp_gate);
+            hipFree(scratch.mlp_up);
+            hipFree(scratch.mlp_active);
+            HIP_OK(hipMalloc(&scratch.normed,
+                             (size_t)chunk * HIDDEN * sizeof(uint16_t)));
+            HIP_OK(hipMalloc(&scratch.fused,
+                             (size_t)chunk * MIMO26_SWA_QKV_WIDTH *
+                                 sizeof(uint16_t)));
+            HIP_OK(hipMalloc(&scratch.query,
+                             (size_t)chunk * QH * QK * sizeof(uint16_t)));
+            HIP_OK(hipMalloc(&scratch.key,
+                             (size_t)chunk * 8 * QK * sizeof(uint16_t)));
+            HIP_OK(hipMalloc(&scratch.value,
+                             (size_t)chunk * 8 * VD * sizeof(uint16_t)));
+            HIP_OK(hipMalloc(&scratch.attention,
+                             (size_t)chunk * QH * VD * sizeof(uint16_t)));
+            HIP_OK(hipMalloc(&scratch.projected,
+                             (size_t)chunk * HIDDEN * sizeof(uint16_t)));
+            HIP_OK(hipMalloc(&scratch.mlp_gate,
+                             (size_t)chunk * 16384 * sizeof(uint16_t)));
+            HIP_OK(hipMalloc(&scratch.mlp_up,
+                             (size_t)chunk * 16384 * sizeof(uint16_t)));
+            HIP_OK(hipMalloc(&scratch.mlp_active,
+                             (size_t)chunk * 16384 * sizeof(uint16_t)));
+            HIP_OK(hipMalloc(&scratch.accumulator,
+                             (size_t)chunk * HIDDEN * sizeof(float)));
+            HIP_OK(hipMalloc(&scratch.router_logits,
+                             (size_t)chunk * MIMO26_ROUTER_EXPERTS *
+                                 sizeof(float)));
+            HIP_OK(hipMalloc(&scratch.router_weights,
+                             (size_t)chunk * MIMO26_ROUTER_TOP_K *
+                                 sizeof(float)));
+            HIP_OK(hipMalloc(&scratch.router_ids,
+                             (size_t)chunk * MIMO26_ROUTER_TOP_K *
+                                 sizeof(uint32_t)));
+            scratch.attention_capacity = 64;
+            HIP_OK(hipMalloc(&scratch.attention_scratch,
+                             (size_t)chunk *
+                                 mimo26_rocm_attention_scratch_floats(64) *
+                                 sizeof(float)));
+
+            const mimo26_rocm_layer_status prefill_status =
+                mimo26_rocm_layer_prefill(&gpu_layer, &scratch,
+                                          d_chunk_hidden, d_chunk_keys,
+                                          d_chunk_values, d_cos_tables,
+                                          d_sin_tables, 0u, 0u, 0u, chunk,
+                                          NULL, NULL);
+            HIP_OK(hipDeviceSynchronize());
+
+            /* The same tokens, decoded one at a time on the CPU layer. */
+            uint16_t *reference = (uint16_t *)malloc(
+                (size_t)chunk * HIDDEN * sizeof *reference);
+            memcpy(reference, chunk_hidden,
+                   (size_t)chunk * HIDDEN * sizeof *reference);
+            mimo26_kv_cache *chunk_kv = NULL;
+            mimo26_layer_scratch *chunk_scratch = NULL;
+            mimo26_layer_scratch_create(&chunk_scratch);
+            mimo26_kv_create(&chunk_kv, 64, 8);
+            bool cpu_ok = true;
+            for (uint32_t b = 0; b < chunk && cpu_ok; b++) {
+                mimo26_kv_begin(chunk_kv, b);
+                cpu_ok = mimo26_layer_decode(&cpu_layer, chunk_scratch,
+                                             reference + (size_t)b * HIDDEN,
+                                             chunk_kv, b, NULL, error,
+                                             sizeof error) ==
+                         MIMO26_LAYER_OK;
+                for (uint32_t other = 0; other < MIMO26_TEXT_LAYER_COUNT;
+                     other++) {
+                    if (other == layer_index) { continue; }
+                    static uint16_t fk[MIMO26_SWA_KV_HEADS * QK];
+                    static uint16_t fv[MIMO26_SWA_KV_HEADS * VD];
+                    mimo26_kv_stage(chunk_kv, other, fk, fv);
+                }
+                mimo26_kv_commit(chunk_kv);
+            }
+
+            uint16_t *prefilled = (uint16_t *)malloc(
+                (size_t)chunk * HIDDEN * sizeof *prefilled);
+            HIP_OK(hipMemcpy(prefilled, d_chunk_hidden,
+                             (size_t)chunk * HIDDEN * sizeof *prefilled,
+                             hipMemcpyDeviceToHost));
+            double worst_chunk = 0.0;
+            size_t chunk_differing = 0;
+            for (uint32_t b = 0; b < chunk; b++) {
+                size_t differing = 0;
+                const double relative = compare_hidden(
+                    reference + (size_t)b * HIDDEN,
+                    prefilled + (size_t)b * HIDDEN, HIDDEN, &differing);
+                if (relative > worst_chunk) { worst_chunk = relative; }
+                chunk_differing += differing;
+            }
+            char chunk_label[96];
+            char chunk_detail[128];
+            snprintf(chunk_label, sizeof chunk_label,
+                     "layer %u prefill x%u == decode x%u", layer_index,
+                     chunk, chunk);
+            snprintf(chunk_detail, sizeof chunk_detail,
+                     "%zu/%u differ, worst %.2e of rms", chunk_differing,
+                     chunk * HIDDEN, worst_chunk);
+            ok(chunk_label,
+               prefill_status == MIMO26_ROCM_LAYER_OK && cpu_ok &&
+                   worst_chunk <= MAX_RELATIVE_ZERO_HISTORY,
+               prefill_status != MIMO26_ROCM_LAYER_OK
+                   ? "prefill refused" : chunk_detail);
+
+            free(chunk_hidden);
+            free(reference);
+            free(prefilled);
+            mimo26_kv_destroy(chunk_kv);
+            mimo26_layer_scratch_destroy(chunk_scratch);
+            hipFree(d_chunk_hidden);
+            hipFree(d_chunk_keys);
+            hipFree(d_chunk_values);
+            hipFree(d_cos_tables);
+            hipFree(d_sin_tables);
+        }
+
         mimo26_kv_destroy(kv);
         mimo26_layer_scratch_destroy(cpu_scratch);
         mimo26_layer_weights_free(&weights);

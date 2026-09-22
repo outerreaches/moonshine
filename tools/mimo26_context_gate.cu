@@ -177,19 +177,13 @@ int main(int argc, char **argv)
 
         /* --- prefill --- */
         const double prefill_started = now_seconds();
-        bool ok_run = true;
-        for (size_t i = 0; i < prompt.count && ok_run; i++) {
-            if (mimo26_gpu_worker_decode(worker, prompt.ids[i], logits, error,
-                                         sizeof error) !=
-                MIMO26_GPU_WORKER_OK) {
-                fprintf(stderr, "  prefill failed at %zu: %s\n", i, error);
-                ok_run = false;
-            }
-        }
-        const double prefill_seconds = now_seconds() - prefill_started;
-        if (!ok_run) {
+        if (mimo26_gpu_worker_prefill(worker, prompt.ids, prompt.count,
+                                      logits, error, sizeof error) !=
+            MIMO26_GPU_WORKER_OK) {
+            fprintf(stderr, "  prefill failed: %s\n", error);
             return 1;
         }
+        const double prefill_seconds = now_seconds() - prefill_started;
         memcpy(first_pass, logits, (size_t)VOCAB * sizeof *logits);
         char detail[256];
         snprintf(detail, sizeof detail,

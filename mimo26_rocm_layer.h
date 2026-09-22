@@ -119,6 +119,12 @@ typedef struct {
     uint32_t *router_ids; /* [8] u32 */
     float *attention_scratch;     /* mimo26_rocm_attention_scratch_floats() */
     uint64_t attention_capacity;  /* history the scratch was sized for */
+    /*
+     * Prefill widths. Zero means decode-only: the prefill entry point
+     * refuses rather than overrunning buffers sized for one token, which is
+     * the failure a shared scratch struct invites.
+     */
+    uint32_t batch_capacity;
 
     /* Host-visible staging for the router read-back. */
     uint32_t host_ids[MIMO26_ROCM_TOP_K];
@@ -146,6 +152,32 @@ typedef struct {
  *
  * route, when given, receives the selected experts in ascending id order.
  */
+/*
+ * One layer over a whole chunk of tokens, layer-major.
+ *
+ * This is the path prefill should have been using from the start. The decode
+ * entry point below walks one token through all 48 layers, so every token
+ * re-reads the 10.72 GB of BF16 projections that a chunk reads once. Going
+ * layer-major turns that into a per-chunk cost, and bounds the expert reads
+ * per layer by the router union over the chunk rather than 8 per token.
+ *
+ * hidden is [count][4096] and is updated in place. keys and values hold the
+ * prior history and are EXTENDED with this chunk's entries at `history`
+ * before attention runs, so attention sees exactly what it would see if the
+ * tokens had been decoded one at a time -- which is gated as such.
+ *
+ * cos_tables and sin_tables are [count][64] BF16, one pair per token,
+ * built on the host by mimo26_rope_table.
+ *
+ * routes, when given, receives [count][8] selected experts.
+ */
+mimo26_rocm_layer_status mimo26_rocm_layer_prefill(
+    const mimo26_rocm_layer *layer, mimo26_rocm_layer_scratch *scratch,
+    void *hidden, void *keys, void *values, const void *cos_tables,
+    const void *sin_tables, uint64_t history, uint64_t first_position,
+    uint64_t first_token_position, uint32_t count, uint32_t *routes,
+    void *stream);
+
 mimo26_rocm_layer_status mimo26_rocm_layer_decode(
     const mimo26_rocm_layer *layer, mimo26_rocm_layer_scratch *scratch,
     void *hidden, const void *keys, const void *values,

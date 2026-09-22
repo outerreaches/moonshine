@@ -146,6 +146,15 @@ struct mimo26_gpu_worker {
     void            *sin_table;
     uint16_t        *staging_key;
     uint16_t        *staging_value;
+    /* Per-chunk key/value readback, [layer][chunk][...] so the whole chunk
+     * can be staged into the journal after every layer has run. */
+    uint16_t        *chunk_keys;
+    uint16_t        *chunk_values;
+    uint16_t        *cos_tables;
+    uint16_t        *sin_tables;
+    void            *device_cos_tables;
+    void            *device_sin_tables;
+    uint16_t         prefill_chunk;
 
     /* Where this layer's selection landed, filled by prepare_batch and read
      * by the provider moments later in the same step. */
@@ -192,6 +201,9 @@ void mimo26_gpu_worker_config_defaults(mimo26_gpu_worker_config *config)
      */
     config->expert_slots_per_layer = 16u;
     config->memory_limit_bytes = 0u;
+    /* 32 tokens per chunk: enough to amortize the 10.72 GB of BF16
+     * projections roughly 32-fold while keeping the batch scratch modest. */
+    config->prefill_chunk = 32u;
 }
 
 uint64_t mimo26_gpu_worker_planned_bytes(
@@ -493,6 +505,64 @@ static bool provide_expert(void *context, uint32_t layer, uint32_t expert,
     return false;
 }
 
+/*
+ * Widen the layer scratch to hold `chunk` tokens.
+ *
+ * The decode path allocates these for one token; prefill needs the same
+ * buffers `chunk` times wider. Reallocated once at create rather than per
+ * call, and batch_capacity records the width so the layer entry point can
+ * refuse a wider request instead of overrunning.
+ */
+static void scratch_resize(mimo26_gpu_worker *worker, size_t chunk,
+                           char *error, size_t error_size)
+{
+    (void)error;
+    (void)error_size;
+    mimo26_rocm_layer_scratch *s = &worker->scratch;
+    struct { void **slot; size_t bytes; } widened[] = {
+        {&s->normed,     chunk * HIDDEN * sizeof(uint16_t)},
+        {&s->fused,      chunk * MIMO26_SWA_QKV_WIDTH * sizeof(uint16_t)},
+        {&s->query,      chunk * MIMO26_QUERY_HEADS * QK * sizeof(uint16_t)},
+        {&s->key,        chunk * MIMO26_SWA_KV_HEADS * QK * sizeof(uint16_t)},
+        {&s->value,      chunk * MIMO26_SWA_KV_HEADS * VD * sizeof(uint16_t)},
+        {&s->attention,  chunk * MIMO26_QUERY_HEADS * VD * sizeof(uint16_t)},
+        {&s->projected,  chunk * HIDDEN * sizeof(uint16_t)},
+        {&s->mlp_gate,   chunk * 16384u * sizeof(uint16_t)},
+        {&s->mlp_up,     chunk * 16384u * sizeof(uint16_t)},
+        {&s->mlp_active, chunk * 16384u * sizeof(uint16_t)},
+        {&s->expert_out, HIDDEN * sizeof(uint16_t)},
+    };
+    for (size_t i = 0; i < sizeof widened / sizeof widened[0]; i++) {
+        hipFree(*widened[i].slot);
+        if (hipMalloc(widened[i].slot, widened[i].bytes) != hipSuccess) {
+            return;
+        }
+    }
+    hipFree(s->accumulator);
+    hipFree(s->router_logits);
+    hipFree(s->router_weights);
+    hipFree(s->router_ids);
+    hipFree(s->attention_scratch);
+    if (hipMalloc(&s->accumulator, chunk * HIDDEN * sizeof(float)) !=
+            hipSuccess ||
+        hipMalloc(&s->router_logits,
+                  chunk * MIMO26_ROUTER_EXPERTS * sizeof(float)) !=
+            hipSuccess ||
+        hipMalloc(&s->router_weights,
+                  chunk * MIMO26_ROUTER_TOP_K * sizeof(float)) !=
+            hipSuccess ||
+        hipMalloc(&s->router_ids,
+                  chunk * MIMO26_ROUTER_TOP_K * sizeof(uint32_t)) !=
+            hipSuccess ||
+        hipMalloc(&s->attention_scratch,
+                  chunk * mimo26_rocm_attention_scratch_floats(
+                              s->attention_capacity) * sizeof(float)) !=
+            hipSuccess) {
+        return;
+    }
+    s->batch_capacity = (uint32_t)chunk;
+}
+
 /* ---- lifecycle ---- */
 
 void mimo26_gpu_worker_destroy(mimo26_gpu_worker *worker)
@@ -558,6 +628,12 @@ void mimo26_gpu_worker_destroy(mimo26_gpu_worker *worker)
     }
     free(worker->staging_key);
     free(worker->staging_value);
+    free(worker->chunk_keys);
+    free(worker->chunk_values);
+    free(worker->cos_tables);
+    free(worker->sin_tables);
+    hipFree(worker->device_cos_tables);
+    hipFree(worker->device_sin_tables);
     if (worker->kv != NULL) {
         mimo26_kv_destroy(worker->kv);
     }
@@ -787,6 +863,39 @@ mimo26_gpu_worker_status mimo26_gpu_worker_create(
                                MIMO26_STAGING_SLOTS, error, error_size),
             "io_uring creation failed");
     worker->staging_ready = true;
+
+    /*
+     * Prefill scratch. Sized for the configured chunk so the layer entry
+     * point can refuse anything wider rather than overrun buffers shaped
+     * for a single token.
+     */
+    worker->prefill_chunk = config->prefill_chunk;
+    if (worker->prefill_chunk > 0u) {
+        const size_t chunk = worker->prefill_chunk;
+        scratch_resize(worker, chunk, error, error_size);
+        REQUIRE(worker->scratch.batch_capacity == chunk,
+                "prefill scratch allocation failed");
+        worker->chunk_keys = (uint16_t *)calloc(
+            (size_t)LAYERS * chunk * MIMO26_SWA_KV_HEADS * QK,
+            sizeof *worker->chunk_keys);
+        worker->chunk_values = (uint16_t *)calloc(
+            (size_t)LAYERS * chunk * MIMO26_SWA_KV_HEADS * VD,
+            sizeof *worker->chunk_values);
+        worker->cos_tables = (uint16_t *)calloc(chunk * MIMO26_ROPE_DIM,
+                                                sizeof *worker->cos_tables);
+        worker->sin_tables = (uint16_t *)calloc(chunk * MIMO26_ROPE_DIM,
+                                                sizeof *worker->sin_tables);
+        REQUIRE(worker->chunk_keys && worker->chunk_values &&
+                worker->cos_tables && worker->sin_tables,
+                "prefill staging allocation failed");
+        REQUIRE(hipMalloc(&worker->device_cos_tables,
+                          chunk * MIMO26_ROPE_DIM * sizeof(uint16_t)) ==
+                    hipSuccess &&
+                hipMalloc(&worker->device_sin_tables,
+                          chunk * MIMO26_ROPE_DIM * sizeof(uint16_t)) ==
+                    hipSuccess,
+                "prefill rope table allocation failed");
+    }
 
     worker->staging_key = (uint16_t *)calloc(
         (size_t)MIMO26_SWA_KV_HEADS * QK, sizeof *worker->staging_key);
@@ -1045,6 +1154,245 @@ mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
         (double)(finished.tv_sec - started.tv_sec) +
         (double)(finished.tv_nsec - started.tv_nsec) / 1e9;
     worker->stats.tokens++;
+    return MIMO26_GPU_WORKER_OK;
+}
+
+mimo26_gpu_worker_status mimo26_gpu_worker_prefill(mimo26_gpu_worker *worker,
+                                                   const uint32_t *tokens,
+                                                   size_t count,
+                                                   float *logits,
+                                                   char *error,
+                                                   size_t error_size)
+{
+    if (worker == NULL || tokens == NULL || logits == NULL) {
+        return MIMO26_GPU_WORKER_INVALID_ARGUMENT;
+    }
+    /* Without a configured chunk this is the decode loop, kept so the old
+     * path stays reachable for comparison rather than deleted. */
+    if (worker->prefill_chunk == 0u) {
+        for (size_t i = 0; i < count; i++) {
+            const mimo26_gpu_worker_status status =
+                mimo26_gpu_worker_decode(worker, tokens[i], logits, error,
+                                         error_size);
+            if (status != MIMO26_GPU_WORKER_OK) {
+                return status;
+            }
+        }
+        return MIMO26_GPU_WORKER_OK;
+    }
+    for (size_t i = 0; i < count; i++) {
+        if (tokens[i] >= VOCAB) {
+            return fail(error, error_size, MIMO26_GPU_WORKER_INVALID_ARGUMENT,
+                        "token id %u is beyond the tokenizer vocabulary",
+                        tokens[i]);
+        }
+    }
+    if (worker->position + count > worker->config.global_kv_capacity) {
+        return fail(error, error_size, MIMO26_GPU_WORKER_CAPACITY_EXCEEDED,
+                    "prompt of %zu tokens exceeds the context of %zu",
+                    count, worker->config.global_kv_capacity);
+    }
+
+    struct timespec started;
+    clock_gettime(CLOCK_MONOTONIC, &started);
+    const bool profile = getenv("MIMO26_GPU_PROFILE") != NULL;
+    double kv_seconds = 0.0, rope_seconds = 0.0, layer_seconds = 0.0;
+    double readback_seconds = 0.0, commit_seconds = 0.0;
+    g_upload_seconds = 0.0;
+    struct timespec mark, mark2;
+    #define PTICK() do { if (profile) { hipDeviceSynchronize(); \
+        clock_gettime(CLOCK_MONOTONIC, &mark); } } while (0)
+    #define PTOCK(acc) do { if (profile) { hipDeviceSynchronize(); \
+        clock_gettime(CLOCK_MONOTONIC, &mark2); \
+        (acc) += (double)(mark2.tv_sec - mark.tv_sec) + \
+                 (double)(mark2.tv_nsec - mark.tv_nsec) / 1e9; } } while (0)
+
+    size_t done = 0;
+    while (done < count) {
+        const size_t chunk = (count - done) < worker->prefill_chunk
+                                 ? (count - done) : worker->prefill_chunk;
+        const uint64_t base_position = worker->position;
+
+        /* Gather the chunk's embeddings. */
+        for (size_t b = 0; b < chunk; b++) {
+            if (hipMemcpy((uint16_t *)worker->hidden + b * HIDDEN,
+                          (const uint16_t *)worker->embed_tokens +
+                              (size_t)tokens[done + b] * HIDDEN,
+                          HIDDEN * sizeof(uint16_t),
+                          hipMemcpyDeviceToDevice) != hipSuccess) {
+                return fail(error, error_size,
+                            MIMO26_GPU_WORKER_DECODE_FAILED,
+                            "embedding gather failed");
+            }
+        }
+
+        for (uint32_t l = 0; l < LAYERS; l++) {
+            const mimo26_rocm_layer_weights *w = &worker->layers[l];
+            const uint16_t *view_keys = NULL;
+            const uint16_t *view_values = NULL;
+            size_t history = 0;
+            uint64_t first_position = 0;
+            if (mimo26_kv_view(worker->kv, l, &view_keys, &view_values,
+                               &history, &first_position) != MIMO26_KV_OK) {
+                return fail(error, error_size,
+                            MIMO26_GPU_WORKER_DECODE_FAILED,
+                            "kv view failed at layer %u", l);
+            }
+            PTICK();
+            if (history > 0 &&
+                (hipMemcpy(worker->device_keys, view_keys,
+                           history * w->kv_heads * QK * sizeof(uint16_t),
+                           hipMemcpyHostToDevice) != hipSuccess ||
+                 hipMemcpy(worker->device_values, view_values,
+                           history * w->kv_heads * VD * sizeof(uint16_t),
+                           hipMemcpyHostToDevice) != hipSuccess)) {
+                return fail(error, error_size,
+                            MIMO26_GPU_WORKER_DECODE_FAILED,
+                            "history upload failed at layer %u", l);
+            }
+
+            PTOCK(kv_seconds);
+            PTICK();
+            mimo26_attention_config attention_config;
+            mimo26_attention_config_for_layer(l, &attention_config);
+            for (size_t b = 0; b < chunk; b++) {
+                mimo26_rope_table(worker->cos_tables + b * MIMO26_ROPE_DIM,
+                                  worker->sin_tables + b * MIMO26_ROPE_DIM,
+                                  base_position + b,
+                                  attention_config.rope_theta);
+            }
+            if (hipMemcpy(worker->device_cos_tables, worker->cos_tables,
+                          chunk * MIMO26_ROPE_DIM * sizeof(uint16_t),
+                          hipMemcpyHostToDevice) != hipSuccess ||
+                hipMemcpy(worker->device_sin_tables, worker->sin_tables,
+                          chunk * MIMO26_ROPE_DIM * sizeof(uint16_t),
+                          hipMemcpyHostToDevice) != hipSuccess) {
+                return fail(error, error_size,
+                            MIMO26_GPU_WORKER_DECODE_FAILED,
+                            "rope upload failed at layer %u", l);
+            }
+
+            PTOCK(rope_seconds);
+            PTICK();
+            mimo26_rocm_layer context;
+            memset(&context, 0, sizeof context);
+            context.weights = w;
+            context.prepare = w->is_moe ? prepare_batch : NULL;
+            context.provider = w->is_moe ? provide_expert : NULL;
+            context.provider_context = worker;
+
+            const mimo26_rocm_layer_status status = mimo26_rocm_layer_prefill(
+                &context, &worker->scratch, worker->hidden,
+                worker->device_keys, worker->device_values,
+                worker->device_cos_tables, worker->device_sin_tables,
+                history, first_position, base_position, (uint32_t)chunk,
+                NULL, NULL);
+            if (status != MIMO26_ROCM_LAYER_OK) {
+                mimo26_kv_abort(worker->kv);
+                worker->stats.aborted_steps++;
+                return fail(error, error_size,
+                            MIMO26_GPU_WORKER_DECODE_FAILED,
+                            "prefill layer %u failed with status %d", l,
+                            (int)status);
+            }
+
+            PTOCK(layer_seconds);
+            PTICK();
+            /* Keep this layer's chunk keys and values for staging once every
+             * layer has run, so an abort leaves the journal untouched. */
+            uint16_t *key_slot = worker->chunk_keys +
+                                 (size_t)l * worker->prefill_chunk *
+                                     MIMO26_SWA_KV_HEADS * QK;
+            uint16_t *value_slot = worker->chunk_values +
+                                   (size_t)l * worker->prefill_chunk *
+                                       MIMO26_SWA_KV_HEADS * VD;
+            if (hipMemcpy(key_slot, worker->scratch.key,
+                          chunk * w->kv_heads * QK * sizeof(uint16_t),
+                          hipMemcpyDeviceToHost) != hipSuccess ||
+                hipMemcpy(value_slot, worker->scratch.value,
+                          chunk * w->kv_heads * VD * sizeof(uint16_t),
+                          hipMemcpyDeviceToHost) != hipSuccess) {
+                return fail(error, error_size,
+                            MIMO26_GPU_WORKER_DECODE_FAILED,
+                            "key/value readback failed at layer %u", l);
+            }
+        }
+
+        PTOCK(readback_seconds);
+        PTICK();
+        /* Commit the chunk one position at a time, so the journal sees the
+         * same sequence it would have seen from decode. */
+        for (size_t b = 0; b < chunk; b++) {
+            if (mimo26_kv_begin(worker->kv, base_position + b) !=
+                MIMO26_KV_OK) {
+                return fail(error, error_size,
+                            MIMO26_GPU_WORKER_DECODE_FAILED,
+                            "kv begin failed");
+            }
+            for (uint32_t l = 0; l < LAYERS; l++) {
+                const uint32_t kv_heads = worker->layers[l].kv_heads;
+                const uint16_t *key_slot =
+                    worker->chunk_keys +
+                    (size_t)l * worker->prefill_chunk *
+                        MIMO26_SWA_KV_HEADS * QK + b * kv_heads * QK;
+                const uint16_t *value_slot =
+                    worker->chunk_values +
+                    (size_t)l * worker->prefill_chunk *
+                        MIMO26_SWA_KV_HEADS * VD + b * kv_heads * VD;
+                if (mimo26_kv_stage(worker->kv, l, key_slot, value_slot) !=
+                    MIMO26_KV_OK) {
+                    mimo26_kv_abort(worker->kv);
+                    return fail(error, error_size,
+                                MIMO26_GPU_WORKER_DECODE_FAILED,
+                                "kv stage failed");
+                }
+            }
+            if (mimo26_kv_commit(worker->kv) != MIMO26_KV_OK) {
+                mimo26_kv_abort(worker->kv);
+                return fail(error, error_size,
+                            MIMO26_GPU_WORKER_DECODE_FAILED,
+                            "kv commit failed");
+            }
+            worker->position++;
+            worker->stats.tokens++;
+        }
+        PTOCK(commit_seconds);
+        done += chunk;
+    }
+    if (profile) {
+        fprintf(stderr, "    prefill %zu tokens: layers %.2f s (admission "
+                        "%.2f), kv-up %.2f, rope %.2f, readback %.2f, "
+                        "commit %.2f\n",
+                count, layer_seconds, g_upload_seconds, kv_seconds,
+                rope_seconds, readback_seconds, commit_seconds);
+    }
+    #undef PTICK
+    #undef PTOCK
+
+    /* Only the last token's distribution matters for a prompt. */
+    const uint16_t *last_hidden = (const uint16_t *)worker->hidden +
+                                  ((count - 1u) % worker->prefill_chunk) *
+                                      HIDDEN;
+    if (!mimo26_rocm_rmsnorm_bf16(worker->normed, last_hidden,
+                                  worker->final_norm, 1u, HIDDEN, 1e-6f,
+                                  NULL) ||
+        !k3_rocm_bf16_gemv_f32(worker->device_logits, worker->lm_head,
+                               worker->normed, VOCAB, HIDDEN, NULL) ||
+        hipMemcpy(logits, worker->device_logits,
+                  (size_t)VOCAB * sizeof(float),
+                  hipMemcpyDeviceToHost) != hipSuccess) {
+        return fail(error, error_size, MIMO26_GPU_WORKER_DECODE_FAILED,
+                    "final projection failed");
+    }
+    for (uint32_t row = MIMO26_GPU_TOKENIZER_VOCAB; row < VOCAB; row++) {
+        logits[row] = -INFINITY;
+    }
+
+    struct timespec finished;
+    clock_gettime(CLOCK_MONOTONIC, &finished);
+    worker->stats.last_decode_seconds =
+        (double)(finished.tv_sec - started.tv_sec) +
+        (double)(finished.tv_nsec - started.tv_nsec) / 1e9;
     return MIMO26_GPU_WORKER_OK;
 }
 

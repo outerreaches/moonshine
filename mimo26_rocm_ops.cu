@@ -544,6 +544,115 @@ __global__ static void mimo26_ordered_gemv_f32_kernel(float *output,
     }
 }
 
+/*
+ * Batched QKV split. blockIdx.y selects the token; each token's fused row is
+ * split into that token's slice of the q, k and v arrays.
+ */
+__global__ static void mimo26_split_qkv_batch_kernel(
+        uint16_t *q, uint16_t *k, uint16_t *v, const uint16_t *fused,
+        uint32_t kv_heads, uint32_t qkv_width)
+{
+    const uint32_t token = blockIdx.y;
+    const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t q_total = MIMO26_ROCM_QUERY_HEADS * MIMO26_ROCM_QK_DIM;
+    const uint32_t k_total = kv_heads * MIMO26_ROCM_QK_DIM;
+    const uint32_t v_total = kv_heads * MIMO26_ROCM_V_DIM;
+    fused += (uint64_t)token * qkv_width;
+    if (index < q_total) {
+        q[(uint64_t)token * q_total + index] = fused[index];
+    } else if (index < q_total + k_total) {
+        k[(uint64_t)token * k_total + (index - q_total)] = fused[index];
+    } else if (index < q_total + k_total + v_total) {
+        const uint32_t offset = index - q_total - k_total;
+        v[(uint64_t)token * v_total + offset] = mimo26_f32_to_bf16_d(
+            mimo26_bf16_to_f32_d(fused[index]) * MIMO26_ROCM_VALUE_SCALE);
+    }
+}
+
+/*
+ * Batched RoPE. Every token in a chunk sits at a different position and so
+ * needs its own cos/sin pair; the tables are [tokens][64], built on the host
+ * for the same reason the single-token ones are -- powf, cosf and sinf
+ * differ between host and device libm in the last ulp, and computing them
+ * on device would import that into every rotated coordinate.
+ */
+__global__ static void mimo26_rope_apply_batch_kernel(
+        uint16_t *heads, const uint16_t *cos_tables,
+        const uint16_t *sin_tables, uint32_t head_count)
+{
+    const uint32_t token = blockIdx.y;
+    const uint32_t head = blockIdx.x;
+    if (head >= head_count) {
+        return;
+    }
+    uint16_t *vector = heads + ((uint64_t)token * head_count + head) *
+                                   MIMO26_ROCM_QK_DIM;
+    const uint16_t *cos_table = cos_tables +
+                                (uint64_t)token * MIMO26_ROCM_ROPE_DIM;
+    const uint16_t *sin_table = sin_tables +
+                                (uint64_t)token * MIMO26_ROCM_ROPE_DIM;
+    for (uint32_t j = threadIdx.x; j < MIMO26_ROCM_ROPE_PAIRS;
+         j += blockDim.x) {
+        const float low = mimo26_bf16_to_f32_d(vector[j]);
+        const float high =
+            mimo26_bf16_to_f32_d(vector[j + MIMO26_ROCM_ROPE_PAIRS]);
+        const float c = mimo26_bf16_to_f32_d(cos_table[j]);
+        const float s = mimo26_bf16_to_f32_d(sin_table[j]);
+        const float lc = mimo26_bf16_to_f32_d(mimo26_f32_to_bf16_d(low * c));
+        const float hs = mimo26_bf16_to_f32_d(mimo26_f32_to_bf16_d(high * s));
+        const float hc = mimo26_bf16_to_f32_d(mimo26_f32_to_bf16_d(high * c));
+        const float ls = mimo26_bf16_to_f32_d(mimo26_f32_to_bf16_d(low * s));
+        vector[j] = mimo26_f32_to_bf16_d(lc - hs);
+        vector[j + MIMO26_ROCM_ROPE_PAIRS] = mimo26_f32_to_bf16_d(hc + ls);
+    }
+}
+
+/* Append a chunk's keys and values into the history arrays at `offset`. */
+__global__ static void mimo26_append_kv_kernel(
+        uint16_t *keys, uint16_t *values, const uint16_t *chunk_keys,
+        const uint16_t *chunk_values, uint32_t kv_heads, uint64_t offset,
+        uint32_t count)
+{
+    const uint32_t token = blockIdx.y;
+    const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (token >= count) {
+        return;
+    }
+    const uint32_t k_width = kv_heads * MIMO26_ROCM_QK_DIM;
+    const uint32_t v_width = kv_heads * MIMO26_ROCM_V_DIM;
+    if (index < k_width) {
+        keys[(offset + token) * k_width + index] =
+            chunk_keys[(uint64_t)token * k_width + index];
+    }
+    if (index < v_width) {
+        values[(offset + token) * v_width + index] =
+            chunk_values[(uint64_t)token * v_width + index];
+    }
+}
+
+__global__ static void mimo26_ordered_gemv_f32_batch_kernel(
+        float *output, const uint16_t *weights, const uint16_t *input,
+        uint32_t columns, uint32_t rows)
+{
+    extern __shared__ float staged[];
+    const uint32_t row = blockIdx.x;
+    const uint32_t token = blockIdx.y;
+    const uint16_t *w = weights + (uint64_t)row * columns;
+    const uint16_t *x = input + (uint64_t)token * columns;
+
+    for (uint32_t c = threadIdx.x; c < columns; c += blockDim.x) {
+        staged[c] = mimo26_bf16_to_f32_d(w[c]) * mimo26_bf16_to_f32_d(x[c]);
+    }
+    __syncthreads();
+    if (threadIdx.x == 0u) {
+        float sum = 0.0f;
+        for (uint32_t c = 0; c < columns; c++) {
+            sum += staged[c];
+        }
+        output[(uint64_t)token * rows + row] = sum;
+    }
+}
+
 static inline uint32_t blocks_for(uint64_t count)
 {
     return (uint32_t)((count + MIMO26_ROCM_THREADS - 1u) /
@@ -796,6 +905,62 @@ bool mimo26_rocm_split_qkv(void *q, void *k, void *v, const void *fused,
     return hipGetLastError() == hipSuccess;
 }
 
+bool mimo26_rocm_split_qkv_batch(void *q, void *k, void *v,
+                                 const void *fused, uint32_t kv_heads,
+                                 uint32_t qkv_width, uint32_t count,
+                                 void *stream)
+{
+    if (q == NULL || k == NULL || v == NULL || fused == NULL ||
+        kv_heads == 0u || count == 0u) {
+        return false;
+    }
+    const uint32_t total = MIMO26_ROCM_QUERY_HEADS * MIMO26_ROCM_QK_DIM +
+                           kv_heads * MIMO26_ROCM_QK_DIM +
+                           kv_heads * MIMO26_ROCM_V_DIM;
+    hipLaunchKernelGGL(mimo26_split_qkv_batch_kernel,
+                       dim3(blocks_for(total), count),
+                       dim3(MIMO26_ROCM_THREADS), 0, (hipStream_t)stream,
+                       (uint16_t *)q, (uint16_t *)k, (uint16_t *)v,
+                       (const uint16_t *)fused, kv_heads, qkv_width);
+    return hipGetLastError() == hipSuccess;
+}
+
+bool mimo26_rocm_rope_apply_batch(void *heads, const void *cos_tables,
+                                  const void *sin_tables,
+                                  uint32_t head_count, uint32_t count,
+                                  void *stream)
+{
+    if (heads == NULL || cos_tables == NULL || sin_tables == NULL ||
+        head_count == 0u || count == 0u) {
+        return false;
+    }
+    hipLaunchKernelGGL(mimo26_rope_apply_batch_kernel,
+                       dim3(head_count, count),
+                       dim3(MIMO26_ROCM_ROPE_PAIRS), 0, (hipStream_t)stream,
+                       (uint16_t *)heads, (const uint16_t *)cos_tables,
+                       (const uint16_t *)sin_tables, head_count);
+    return hipGetLastError() == hipSuccess;
+}
+
+bool mimo26_rocm_append_kv(void *keys, void *values, const void *chunk_keys,
+                           const void *chunk_values, uint32_t kv_heads,
+                           uint64_t offset, uint32_t count, void *stream)
+{
+    if (keys == NULL || values == NULL || chunk_keys == NULL ||
+        chunk_values == NULL || kv_heads == 0u || count == 0u) {
+        return false;
+    }
+    const uint32_t width = kv_heads * MIMO26_ROCM_QK_DIM;
+    hipLaunchKernelGGL(mimo26_append_kv_kernel,
+                       dim3(blocks_for(width), count),
+                       dim3(MIMO26_ROCM_THREADS), 0, (hipStream_t)stream,
+                       (uint16_t *)keys, (uint16_t *)values,
+                       (const uint16_t *)chunk_keys,
+                       (const uint16_t *)chunk_values, kv_heads, offset,
+                       count);
+    return hipGetLastError() == hipSuccess;
+}
+
 bool mimo26_rocm_rope_apply(void *heads, const void *cos_table,
                             const void *sin_table, uint32_t head_count,
                             void *stream)
@@ -829,6 +994,28 @@ bool mimo26_rocm_ordered_gemv_f32(float *output, const void *weights,
                        dim3(MIMO26_ROCM_THREADS), shared, (hipStream_t)stream,
                        output, (const uint16_t *)weights,
                        (const uint16_t *)input, columns);
+    return hipGetLastError() == hipSuccess;
+}
+
+bool mimo26_rocm_ordered_gemv_f32_batch(float *output, const void *weights,
+                                        const void *input, uint32_t rows,
+                                        uint32_t columns, uint32_t count,
+                                        void *stream)
+{
+    if (output == NULL || weights == NULL || input == NULL || rows == 0u ||
+        columns == 0u || count == 0u) {
+        return false;
+    }
+    const size_t shared = (size_t)columns * sizeof(float);
+    if (shared > 65536u) {
+        return false;
+    }
+    /* blockIdx.y selects the token; each keeps its own row order. */
+    hipLaunchKernelGGL(mimo26_ordered_gemv_f32_batch_kernel,
+                       dim3(rows, count), dim3(MIMO26_ROCM_THREADS), shared,
+                       (hipStream_t)stream, output,
+                       (const uint16_t *)weights, (const uint16_t *)input,
+                       columns, rows);
     return hipGetLastError() == hipSuccess;
 }
 
