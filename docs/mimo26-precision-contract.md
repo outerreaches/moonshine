@@ -291,12 +291,36 @@ fixtures are not evidence that tool execution works.
 | `glm53_limited_swiglu_f32` | **Not reusable** — clamps where MiMo does not |
 | `k3_st_model_open*` | **Not applicable** — MiMo's shard names need `k3_st_model_open_paths` |
 
-## Open items blocking M1 exit
+## The reference path, resolved
 
-1. The independent full-model reference path. An opaque chat API cannot
-   establish logit, route or precision parity, and generic HF loading is not
-   assumed to work since the reference modeling code carries no packed-expert
-   dequantization. Needs a decision, not more code.
+The full-model reference was recorded as needing a decision. It did not: the
+blocker was only that generic `from_pretrained` cannot load this checkpoint,
+because nothing in the reference code dequantizes the packed MXFP4 experts.
+Dequantizing with the verified decoders and injecting the tensors into the
+reference classes runs the author's arithmetic on real weights.
 
-Every operator-level item is now settled. What remains is composition: M2's
-transactional KV, and M3's layer assembly against captured inputs.
+Two harnesses now exist:
+
+- `tests/test_mimo26_ops_vs_reference.py` runs `MiMoV2RMSNorm`,
+  `MiMoV2MoEGate` and `ACT2FN` on the exact inputs the C code used. RMSNorm is
+  **bit-exact** over 4096 elements, the router matches on all 8 selected
+  experts of 256 with a weight delta of exactly 0.0, and silu agrees to
+  6.2e-8. The RMSNorm result independently confirms the double-rounding
+  finding, which had come from reading the reference rather than running it.
+- `tools/mimo26_reference_layer.py` runs a whole layer on real weights,
+  verified across all three layer kinds (dense+global, MoE+SWA, MoE+global).
+
+Note that `MiMoV2MoEGate` refuses to run outside `eval()` mode — `noaux_tc`
+routing is inference-only.
+
+What remains is not a reference problem but a scale one: a full 48-layer
+reference forward needs the experts for every layer, so it has to stream
+rather than materialize. That is the same constraint the production path has.
+
+## Open items
+
+1. Full-model, all-48-layer reference parity, which needs a streaming
+   reference rather than a per-layer one.
+2. M3 layer parity: the C side has operators, attention and KV but no weight
+   loading or layer composition yet, so there is nothing to compare against
+   the layer fixtures the reference tool can now produce.
