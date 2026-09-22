@@ -921,6 +921,19 @@ tests/test_mimo26_gpu_mxfp4: tests/test_mimo26_gpu_mxfp4.o \
 		mimo26_router.o glm53_fp8_oracle.o k3_safetensors.o k3_json.o
 	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
 
+mimo26_rocm_ops.o: mimo26_rocm_ops.cu mimo26_rocm_ops.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/test_mimo26_gpu_ops.o: tests/test_mimo26_gpu_ops.cu \
+	mimo26_rocm_ops.h k3_rocm_ops.h mimo26_ops.h mimo26_router.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/test_mimo26_gpu_ops: tests/test_mimo26_gpu_ops.o \
+		mimo26_rocm_ops.o k3_rocm_ops.o mimo26_ops.o mimo26_router.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+
+# G2: MiMo's own GPU primitives, where its contracts diverge from K3's.
+mimo26-gpu-ops: tests/test_mimo26_gpu_ops
+	./tests/test_mimo26_gpu_ops
+
 # G1: the MiMo expert path on the GPU against the verified CPU dequantizer.
 mimo26-gpu-mxfp4: tests/test_mimo26_gpu_mxfp4
 	MIMO26_ROOT=$(MIMO26_ROOT) ./tests/test_mimo26_gpu_mxfp4
