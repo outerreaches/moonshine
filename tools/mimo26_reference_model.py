@@ -144,9 +144,7 @@ def main():
                         f"{prefix}.self_attn.qkv_proj.weight")
                 else:
                     qkvw = checkpoint.fp8_qkv(
-                        f"{prefix}.self_attn.qkv_proj.weight", nh, nkv, hd, vd,
-                        grouped_scales=(os.environ.get(
-                            "MIMO26_GROUPED_SCALES") == "1"))
+                        f"{prefix}.self_attn.qkv_proj.weight", nh, nkv, hd, vd)
                 attention.qkv_proj.weight.data = to_bf16(qkvw)
                 attention.o_proj.weight.data = to_bf16(
                     checkpoint.bf16(f"{prefix}.self_attn.o_proj.weight"))

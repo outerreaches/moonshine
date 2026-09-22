@@ -1,73 +1,109 @@
-# MiMo full-model divergence: one cause found, one remaining
+# MiMo full-model divergence: resolved
 
-Status 2026-09-22. **A real cause was found and fixed**: the fused QKV
-projection is stored grouped by KV head, not as `[all Q | all K | all V]`.
-Output improved dramatically but is still not correct, so at least one issue
-remains. M4 is still **not qualified**.
+Status 2026-09-22. **Resolved.** There was one cause, found in two stages,
+and both stages were the same tensor: the fused QKV projection's row layout.
+The model now predicts correctly and shows textbook induction. Kept as a
+record because the false intermediate conclusion in stage one is instructive,
+and because the vLLM docstring that produced it is still wrong for this
+checkpoint.
 
-## The fix: fused QKV is grouped by KV head
+## Stage one: not `[all Q | all K | all V]`
 
 vLLM 0.30 ships a native MiMo V2 (`model_executor/models/mimo_v2.py`) whose
-`_shard_fp8_qkv_proj` documents the real layout:
+`_shard_fp8_qkv_proj` says the checkpoint stores the fused QKV as
+`num_kv_heads` contiguous groups, each ordered `[Q_g | K_g | V_g]`. The
+shipped `modeling_mimo_v2.py` does a plain three-way split instead, which
+scrambles every head — the staleness this lane suspected from the start,
+located at last. That file also claims Flash uses split q/k/v while the
+config and tensors are fused.
 
-> The checkpoint stores the fused QKV as `num_kv_heads` contiguous groups (one
-> per KV head), each ordered `[Q | K | V]`:
-> `[Q_1 | K_1 | V_1 | Q_2 | K_2 | V_2 | ... | Q_n | K_n | V_n]`
+Implementing the grouped reading moved the symptom sharply: ` The` at
+position 13 went from rank 100,421 to 12, ` of` to rank 1, and the
+unexplained layer-3 blow-up disappeared. That improvement was real but the
+diagnosis was only half right, and the half that was wrong was invisible
+because the two readings **coincide on global layers**.
 
-The arithmetic is exact — global: 4 × (16·192 + 192 + 128) = 4 × 3392 =
-13568; SWA: 8 × (8·192 + 192 + 128) = 8 × 1856 = 14848. The shipped
-`modeling_mimo_v2.py` does a plain three-way split, which scrambles every
-head. This is the staleness this lane suspected from the start, now located:
-that file also claims Flash uses split q/k/v while the tensors are fused.
+## Stage two: the grouping is by TP rank, not by KV head
 
-It also explains the `[108,32]` scale grid that never added up. Global groups
-are 26.5 blocks, padded per group to 27, so 4 × 27 = 108 rather than the 106
-a flat layout needs — and flat indexing misassociated the scales of every
-group after the first. SWA groups are 14.5 blocks and total exactly 116, so
-that grid really is flat. Both readings are implemented, selected by whether
-the grid divides evenly by the group count.
+The checkpoint's own `metadata.tp_size` is 4. It was written by a
+tensor-parallel deployment, so the fused QKV is 4 rank slices concatenated,
+each already in the de-interleaved `[Q | K | V]` layout that rank's forward
+expects. Rank `s` owns query heads `[16s, 16s+16)` and KV heads
+`[s·kv/4, ...)`, which preserves the standard `repeat_kv` mapping.
 
-### Effect
+A rank owns `kv_heads / 4` KV heads. For the 9 global layers that is exactly
+one, so a rank slice *is* a KV-head group and stage one's reading happens to
+be correct. For the 39 SWA layers a rank owns two, and the two readings give
+genuinely different permutations. Stage one therefore left 39 of 48 layers
+scrambled — including every layer that does local copying.
 
-Rank of the true next token, "The capital of X is Y" three times:
+The FP8 block scales settle it. They tile each rank slice independently,
+padded up to a whole block, and that one rule reproduces both grids exactly:
 
-| Position | Token | Before | After |
-| ---: | --- | ---: | ---: |
-| 1 | ` of` | 10 | **1** |
-| 8 | ` of` | 10 | **2** |
-| 12 | `.` | 20,817 | **9** |
-| 13 | ` The` | **100,421** | **12** |
-| 3 | ` is` | 90,433 | **65** |
+| Layer | Rank slice | Blocks | × 4 | Observed |
+| --- | --- | --- | ---: | ---: |
+| global | 16·192 + 1·192 + 1·128 = 3392 | 26.5 → 27 | 108 | `[108, 32]` |
+| SWA | 16·192 + 2·192 + 2·128 = 3712 | 24 + 3 + 2 = **29 exactly** | 116 | `[116, 32]` |
 
-`assistant` after `<|im_start|>` went 60,627 → 3,494. The unexplained layer-3
-blow-up also disappeared: residual rms at layer 9 is now 1.42 rather than
-14.9, which is independent confirmation the fix was right.
+Under the by-KV-head reading a SWA group is 1856 rows = **14.5 blocks**, so
+8 × 14.5 = 116 only by coincidence of the total, and no block grid can
+address such a group at all. vLLM's own code cannot execute this path: it
+computes `scale_rows_per_group = s_full.shape[0] // num_kv_heads` = 116 // 8
+= 14, expands to 1792 rows, and multiplies against an 1856-row group. It
+would raise. The docstring describes a format this checkpoint does not use,
+which is why reading code is not the same as checking it against the bytes.
 
-Verified in C as well: the C and NumPy dequantizers agree bit-exactly on the
-grouped path for both a SWA layer (flat scales) and a global layer (grouped
-scales).
+The de-interleaved layout is also the one whose parts are block-aligned —
+3072 = 24 blocks, 384 = 3, 256 = 2 — which is precisely what that same
+docstring says the re-quantization exists to achieve.
 
-## What is still wrong
+## Effect
 
-Function words are now consistently well ranked (1-14), but content words are
-not: France 34,140, Berlin 47,458, Rome 48,102, Paris 23,248. Greedy
-generation degenerates into ` the` and a couple of other high-frequency
-tokens, which is exactly what a model biased toward function words does.
+Greedy prediction on "The quick brown fox jumps." repeated, rank of the true
+next token:
 
-Ruled out since the fix:
+| Position | Token | Before stage 1 | After stage 1 | After stage 2 |
+| ---: | --- | ---: | ---: | ---: |
+| 3 | ` jumps` | 36,800 | 36,800 | **1** |
+| 9 | ` jumps` | 26,097 | 26,097 | **1** |
+| 15 | ` jumps` | 27,667 | 27,667 | **1** |
 
-| Hypothesis | Evidence |
-| --- | --- |
-| Router dtype should be BF16 per `moe_router_dtype` | vLLM honours it and the shipped reference hardcodes F32, so vLLM is likely right — but switching changes ranks only marginally (1→2, 2→4, 72→54). Worth adopting for fidelity, not the bug |
-| The MoE config differs | vLLM uses sigmoid scoring, grouped top-k with `n_group`/`topk_group`, the correction bias and `renormalize=norm_topk_prob` — all matching |
-| Expert tensors need special handling | vLLM's loader maps `gate_proj`/`up_proj`/`down_proj` normally |
-| The decoder layer structure differs | vLLM uses the standard fused add-norm pre-norm pattern |
+Every position in that prompt is now rank 1 except position 10, which is
+rank 2 (`.` against ` is` — a real ambiguity). Induction strengthens with
+repetition the way it should: the logit for the same prediction rises
+16.375 → 17.750 → 21.625 across the three occurrences. Before stage two
+there was no improvement across repetitions at all, which was the clearest
+sign that the failure was in copying rather than in the MoE or the sampler.
 
-## Where to look next
+The residual now grows smoothly (0.031 → 0.051 → 0.108 → …) with the massive
+activation appearing at layer 16 concentrated in a handful of dimensions,
+the usual trained-model pattern. Earlier the same trace blew up at layer 3
+spread across all 4096 dimensions.
 
-vLLM's MiMo implementation is now extracted under `/tmp/vllm_src` and is the
-best available oracle. The parts not yet compared line by line are the
-attention backend's handling of `v_head_dim != head_dim` (vLLM uses a
-dedicated DiffKV backend), the sink's exact placement in that backend, and
-the FusedMoE kernel path. Read those before writing more code.
+C and NumPy dequantizers agree **bit-exactly** on the new layout for both a
+global layer (padded per-rank scales) and a SWA layer (60,817,408 values,
+FNV-1a `8b9157fd724a0818`). The C worker's logits match the Python
+reference's rankings at every position checked.
 
+## What this cost, and the cheaper path
+
+Roughly twenty hypotheses were ruled out by measurement while the real fault
+sat in a tensor that two separate sources described incorrectly. The probe
+that would have found it fastest was not a hypothesis test at all: **derive
+the block-scale grid from first principles and require it to come out
+exactly.** `[108, 32]` and `[116, 32]` are only four numbers, and no reading
+but the right one reproduces both. The reading that survived arithmetic was
+the reading that was true.
+
+One test that actively misled: boosting the attention logits by 2× and 4× to
+see whether diffuse attention was merely under-scaled. Both made predictions
+worse, which correctly ruled out a missing scale factor — but the diffuse
+attention it was probing was a *symptom* of the scrambled SWA heads, not a
+cause. Measuring a symptom's response to a change tells you about the
+symptom.
+
+## Adopted separately
+
+`moe_router_dtype` is BF16 in the config; vLLM honours it and the shipped
+reference hardcodes F32. It changes ranks only marginally and was never the
+bug, but the checkpoint says what it says.

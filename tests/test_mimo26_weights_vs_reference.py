@@ -27,6 +27,7 @@ TOOL = ROOT / "tools" / "mimo26_dump_weights"
 DEFAULT_ROOT = "/srv/modelstore/models/XiaomiMiMo__MiMo-V2.6-Flash-RL"
 
 FP8_BLOCK = 128
+TP_SIZE = 4  # metadata.tp_size; the checkpoint is a TP=4 save (see fp8_qkv)
 MXFP4_BLOCK = 32
 
 
@@ -120,9 +121,10 @@ class Checkpoint:
         assert dtype == "BF16", f"{name} is {dtype}"
         return np.frombuffer(blob, dtype=np.uint16).copy()
 
-    def fp8_qkv_bf16_bits(self, name, heads, kv_heads, head_dim, v_head_dim):
-        """Grouped QKV: de-interleave rows, and use per-group scales when the
-        grid divides evenly (global layers) or flat when it does not (SWA)."""
+    def fp8_qkv_bf16_bits(self, name, heads, kv_heads, head_dim, v_head_dim,
+                          tp=TP_SIZE):
+        """TP-sharded QKV: TP_SIZE rank slices, each already [Q | K | V], with
+        the FP8 block scales tiling each slice padded to a whole block."""
         blob, dtype, shape = self.raw(name)
         assert dtype == "F8_E4M3", f"{name} is {dtype}"
         codes = np.frombuffer(blob, dtype=np.uint8).reshape(shape)
@@ -130,35 +132,26 @@ class Checkpoint:
         assert scale_dtype == "F32"
         scales = np.frombuffer(scale_blob, dtype=np.float32).reshape(scale_shape)
         rows, cols = shape
-        q_per = (heads // kv_heads) * head_dim
-        rows_per_group = q_per + head_dim + v_head_dim
-        assert rows_per_group * kv_heads == rows
+        q_rows = (heads // tp) * head_dim
+        k_rows = (kv_heads // tp) * head_dim
+        v_rows = (kv_heads // tp) * v_head_dim
+        rows_per_rank = q_rows + k_rows + v_rows
+        assert rows_per_rank * tp == rows, f"{name}: {rows} vs {tp}x{rows_per_rank}"
+        per = (rows_per_rank + FP8_BLOCK - 1) // FP8_BLOCK
+        assert per * tp == scale_shape[0], f"{name}: {scale_shape[0]} vs {tp}x{per}"
         values = e4m3_table()[codes]
         assert not np.isnan(values).any()
-        grouped = (scale_shape[0] % kv_heads == 0 and
-                   (scale_shape[0] // kv_heads) * FP8_BLOCK >= rows_per_group)
-        dequant = np.empty((rows, cols), dtype=np.float32)
-        if grouped:
-            per = scale_shape[0] // kv_heads
-            for g in range(kv_heads):
-                r0 = g * rows_per_group
-                grid = scales[g * per:(g + 1) * per]
-                exp = np.repeat(np.repeat(grid, FP8_BLOCK, axis=0), FP8_BLOCK,
-                                axis=1)[:rows_per_group, :cols]
-                dequant[r0:r0 + rows_per_group] = values[r0:r0 + rows_per_group] * exp
-        else:
-            br = (rows + FP8_BLOCK - 1) // FP8_BLOCK
-            bc = (cols + FP8_BLOCK - 1) // FP8_BLOCK
-            exp = np.repeat(np.repeat(scales[:br, :bc], FP8_BLOCK, axis=0),
-                            FP8_BLOCK, axis=1)[:rows, :cols]
-            dequant = (values * exp).astype(np.float32)
+        bc = (cols + FP8_BLOCK - 1) // FP8_BLOCK
         qs, ks, vs = [], [], []
-        for g in range(kv_heads):
-            r0 = g * rows_per_group
-            blk = dequant[r0:r0 + rows_per_group]
-            qs.append(blk[:q_per])
-            ks.append(blk[q_per:q_per + head_dim])
-            vs.append(blk[q_per + head_dim:])
+        for s in range(tp):
+            r0 = s * rows_per_rank
+            grid = scales[s * per:(s + 1) * per, :bc]
+            exp = np.repeat(np.repeat(grid, FP8_BLOCK, axis=0), FP8_BLOCK,
+                            axis=1)[:rows_per_rank, :cols]
+            blk = values[r0:r0 + rows_per_rank] * exp
+            qs.append(blk[:q_rows])
+            ks.append(blk[q_rows:q_rows + k_rows])
+            vs.append(blk[q_rows + k_rows:])
         out = np.concatenate(qs + ks + vs, axis=0).astype(np.float32)
         return f32_to_bf16_bits(out).ravel()
 

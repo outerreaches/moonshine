@@ -6,6 +6,10 @@ core.*
 /moonshine-chat
 /moonshine-server
 /tools/screen_static_q8
+/tools/mimo26_dump_ops
+/tools/mimo26_dump_rope
+/tools/mimo26_dump_weights
+/tools/mimo26_run
 /tools/transcode_mzg2_layer
 tests/test_k3_*
 !tests/test_k3_*.c

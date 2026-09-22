@@ -37,3 +37,36 @@ def _shard_fp8_qkv_proj(
     layout above (Q, K, and V then each span a whole number of blocks), and
     re-quantize to fp8.
     """
+
+================================================================================
+2026-09-22 CORRECTION -- this docstring does not describe this checkpoint.
+================================================================================
+
+The docstring above says the checkpoint stores num_kv_heads groups of
+[Q_g | K_g | V_g]. That is NOT what XiaomiMiMo__MiMo-V2.6-Flash-RL revision
+3b38d063180c3e4aed9691fdc735f3d10b266ee4 contains. It holds metadata.tp_size
+= 4 rank slices, each already de-interleaved to [Q | K | V].
+
+The two coincide when a rank owns exactly one KV head (the 9 global layers,
+kv=4, tp=4) and differ when it owns more (the 39 SWA layers, kv=8, tp=4).
+
+Proof from the block-scale grids, which must tile each slice padded to a
+whole 128-row block:
+
+  global  slice 16*192 + 1*192 + 1*128 = 3392 rows = 26.5 -> 27 blocks
+          4 * 27 = 108                                  observed [108, 32]
+  SWA     slice 16*192 + 2*192 + 2*128 = 3712 rows = 24 + 3 + 2 = 29 blocks
+          4 * 29 = 116                                  observed [116, 32]
+
+Under the docstring's reading a SWA group is 1856 rows = 14.5 blocks, which
+no block grid can address. The code below cannot run on it either:
+
+    scale_rows_per_group = s_full.shape[0] // num_kv_heads   # 116 // 8 = 14
+    s_g_expanded = s_g.repeat_interleave(block, dim=0)...[:rows_per_group]
+    w_g_dequant = w_g * s_g_expanded    # 1856 rows * 1792 rows -> raises
+
+So the kv_heads_per_rank > 1 branch is dead for this checkpoint. Only the
+kv_heads_per_rank == 1 fast path (a plain chunk, no re-quantization) is ever
+taken, and that path is consistent with the per-rank reading.
+
+Read the grids, not the prose.

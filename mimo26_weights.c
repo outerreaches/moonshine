@@ -2,6 +2,7 @@
 
 #include "glm53_fp8_oracle.h"
 #include "mimo26_architecture.h"
+#include "mimo26_manifest.h"
 #include "mimo26_ops.h"
 #include "mimo26_router.h"
 
@@ -267,19 +268,41 @@ static mimo26_weights_status load_fused_qkv(const k3_st_model *model,
                     "%s missing or not a 2-D F32 grid", scale_name);
     }
 
-    const size_t q_per_group = (heads / kv_heads) * qk_dim;
-    const size_t rows_per_group = q_per_group + qk_dim + v_dim;
-    if (rows_per_group * kv_heads != (size_t)rows) {
+    /* The checkpoint was written by a tensor-parallel deployment, so the fused
+     * QKV is MIMO26_INDEX_TP_SIZE rank slices concatenated, each already in
+     * the de-interleaved [Q | K | V] layout that rank's forward expects. The
+     * FP8 block scales tile each slice independently, padded up to a whole
+     * block, which is what makes both grids exact: a global slice is
+     * 16*192 + 192 + 128 = 3392 rows (26.5 blocks padded to 27, 4 * 27 = 108)
+     * and a SWA slice is 16*192 + 2*192 + 2*128 = 3712 rows (24 + 3 + 2 = 29
+     * blocks with no padding at all, 4 * 29 = 116). Reading the rows as
+     * per-KV-head groups instead coincides with this only when a rank owns
+     * exactly one KV head, and scrambles every head when it owns more. */
+    const size_t tp = MIMO26_INDEX_TP_SIZE;
+    if (tp == 0u || (heads % tp) != 0u || (kv_heads % tp) != 0u) {
         return fail(error, error_size, MIMO26_WEIGHTS_UNEXPECTED_LAYOUT,
-                    "%s: %llu rows is not %zu groups of %zu", name,
-                    (unsigned long long)rows, kv_heads, rows_per_group);
+                    "%s: %zu heads over %zu KV heads do not split across %zu "
+                    "ranks", name, heads, kv_heads, tp);
+    }
+    const size_t q_rows_per_rank = (heads / tp) * qk_dim;
+    const size_t k_rows_per_rank = (kv_heads / tp) * qk_dim;
+    const size_t v_rows_per_rank = (kv_heads / tp) * v_dim;
+    const size_t rows_per_rank =
+        q_rows_per_rank + k_rows_per_rank + v_rows_per_rank;
+    if (rows_per_rank * tp != (size_t)rows) {
+        return fail(error, error_size, MIMO26_WEIGHTS_UNEXPECTED_LAYOUT,
+                    "%s: %llu rows is not %zu ranks of %zu", name,
+                    (unsigned long long)rows, tp, rows_per_rank);
     }
     const size_t scale_rows = (size_t)scale_tensor->shape[0];
     const size_t scale_stride = (size_t)scale_tensor->shape[1];
-    const bool grouped_scales = (scale_rows % kv_heads) == 0u &&
-                                (scale_rows / kv_heads) * MIMO26_FP8_BLOCK >=
-                                    rows_per_group;
-    const size_t scale_per_group = grouped_scales ? scale_rows / kv_heads : 0u;
+    const size_t scale_per_rank =
+        (rows_per_rank + MIMO26_FP8_BLOCK - 1u) / MIMO26_FP8_BLOCK;
+    if (scale_per_rank * tp != scale_rows) {
+        return fail(error, error_size, MIMO26_WEIGHTS_UNEXPECTED_LAYOUT,
+                    "%s: scale grid has %zu rows, not %zu ranks of %zu",
+                    name, scale_rows, tp, scale_per_rank);
+    }
 
     void *codes = NULL;
     void *scales = NULL;
@@ -305,23 +328,20 @@ static mimo26_weights_status load_fused_qkv(const k3_st_model *model,
     /* Destination offsets for the de-interleaved [Q | K | V] layout. */
     const size_t q_total = heads * qk_dim;
     const size_t k_total = kv_heads * qk_dim;
-    for (size_t g = 0; g < kv_heads; g++) {
-        for (size_t r = 0; r < rows_per_group; r++) {
-            const size_t source_row = g * rows_per_group + r;
-            size_t scale_row;
-            if (grouped_scales) {
-                scale_row = g * scale_per_group + r / MIMO26_FP8_BLOCK;
-            } else {
-                scale_row = source_row / MIMO26_FP8_BLOCK;
-            }
+    for (size_t s = 0; s < tp; s++) {
+        for (size_t r = 0; r < rows_per_rank; r++) {
+            const size_t source_row = s * rows_per_rank + r;
+            const size_t scale_row =
+                s * scale_per_rank + r / MIMO26_FP8_BLOCK;
             size_t destination_row;
-            if (r < q_per_group) {
-                destination_row = g * q_per_group + r;
-            } else if (r < q_per_group + qk_dim) {
-                destination_row = q_total + g * qk_dim + (r - q_per_group);
+            if (r < q_rows_per_rank) {
+                destination_row = s * q_rows_per_rank + r;
+            } else if (r < q_rows_per_rank + k_rows_per_rank) {
+                destination_row =
+                    q_total + s * k_rows_per_rank + (r - q_rows_per_rank);
             } else {
-                destination_row = q_total + k_total + g * v_dim +
-                                  (r - q_per_group - qk_dim);
+                destination_row = q_total + k_total + s * v_rows_per_rank +
+                                  (r - q_rows_per_rank - k_rows_per_rank);
             }
             const uint8_t *source = code_bytes + source_row * (size_t)cols;
             uint16_t *target = decoded + destination_row * (size_t)cols;

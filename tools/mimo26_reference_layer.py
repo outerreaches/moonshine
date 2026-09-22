@@ -34,6 +34,10 @@ from pathlib import Path
 
 import numpy as np
 
+# metadata.tp_size in model.safetensors.index.json. The checkpoint is a TP=4
+# save, which determines the fused-QKV row layout -- see Checkpoint.fp8_qkv.
+TP_SIZE = 4
+
 DEFAULT_ROOT = "/srv/modelstore/models/XiaomiMiMo__MiMo-V2.6-Flash-RL"
 
 
@@ -136,23 +140,33 @@ class Checkpoint:
         return (values * expanded).astype(np.float32)
 
     def fp8_qkv(self, name, num_heads, num_kv_heads, head_dim, v_head_dim,
-                grouped_scales=False):
+                tp=TP_SIZE):
         """Dequantize a fused QKV projection and de-interleave its rows.
 
-        The checkpoint stores the fused QKV as num_kv_heads contiguous groups,
-        each ordered [Q_g | K_g | V_g], NOT as [all Q | all K | all V]. Per
-        group Q has (num_heads/num_kv_heads)*head_dim rows, K has head_dim and
-        V has v_head_dim. The shipped modeling_mimo_v2.py splits it the plain
-        way, which scrambles every head. Confirmed against vLLM's
-        _shard_fp8_qkv_proj docstring.
+        The checkpoint was written by a tensor-parallel deployment
+        (metadata.tp_size = 4), so the fused QKV is tp rank slices
+        concatenated, each already in the de-interleaved [Q | K | V] layout
+        that rank's forward expects -- not [all Q | all K | all V], and not
+        per-KV-head groups either. Rank s owns query heads
+        [s*num_heads/tp, ...) and KV heads [s*num_kv_heads/tp, ...), which
+        preserves the standard repeat_kv mapping of query head q to KV head
+        q // (num_heads/num_kv_heads).
 
-        Scale indexing is kept separate because the two layer kinds differ.
-        SWA groups are 1856 rows = 14.5 blocks, so groups straddle block
-        boundaries and the grid is flat (8 x 14.5 = 116, exactly
-        ceil(14848/128)). Global groups are 3392 rows = 26.5 blocks and the
-        grid is 108 rather than the 106 a flat layout needs, which is
-        consistent with per-group padding to 27 blocks. grouped_scales selects
-        that reading.
+        The FP8 block scales tile each rank slice independently, padded up to
+        a whole block. That single rule reproduces both observed grids
+        exactly, which is the evidence for this reading:
+
+            global  16*192 + 1*192 + 1*128 = 3392 rows = 26.5 -> 27 blocks,
+                    so 4 * 27 = 108                               [108, 32]
+            SWA     16*192 + 2*192 + 2*128 = 3712 rows = 24+3+2 = 29 blocks
+                    with no padding at all, so 4 * 29 = 116       [116, 32]
+
+        Reading the rows as num_kv_heads groups of [Q_g | K_g | V_g] instead
+        -- which vLLM's _shard_fp8_qkv_proj docstring describes, and which the
+        previous fix here implemented -- coincides with this only when a rank
+        owns exactly one KV head. That holds for the 9 global layers and
+        fails for the 39 SWA layers, where it both scrambles every head and
+        implies a 14.5-block group that no block grid can address.
         """
         blob, dtype, shape = self.raw(name)
         if dtype != "F8_E4M3":
@@ -162,42 +176,37 @@ class Checkpoint:
         scales = np.frombuffer(scale_blob, dtype=np.float32).reshape(scale_shape)
 
         rows, cols = shape
-        q_per = (num_heads // num_kv_heads) * head_dim
-        rows_per_group = q_per + head_dim + v_head_dim
-        if rows_per_group * num_kv_heads != rows:
-            raise RuntimeError(f"{name}: {rows} rows is not {num_kv_heads} x "
-                               f"{rows_per_group}")
+        if num_heads % tp or num_kv_heads % tp:
+            raise RuntimeError(f"{name}: {num_heads}/{num_kv_heads} heads do "
+                               f"not split across {tp} ranks")
+        q_rows = (num_heads // tp) * head_dim
+        k_rows = (num_kv_heads // tp) * head_dim
+        v_rows = (num_kv_heads // tp) * v_head_dim
+        rows_per_rank = q_rows + k_rows + v_rows
+        if rows_per_rank * tp != rows:
+            raise RuntimeError(f"{name}: {rows} rows is not {tp} x "
+                               f"{rows_per_rank}")
+        per_rank = (rows_per_rank + 127) // 128
+        if per_rank * tp != scale_shape[0]:
+            raise RuntimeError(f"{name}: scale grid has {scale_shape[0]} rows, "
+                               f"not {tp} x {per_rank}")
 
         table = e4m3_table()
         values = table[codes]
         if np.isnan(values).any():
             raise RuntimeError(f"{name} contains an FP8 NaN encoding")
 
-        dequant = np.empty((rows, cols), dtype=np.float32)
-        if grouped_scales and scale_shape[0] % num_kv_heads == 0:
-            per_group = scale_shape[0] // num_kv_heads
-            for g in range(num_kv_heads):
-                r0 = g * rows_per_group
-                grid = scales[g * per_group:(g + 1) * per_group]
-                expanded = np.repeat(np.repeat(grid, 128, axis=0), 128,
-                                     axis=1)[:rows_per_group, :cols]
-                dequant[r0:r0 + rows_per_group] = (
-                    values[r0:r0 + rows_per_group] * expanded)
-        else:
-            block_rows = (rows + 127) // 128
-            block_cols = (cols + 127) // 128
-            expanded = np.repeat(np.repeat(scales[:block_rows, :block_cols],
-                                           128, axis=0), 128,
-                                 axis=1)[:rows, :cols]
-            dequant = (values * expanded).astype(np.float32)
-
+        block_cols = (cols + 127) // 128
         qs, ks, vs = [], [], []
-        for g in range(num_kv_heads):
-            r0 = g * rows_per_group
-            block = dequant[r0:r0 + rows_per_group]
-            qs.append(block[:q_per])
-            ks.append(block[q_per:q_per + head_dim])
-            vs.append(block[q_per + head_dim:])
+        for s in range(tp):
+            r0 = s * rows_per_rank
+            grid = scales[s * per_rank:(s + 1) * per_rank, :block_cols]
+            expanded = np.repeat(np.repeat(grid, 128, axis=0), 128,
+                                 axis=1)[:rows_per_rank, :cols]
+            block = values[r0:r0 + rows_per_rank] * expanded
+            qs.append(block[:q_rows])
+            ks.append(block[q_rows:q_rows + k_rows])
+            vs.append(block[q_rows + k_rows:])
         return np.concatenate(qs + ks + vs, axis=0).astype(np.float32)
 
     def mxfp4_expert(self, prefix):
