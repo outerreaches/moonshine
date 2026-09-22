@@ -78,7 +78,7 @@ canonicalization: it is not byte-exact and buys no entropy here.
 | Attention sink | SETTLED | per-head learned logit, SWA layers only |
 | Q/K norm | SETTLED | none exists |
 | Sliding window | SETTLED | 128 |
-| Window boundary semantics | OPEN | inclusive vs exclusive not yet pinned |
+| Window boundary semantics | SETTLED | `q - 128 < kv <= q`, inclusive of the current token |
 
 The softmax scale derives from the **QK** dimension, not the V dimension. With
 asymmetric 192/128 head dims this is the easiest silent error available.
@@ -92,6 +92,26 @@ Three config fields carry the window length: `sliding_window`,
 `sliding_window_size` and `attention_chunk_size`, all 128. The reference
 config and model never read `attention_chunk_size`. Read one field, cross-check
 the others, and reject disagreement rather than picking silently.
+
+**Window bounds, settled against the masking implementation.** The reference
+uses HF's `sliding_window_causal_mask_function`, which is
+`and_masks(kv_idx > q_idx - sliding_window, kv_idx <= q_idx)` — so a query at
+position *q* attends to *q-127 .. q*: **128 positions including itself**.
+Verified by evaluating the mask directly:
+
+| Position | Attends | First | Last | Ring slot |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 1 | 0 | 0 | 0 |
+| 127 | 128 | 0 | 127 | 127 |
+| 128 | 128 | 1 | 128 | 0 |
+| 129 | 128 | 2 | 129 | 1 |
+| 257 | 128 | 130 | 257 | 1 |
+
+Consequences for the KV implementation: exactly 128 ring slots suffice, the
+slot for position *p* is `p mod 128`, and eviction begins at position 128 —
+not 127 and not 129. Positions 127/128/129 and 255/256/257 are the boundary
+cases any window test must cover, because each sits on a different side of a
+wrap or an eviction.
 
 ## Routing
 
@@ -217,10 +237,11 @@ fixtures are not evidence that tool execution works.
 
 ## Open items blocking M1 exit
 
-1. Window boundary semantics at positions 127/128/129 and 255/256/257, and
-   whether the window count is inclusive of the current token.
-2. Attention primitives: the 192^-0.5 scale, partial RoPE on 64 coordinates,
+1. Attention primitives: the 192^-0.5 scale, partial RoPE on 64 coordinates,
    the pre-cache 0.707 V scale and the per-head SWA sink logit are specified
-   above but not yet implemented or tested.
-3. The independent full-model reference path. An opaque chat API cannot
-   establish logit, route or precision parity.
+   above but not yet implemented or tested. This is the last implementation
+   gap in M1.
+2. The independent full-model reference path. An opaque chat API cannot
+   establish logit, route or precision parity, and generic HF loading is not
+   assumed to work since the reference modeling code carries no packed-expert
+   dequantization. Needs a decision, not more code.
