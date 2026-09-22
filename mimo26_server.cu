@@ -757,6 +757,16 @@ static bool stream_chunk(response_state *state, const char *text,
     return size > 0 && send_all(state->fd, frame, (size_t)size);
 }
 
+/* Refuse queued work and honour a cancellation between prefill chunks. */
+static bool prefill_progress(void *context, size_t done, size_t total)
+{
+    server_runtime *runtime = (server_runtime *)context;
+    (void)done;
+    (void)total;
+    refuse_backlog(runtime);
+    return !runtime->slot.cancel_requested;
+}
+
 static void handle_chat(server_runtime *runtime, int fd,
                         const http_request *http)
 {
@@ -845,16 +855,25 @@ static void handle_chat(server_runtime *runtime, int fd,
         return;
     }
 
+    /*
+     * The prompt goes through the layer-major prefill path, not the decode
+     * loop. Measured at the 512 gate that is 0.098 s/token against 0.422,
+     * because the BF16 projections are read once per chunk rather than once
+     * per token.
+     *
+     * The progress hook keeps the admission guarantee intact. Prefill does
+     * not return control per token, so without it a caller arriving during
+     * a long prompt would wait for the whole prompt rather than being
+     * refused in milliseconds -- at 8K that is fifteen minutes of silence.
+     * It also lets a client that disconnects mid-prefill stop the work.
+     */
     bool failed = false;
     uint32_t next = 0;
-    for (size_t i = 0; i < prompt.count && !failed; i++) {
-        refuse_backlog(runtime);
-        if (mimo26_gpu_worker_decode(runtime->worker, prompt.ids[i], logits,
-                                     error, sizeof error) !=
-            MIMO26_GPU_WORKER_OK) {
-            failed = true;
-            break;
-        }
+    if (mimo26_gpu_worker_prefill(runtime->worker, prompt.ids, prompt.count,
+                                  logits, prefill_progress, runtime, error,
+                                  sizeof error) != MIMO26_GPU_WORKER_OK) {
+        failed = true;
+    } else {
         next = mimo26_gpu_worker_argmax(logits);
     }
     if (failed) {

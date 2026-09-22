@@ -178,7 +178,8 @@ int main(int argc, char **argv)
         /* --- prefill --- */
         const double prefill_started = now_seconds();
         if (mimo26_gpu_worker_prefill(worker, prompt.ids, prompt.count,
-                                      logits, error, sizeof error) !=
+                                      logits, NULL, NULL, error,
+                                      sizeof error) !=
             MIMO26_GPU_WORKER_OK) {
             fprintf(stderr, "  prefill failed: %s\n", error);
             return 1;

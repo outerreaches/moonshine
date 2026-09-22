@@ -1157,12 +1157,10 @@ mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
     return MIMO26_GPU_WORKER_OK;
 }
 
-mimo26_gpu_worker_status mimo26_gpu_worker_prefill(mimo26_gpu_worker *worker,
-                                                   const uint32_t *tokens,
-                                                   size_t count,
-                                                   float *logits,
-                                                   char *error,
-                                                   size_t error_size)
+mimo26_gpu_worker_status mimo26_gpu_worker_prefill(
+    mimo26_gpu_worker *worker, const uint32_t *tokens, size_t count,
+    float *logits, mimo26_gpu_prefill_progress progress,
+    void *progress_context, char *error, size_t error_size)
 {
     if (worker == NULL || tokens == NULL || logits == NULL) {
         return MIMO26_GPU_WORKER_INVALID_ARGUMENT;
@@ -1176,6 +1174,10 @@ mimo26_gpu_worker_status mimo26_gpu_worker_prefill(mimo26_gpu_worker *worker,
                                          error_size);
             if (status != MIMO26_GPU_WORKER_OK) {
                 return status;
+            }
+            if (progress != NULL && !progress(progress_context, i + 1u,
+                                              count)) {
+                break;
             }
         }
         return MIMO26_GPU_WORKER_OK;
@@ -1358,6 +1360,14 @@ mimo26_gpu_worker_status mimo26_gpu_worker_prefill(mimo26_gpu_worker *worker,
         }
         PTOCK(commit_seconds);
         done += chunk;
+        /* Between chunks is the only safe place to yield: a chunk is
+         * transactional across all 48 layers, so stopping inside one would
+         * leave the journal half-written. */
+        if (progress != NULL && !progress(progress_context, done, count)) {
+            return fail(error, error_size, MIMO26_GPU_WORKER_OK,
+                        "prefill stopped after %zu of %zu tokens", done,
+                        count);
+        }
     }
     if (profile) {
         fprintf(stderr, "    prefill %zu tokens: layers %.2f s (admission "

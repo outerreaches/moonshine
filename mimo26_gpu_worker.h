@@ -116,12 +116,21 @@ uint64_t mimo26_gpu_worker_resident_bytes(const mimo26_gpu_worker *worker);
  * Transactional per chunk: a failure leaves committed history and the
  * position at the last completed chunk, so a caller may retry the rest.
  */
-mimo26_gpu_worker_status mimo26_gpu_worker_prefill(mimo26_gpu_worker *worker,
-                                                   const uint32_t *tokens,
-                                                   size_t count,
-                                                   float *logits,
-                                                   char *error,
-                                                   size_t error_size);
+/*
+ * Called after each chunk lands, with the tokens consumed so far.
+ *
+ * Prefill does not return control per token, so without this a caller
+ * arriving mid-prompt would wait for the whole prompt -- which at 8K is
+ * fifteen minutes. Returning false asks prefill to stop cleanly at the last
+ * committed chunk, which is what a cancelled request needs.
+ */
+typedef bool (*mimo26_gpu_prefill_progress)(void *context, size_t done,
+                                            size_t total);
+
+mimo26_gpu_worker_status mimo26_gpu_worker_prefill(
+    mimo26_gpu_worker *worker, const uint32_t *tokens, size_t count,
+    float *logits, mimo26_gpu_prefill_progress progress,
+    void *progress_context, char *error, size_t error_size);
 
 mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
                                                   uint32_t token_id,
