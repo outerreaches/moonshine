@@ -930,6 +930,18 @@ tests/test_mimo26_gpu_ops: tests/test_mimo26_gpu_ops.o \
 		mimo26_rocm_ops.o k3_rocm_ops.o mimo26_ops.o mimo26_router.o
 	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
 
+tests/test_mimo26_gpu_attention.o: tests/test_mimo26_gpu_attention.cu \
+	mimo26_rocm_ops.h mimo26_attention.h mimo26_ops.h mimo26_architecture.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/test_mimo26_gpu_attention: tests/test_mimo26_gpu_attention.o \
+		mimo26_rocm_ops.o mimo26_attention.o mimo26_ops.o \
+		mimo26_architecture.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+
+# G3: MiMo attention on the GPU, bit-exact against the CPU oracle.
+mimo26-gpu-attention: tests/test_mimo26_gpu_attention
+	./tests/test_mimo26_gpu_attention
+
 # G2: MiMo's own GPU primitives, where its contracts diverge from K3's.
 mimo26-gpu-ops: tests/test_mimo26_gpu_ops
 	./tests/test_mimo26_gpu_ops

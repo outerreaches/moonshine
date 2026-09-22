@@ -85,6 +85,66 @@ bool mimo26_rocm_expert_finalize_bf16(void *output, const float *accumulator,
                                       uint64_t count, void *stream);
 bool mimo26_rocm_zero_f32(float *accumulator, uint64_t count, void *stream);
 
+/*
+ * One decode step of MiMo attention for all 64 query heads.
+ *
+ * Mirrors mimo26_attention_decode exactly, including its cast points: the
+ * score is rounded to BF16 after scaling, the row max is subtracted in BF16,
+ * the softmax denominator accumulates in double, probabilities round to BF16
+ * before weighting the values, and the value sum accumulates in F32 and
+ * rounds once on the way out.
+ *
+ * The parallel decomposition is chosen so the summation ORDER matches the CPU
+ * too, which is what makes bit-exactness reachable rather than hopeful:
+ * each thread computes a whole 192-term dot sequentially, the denominator is
+ * summed by one thread in ascending slot order, and the value accumulation
+ * splits over the 128 output dimensions so every thread walks history in
+ * ascending order. Tree-reducing any of those three would reassociate the
+ * additions and lose the guarantee.
+ *
+ * query is [64][192] already rotated, keys [history][kv_heads][192], values
+ * [history][kv_heads][128], out [64][128]. current_keys/current_values carry
+ * the uncommitted token at query_position, or both NULL. sink_bias is [64]
+ * BF16 and required for windowed layers; its probability is discarded, so
+ * the surviving probabilities sum to less than one.
+ *
+ * scratch is caller-owned device storage of at least 64 * (history + 2)
+ * floats, so the entry point performs no allocation.
+ */
+bool mimo26_rocm_attention_decode(void *out, const void *query,
+                                  const void *keys, const void *values,
+                                  const void *current_keys,
+                                  const void *current_values,
+                                  const void *sink_bias, float *scratch,
+                                  uint32_t kv_heads, uint32_t kv_groups,
+                                  uint32_t window, uint64_t history,
+                                  uint64_t first_position,
+                                  uint64_t query_position, float scale,
+                                  void *stream);
+
+/*
+ * Run only the score pass, leaving the raw per-slot scores in scratch:
+ * -INFINITY for a masked slot, the BF16-rounded scaled dot product for a
+ * visible one, and the sink logit at index slot_total when sink_bias is
+ * given. No transcendental is involved, so this is exactly specified and can
+ * be held to bit-exactness against the CPU -- which is the point. Device and
+ * host libm disagree by up to 1 ulp on roughly 6% of expf inputs, so the full
+ * decode cannot be; checking the scores separately keeps a strict gate on
+ * every layout, masking and ordering decision rather than letting a single
+ * output tolerance cover all of them.
+ */
+bool mimo26_rocm_attention_scores(const void *query, const void *keys,
+                                  const void *current_keys,
+                                  const void *sink_bias, float *scratch,
+                                  uint32_t kv_heads, uint32_t kv_groups,
+                                  uint32_t window, uint64_t history,
+                                  uint64_t first_position,
+                                  uint64_t query_position, float scale,
+                                  void *stream);
+
+/* Floats of scratch mimo26_rocm_attention_decode needs for a given history. */
+uint64_t mimo26_rocm_attention_scratch_floats(uint64_t history);
+
 #ifdef __cplusplus
 }
 #endif

@@ -238,6 +238,170 @@ __global__ static void mimo26_zero_kernel(float *accumulator, uint64_t count)
     }
 }
 
+#define MIMO26_ROCM_QUERY_HEADS 64u
+#define MIMO26_ROCM_QK_DIM 192u
+#define MIMO26_ROCM_V_DIM 128u
+
+__device__ static inline bool mimo26_visible_d(uint64_t kv_position,
+                                               uint64_t query_position,
+                                               uint32_t window)
+{
+    if (kv_position > query_position) {
+        return false;                       /* causal */
+    }
+    if (window == 0u) {
+        return true;                        /* full attention */
+    }
+    /* kv > q - window, written to avoid unsigned wrap at small q. */
+    return query_position - kv_position < (uint64_t)window;
+}
+
+/*
+ * One block per query head. See the header for why the decomposition is what
+ * it is: every reduction that the CPU performs in a specific order is
+ * performed in that same order here.
+ */
+__global__ static void mimo26_attention_decode_kernel(
+        uint16_t *out, const uint16_t *query, const uint16_t *keys,
+        const uint16_t *values, const uint16_t *current_keys,
+        const uint16_t *current_values, const uint16_t *sink_bias,
+        float *scratch, uint32_t kv_heads, uint32_t kv_groups,
+        uint32_t window, uint64_t history, uint64_t first_position,
+        uint64_t query_position, float scale, uint32_t have_current,
+        uint32_t has_sink, uint32_t scores_only)
+{
+    const uint32_t head = blockIdx.x;
+    const uint32_t tid = threadIdx.x;
+    const uint32_t kv_head = head / kv_groups;
+    const uint64_t slot_total = history + (have_current ? 1u : 0u);
+    const uint64_t slots = slot_total + (has_sink ? 1u : 0u);
+
+    const uint16_t *q_head = query + (uint64_t)head * MIMO26_ROCM_QK_DIM;
+    float *row = scratch + (uint64_t)head * (history + 2u);
+
+    __shared__ float reduction[MIMO26_ROCM_THREADS];
+    __shared__ float shared_max;
+    __shared__ double shared_total;
+
+    /* Pass 1: scores. Each thread owns whole slots, so each 192-term dot is
+     * summed sequentially in ascending coordinate order, as on the CPU. */
+    float local_max = -INFINITY;
+    for (uint64_t t = tid; t < slot_total; t += blockDim.x) {
+        const bool is_current = (have_current && t == history);
+        const uint64_t kv_position =
+            is_current ? query_position : first_position + t;
+        if (!mimo26_visible_d(kv_position, query_position, window)) {
+            row[t] = -INFINITY;
+            continue;
+        }
+        const uint16_t *k_head =
+            is_current
+                ? current_keys + (uint64_t)kv_head * MIMO26_ROCM_QK_DIM
+                : keys + (t * kv_heads + kv_head) * MIMO26_ROCM_QK_DIM;
+        float dot = 0.0f;
+        for (uint32_t d = 0; d < MIMO26_ROCM_QK_DIM; d++) {
+            dot += mimo26_bf16_to_f32_d(q_head[d]) *
+                   mimo26_bf16_to_f32_d(k_head[d]);
+        }
+        /* The reference's matmul output is BF16 and the scaling stays in that
+         * dtype, so round here rather than carrying F32 forward. */
+        const float scaled =
+            mimo26_bf16_to_f32_d(mimo26_f32_to_bf16_d(dot * scale));
+        row[t] = scaled;
+        if (scaled > local_max) {
+            local_max = scaled;
+        }
+    }
+    /* Max is associative and commutative, so a tree reduction is safe here
+     * in a way the additions are not. */
+    reduction[tid] = local_max;
+    __syncthreads();
+    for (uint32_t width = blockDim.x / 2u; width > 0u; width /= 2u) {
+        if (tid < width && reduction[tid + width] > reduction[tid]) {
+            reduction[tid] = reduction[tid + width];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0u) {
+        float maximum = reduction[0];
+        if (has_sink) {
+            const float sink = mimo26_bf16_to_f32_d(sink_bias[head]);
+            row[slot_total] = sink;
+            if (sink > maximum) {
+                maximum = sink;
+            }
+        }
+        shared_max = maximum;
+    }
+    __syncthreads();
+
+    /*
+     * Stop here when the caller only wants the scores. Everything up to this
+     * point -- dot products, the scale and its BF16 rounding, masking, the
+     * sink logit and the row max -- is exactly specified arithmetic with no
+     * transcendental in it, so it can be held to bit-exactness against the
+     * CPU. What follows calls expf, and device libm differs from host libm by
+     * up to 1 ulp on about 6% of inputs, so it cannot be. Separating the two
+     * keeps a strict gate on every layout and ordering decision instead of
+     * hiding them all behind one tolerance.
+     */
+    if (scores_only) {
+        return;
+    }
+
+    /* Pass 2: exponentials. Elementwise, so order is irrelevant. */
+    const float maximum = shared_max;
+    for (uint64_t t = tid; t < slots; t += blockDim.x) {
+        if (row[t] == -INFINITY) {
+            row[t] = 0.0f;
+            continue;
+        }
+        const float shifted =
+            mimo26_bf16_to_f32_d(mimo26_f32_to_bf16_d(row[t] - maximum));
+        row[t] = expf(shifted);
+    }
+    __syncthreads();
+
+    /* The denominator accumulates in double, in ascending slot order, by a
+     * single thread. Reassociating this is the one shortcut that would cost
+     * bit-exactness for a saving of microseconds. */
+    if (tid == 0u) {
+        double total = 0.0;
+        for (uint64_t t = 0; t < slots; t++) {
+            total += (double)row[t];
+        }
+        shared_total = total;
+    }
+    __syncthreads();
+    const double total = shared_total;
+
+    /* Pass 3: value accumulation. Splitting over the 128 output dimensions
+     * rather than over history keeps every thread's summation in ascending
+     * history order. The sink slot is excluded, so the probabilities that
+     * survive deliberately sum to less than one. */
+    for (uint32_t d = tid; d < MIMO26_ROCM_V_DIM; d += blockDim.x) {
+        float accumulator = 0.0f;
+        for (uint64_t t = 0; t < slot_total; t++) {
+            if (row[t] == 0.0f) {
+                continue;
+            }
+            const float probability = mimo26_bf16_to_f32_d(
+                mimo26_f32_to_bf16_d((float)((double)row[t] / total)));
+            if (probability == 0.0f) {
+                continue;
+            }
+            const uint16_t *v_head =
+                (have_current && t == history)
+                    ? current_values + (uint64_t)kv_head * MIMO26_ROCM_V_DIM
+                    : values + (t * kv_heads + kv_head) * MIMO26_ROCM_V_DIM;
+            accumulator += probability * mimo26_bf16_to_f32_d(v_head[d]);
+        }
+        out[(uint64_t)head * MIMO26_ROCM_V_DIM + d] =
+            mimo26_f32_to_bf16_d(accumulator);
+    }
+}
+
 static inline uint32_t blocks_for(uint64_t count)
 {
     return (uint32_t)((count + MIMO26_ROCM_THREADS - 1u) /
@@ -343,6 +507,100 @@ bool mimo26_rocm_zero_f32(float *accumulator, uint64_t count, void *stream)
                        dim3(MIMO26_ROCM_THREADS), 0, (hipStream_t)stream,
                        accumulator, count);
     return hipGetLastError() == hipSuccess;
+}
+
+uint64_t mimo26_rocm_attention_scratch_floats(uint64_t history)
+{
+    return (uint64_t)MIMO26_ROCM_QUERY_HEADS * (history + 2u);
+}
+
+static bool attention_launch(void *out, const void *query, const void *keys,
+                             const void *values, const void *current_keys,
+                             const void *current_values,
+                             const void *sink_bias, float *scratch,
+                             uint32_t kv_heads, uint32_t kv_groups,
+                             uint32_t window, uint64_t history,
+                             uint64_t first_position, uint64_t query_position,
+                             float scale, bool scores_only, void *stream)
+{
+    const bool have_current =
+        (current_keys != NULL && current_values != NULL);
+    /* Same admission checks as the CPU entry point, and for the same reason:
+     * an invalid geometry should be refused, not silently attended over. */
+    if ((out == NULL && !scores_only) || query == NULL || scratch == NULL ||
+        kv_heads == 0u ||
+        kv_groups == 0u ||
+        kv_groups * kv_heads != MIMO26_ROCM_QUERY_HEADS) {
+        return false;
+    }
+    if ((current_keys == NULL) != (current_values == NULL)) {
+        return false;
+    }
+    if (history > 0u && (keys == NULL || values == NULL)) {
+        return false;
+    }
+    if (history == 0u && !have_current) {
+        return false;
+    }
+    if (history > 0u) {
+        if (first_position > query_position) {
+            return false;
+        }
+        const uint64_t span = query_position - first_position + 1u;
+        if (span < history) {
+            return false;
+        }
+        if (have_current && span - 1u < history) {
+            return false;
+        }
+    }
+    hipLaunchKernelGGL(mimo26_attention_decode_kernel,
+                       dim3(MIMO26_ROCM_QUERY_HEADS),
+                       dim3(MIMO26_ROCM_THREADS), 0, (hipStream_t)stream,
+                       (uint16_t *)out, (const uint16_t *)query,
+                       (const uint16_t *)keys, (const uint16_t *)values,
+                       (const uint16_t *)current_keys,
+                       (const uint16_t *)current_values,
+                       (const uint16_t *)sink_bias, scratch, kv_heads,
+                       kv_groups, window, history, first_position,
+                       query_position, scale, have_current ? 1u : 0u,
+                       sink_bias != NULL ? 1u : 0u, scores_only ? 1u : 0u);
+    return hipGetLastError() == hipSuccess;
+}
+
+
+bool mimo26_rocm_attention_decode(void *out, const void *query,
+                                  const void *keys, const void *values,
+                                  const void *current_keys,
+                                  const void *current_values,
+                                  const void *sink_bias, float *scratch,
+                                  uint32_t kv_heads, uint32_t kv_groups,
+                                  uint32_t window, uint64_t history,
+                                  uint64_t first_position,
+                                  uint64_t query_position, float scale,
+                                  void *stream)
+{
+    return attention_launch(out, query, keys, values, current_keys,
+                            current_values, sink_bias, scratch, kv_heads,
+                            kv_groups, window, history, first_position,
+                            query_position, scale, false, stream);
+}
+
+bool mimo26_rocm_attention_scores(const void *query, const void *keys,
+                                  const void *current_keys,
+                                  const void *sink_bias, float *scratch,
+                                  uint32_t kv_heads, uint32_t kv_groups,
+                                  uint32_t window, uint64_t history,
+                                  uint64_t first_position,
+                                  uint64_t query_position, float scale,
+                                  void *stream)
+{
+    /* values are unused on this path, but the shared admission checks want a
+     * non-NULL pair whenever there is history to attend to. */
+    return attention_launch(NULL, query, keys, keys, current_keys,
+                            current_keys, sink_bias, scratch, kv_heads,
+                            kv_groups, window, history, first_position,
+                            query_position, scale, true, stream);
 }
 
 }  /* extern "C" */
