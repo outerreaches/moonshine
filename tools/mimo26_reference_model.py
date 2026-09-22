@@ -63,7 +63,28 @@ def main():
 
         _original_rope = reference.apply_rotary_pos_emb
         import os
+        if os.environ.get("MIMO26_RMSNORM_ONE_PLUS") == "1":
+            # Test the Gemma-style (1 + w) scaling. The shipped code multiplies
+            # by w directly, but early-layer weights have rms 0.018, which would
+            # attenuate activations ~55x and flatten attention.
+            class OnePlusRMSNorm(torch.nn.Module):
+                def __init__(self, hidden_size, eps=1e-6):
+                    super().__init__()
+                    self.weight = torch.nn.Parameter(torch.zeros(hidden_size))
+                    self.variance_epsilon = eps
+                def forward(self, hidden_states):
+                    dt = hidden_states.dtype
+                    h = hidden_states.to(torch.float32)
+                    var = h.pow(2).mean(-1, keepdim=True)
+                    h = h * torch.rsqrt(var + self.variance_epsilon)
+                    return ((1.0 + self.weight.float()) *
+                            h.to(dt).float()).to(dt)
+            reference.MiMoV2RMSNorm = OnePlusRMSNorm
         config = MiMoV2Config(**json.loads((root / "config.json").read_text()))
+        # Force eager so the attention path is the one that honours the sink
+        # and returns inspectable weights. Leaving this None made the module
+        # dispatch elsewhere and silently drop the weights.
+        config._attn_implementation = "eager"
         checkpoint = Checkpoint(root)
         tokens = list(args.tokens)
         count = len(tokens)
@@ -178,10 +199,55 @@ def main():
             residual = hidden
             normed = input_norm(hidden)
             with torch.no_grad():
-                attention_out, _ = attention(
+                attention_out, attn_w = attention(
                     normed, position_embeddings=position_embeddings,
                     attention_mask=mask, past_key_values=None,
                     cache_position=position_ids[0], position_ids=position_ids)
+            if os.environ.get("MIMO26_QK_STATS") == "1":
+                # Reproduce the pre-softmax scores to see their spread. A
+                # uniform softmax means the scores barely differ.
+                with torch.no_grad():
+                    qkv = attention.qkv_proj(normed)
+                    qs, ks, vs = qkv.split([attention.q_size, attention.k_size,
+                                            attention.v_size], dim=-1)
+                    qh = qs.view(1, -1, attention.num_attention_heads,
+                                 attention.head_dim).transpose(1, 2)
+                    kh = ks.view(1, -1, attention.num_key_value_heads,
+                                 attention.head_dim).transpose(1, 2)
+                    qr, qn = qh.split([attention.rope_dim,
+                                       attention.head_dim - attention.rope_dim],
+                                      dim=-1)
+                    kr, kn = kh.split([attention.rope_dim,
+                                       attention.head_dim - attention.rope_dim],
+                                      dim=-1)
+                    cos, sin = position_embeddings
+                    qr, kr = reference.apply_rotary_pos_emb(qr, kr, cos, sin)
+                    qf = torch.cat([qr, qn], dim=-1).float()
+                    kf = torch.cat([kr, kn], dim=-1).float()
+                    kf = reference.repeat_kv(kf, attention.num_key_value_groups)
+                    sc = (qf @ kf.transpose(2, 3)) * attention.scaling
+                    row = sc[0, :, -1, :]
+                    print(f"      qk layer {layer:2d}: q_rms {float(qf.pow(2).mean().sqrt()):.4f} "
+                          f"k_rms {float(kf.pow(2).mean().sqrt()):.4f} "
+                          f"score_mean {float(row.mean()):.4f} "
+                          f"score_std {float(row.std()):.5f} "
+                          f"spread {float(row.max()-row.min()):.4f}", flush=True)
+            if os.environ.get("MIMO26_ATTN_PATTERN") == "1" and attn_w is not None \
+                    and layer % 4 == 3 or (os.environ.get("MIMO26_ATTN_PATTERN") == "1" and attn_w is not None and not is_swa):
+                # Where does the last position actually attend?
+                last = attn_w[0, :, -1, :].float()          # [heads, kv]
+                # Per-head entropy, then averaged. Averaging the distributions
+                # first would hide sharp heads that disagree with each other.
+                per_head = -(last.clamp_min(1e-9) *
+                             last.clamp_min(1e-9).log()).sum(dim=-1)
+                import math
+                uniform = math.log(last.shape[-1])
+                print(f"      attn@last layer {layer:2d} "
+                      f"{'SWA' if is_swa else 'GLB'}: mass {float(last.sum(-1).mean()):.4f} "
+                      f"per-head entropy mean {float(per_head.mean()):.3f} "
+                      f"min {float(per_head.min()):.3f} (uniform {uniform:.3f}) "
+                      f"sharpest head max-weight {float(last.max()):.4f}",
+                      flush=True)
             attn_contrib = attention_out
             hidden = residual + attention_out
             del attention, input_norm, normed

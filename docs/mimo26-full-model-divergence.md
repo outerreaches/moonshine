@@ -54,6 +54,56 @@ Each of these was tested, not assumed. Recorded so they are not re-tried.
 | Expert weights are corrupt | On a unit-rms random input an expert gives out rms 0.066, exactly what its weight magnitudes predict |
 | The architecture is misread | The shipped technical report's table matches on every parameter: 48/39/9 layers, 64/8 SWA heads, 64/4 GA, QK/V 192/128, window 128, 256/8 experts |
 | The MoE path is actively harmful | Zeroing every MoE contribution collapses all ranks past 68,000, far worse than keeping it, so the experts carry real signal |
+| RMSNorm uses a `1 + w` convention | `1 + w` sharpens attention but makes ranks far worse and collapses attention onto single positions |
+| Attention is broken | Per-head entropy progresses cleanly from 2.486 at layer 0 to 0.948 at layer 47; score spreads at layers 1-5 are 2.7-6.7 |
+| Special-token embeddings are missing | Populated and healthy: id 151644 norm 1.03, `<think>` 0.46 |
+
+## Conclusive: the model cannot predict its own chat template
+
+Earlier doubt about whether expectations were simply too high is settled. The
+model fails on tokens that require no knowledge at all:
+
+| Context | True next token | Rank |
+| --- | --- | ---: |
+| `<\|im_start\|>` | `assistant` | **60,627** |
+| `<\|im_start\|>user...assistant\n` | `<think>` | **143,772** (logit -7.25) |
+
+After `<|im_start|>` the next token is one of a handful of role names. Rank
+60,627 is not a knowledge failure or a formatting mismatch. Special-token
+embeddings are populated and healthy (id 151644 norm 1.03, `<think>` 0.46),
+so this is not missing weights.
+
+## Attention is not the culprit, and an earlier alarm was my measurement error
+
+A first pass reported "attention is uniform" across global layers. That was
+partly an artifact: entropy was computed on the head-**averaged**
+distribution, which washes out sharp heads that disagree. Measured per head
+and then averaged, the global layers show a clean monotonic progression from
+diffuse to sharp:
+
+| Layer | Per-head entropy (uniform = 2.485) | Sharpest head max weight |
+| ---: | ---: | ---: |
+| 0 | 2.486 | 0.089 |
+| 11 | 2.359 | 0.367 |
+| 23 | 2.114 | 0.746 |
+| 35 | 1.954 | 0.973 |
+| 47 | 0.948 | 1.000 |
+
+That is what a healthy transformer looks like — early layers diffuse, late
+layers sharp. Pre-softmax score spreads at layers 1-5 are 2.7 to 6.7, also
+healthy. The attention mechanism is working.
+
+## RMSNorm uses plain `w`, not `1 + w`
+
+Worth testing because the norm weights grow enormously with depth — rms 0.018
+at layer 0, 0.49 at layer 24, 1.93 at layer 47, 3.62 at the final norm — and a
+0.018 scale looks like a 55x attenuation. Under a Gemma-style `1 + w` reading,
+attention does become much sharper (layer 0 per-head entropy 2.486 to 0.461).
+
+But end to end `1 + w` is **worse**: rank of ` of` after "The capital" goes
+from 10 to 20,215, and attention collapses onto single positions
+(entropy 0.000, max weight 1.0). Plain `w` stands, and the shipped code is
+right here.
 
 ## The sharpest unexplained observation
 
