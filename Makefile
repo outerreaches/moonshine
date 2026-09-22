@@ -57,6 +57,9 @@ GLM53_OBJS := \
 	glm53_static_loader.o \
 	glm53_weights.o
 
+MIMO26_CPU_TESTS := \
+	tests/test_mimo26_architecture
+
 GLM53_CPU_TESTS := \
 	tests/test_glm53_arch_math \
 	tests/test_glm53_architecture \
@@ -175,9 +178,11 @@ CHAT_TESTS := \
 	tests/test_k3_long_context
 
 ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS) \
+	$(MIMO26_CPU_TESTS) \
 	$(GLM53_CPU_TESTS) $(GLM53_ROCM_TESTS) $(GLM53_OFFICIAL_TESTS)
 
 .PHONY: all help tests test test-cpu check-model \
+	test-mimo26-schema test-mimo26-checkpoint \
 	test-model-layout test-model-components test-engine-init \
 	test-engine-hello test-chat-hello test-state-checkpoint test-tokenizer \
 	test-prefill-2 test-prefill-scale test-prefill-kda-blas \
@@ -430,6 +435,13 @@ tools/screen_static_q8: tools/screen_static_q8.o k3_q8_codec.o \
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 tests/test_glm53_arch_math: tests/test_glm53_arch_math.o glm53_arch_math.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+mimo26_architecture.o: mimo26_architecture.c mimo26_architecture.h \
+	k3_safetensors.h
+tests/test_mimo26_architecture.o: tests/test_mimo26_architecture.c \
+	mimo26_architecture.h k3_safetensors.h
+tests/test_mimo26_architecture: tests/test_mimo26_architecture.o \
+		mimo26_architecture.o k3_safetensors.o k3_json.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 tests/test_glm53_architecture: tests/test_glm53_architecture.o \
 		glm53_architecture.o k3_safetensors.o k3_json.o
@@ -722,6 +734,16 @@ test-static-q8-screen: tests/test_k3_q8_codec tools/screen_static_q8
 test-mzg-transcoder:
 	PYTHONDONTWRITEBYTECODE=1 \
 		$(PYTHON) -m unittest -v tests/test_transcode_mzg.py
+
+test-mimo26-schema: tests/test_mimo26_architecture
+	./tests/test_mimo26_architecture
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/test_mimo26_audit.py
+
+# Full-metadata audit against a real checkpoint. Header-only and read-only;
+# requires MIMO26_ROOT to point at an official download.
+test-mimo26-checkpoint:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/audit_mimo26_checkpoint.py \
+		$(MIMO26_ROOT)
 
 test-mzg2-bundle:
 	PYTHONDONTWRITEBYTECODE=1 \

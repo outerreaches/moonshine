@@ -13,6 +13,10 @@ tests/test_k3_*
 tests/test_glm53_*
 !tests/test_glm53_*.c
 !tests/test_glm53_*.cu
+tests/test_mimo26_*
+!tests/test_mimo26_*.c
+!tests/test_mimo26_*.cu
+!tests/test_mimo26_*.py
 __pycache__/
 *.pyc
 .venv-sdk/
