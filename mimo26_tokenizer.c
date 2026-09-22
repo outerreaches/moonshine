@@ -697,6 +697,206 @@ bool mimo26_tokenizer_decode_stream(const mimo26_tokenizer *tokenizer,
 /* ---- chat template ---- */
 
 static bool append_text(char **buffer, size_t *used, size_t *capacity,
+                        const char *text);
+
+
+/* ---- tool rendering ---- */
+
+/*
+ * Re-serialize a parsed JSON value the way the template's `tojson` does:
+ * ", " between members, ": " after a key, source order preserved.
+ *
+ * Not k3_json_compact_sorted_dup, which sorts keys and omits the spaces --
+ * either difference changes the rendered prompt and therefore every token
+ * after it.
+ */
+static bool serialize_json(const k3_json_document *document, int32_t node,
+                           char **buffer, size_t *used, size_t *capacity)
+{
+    if (node < 0) {
+        return false;
+    }
+    const k3_json_token *token = &document->tokens[node];
+    switch (token->type) {
+    case K3_JSON_OBJECT: {
+        if (!append_text(buffer, used, capacity, "{")) { return false; }
+        bool first = true;
+        for (int32_t key = token->first_child; key >= 0;) {
+            const int32_t value = document->tokens[key].next_sibling;
+            if (value < 0) { return false; }
+            if (!first && !append_text(buffer, used, capacity, ", ")) {
+                return false;
+            }
+            first = false;
+            if (!serialize_json(document, key, buffer, used, capacity) ||
+                !append_text(buffer, used, capacity, ": ") ||
+                !serialize_json(document, value, buffer, used, capacity)) {
+                return false;
+            }
+            key = document->tokens[value].next_sibling;
+        }
+        return append_text(buffer, used, capacity, "}");
+    }
+    case K3_JSON_ARRAY: {
+        if (!append_text(buffer, used, capacity, "[")) { return false; }
+        bool first = true;
+        for (int32_t child = token->first_child; child >= 0;
+             child = document->tokens[child].next_sibling) {
+            if (!first && !append_text(buffer, used, capacity, ", ")) {
+                return false;
+            }
+            first = false;
+            if (!serialize_json(document, child, buffer, used, capacity)) {
+                return false;
+            }
+        }
+        return append_text(buffer, used, capacity, "]");
+    }
+    case K3_JSON_STRING: {
+        /* Re-escape from the decoded value so the output is canonical
+         * rather than a copy of however the caller happened to escape it. */
+        char *decoded = NULL;
+        char scratch[256];
+        if (!k3_json_string_dup(document, node, &decoded, scratch,
+                                sizeof scratch)) {
+            return false;
+        }
+        char *escaped = NULL;
+        size_t escaped_size = 0;
+        const bool ok = k3_json_escape(decoded, strlen(decoded), &escaped,
+                                       &escaped_size, scratch,
+                                       sizeof scratch) &&
+                        append_text(buffer, used, capacity, escaped);
+        free(decoded);
+        free(escaped);
+        return ok;
+    }
+    default: {
+        /* Numbers, true, false and null are copied from the source, which
+         * preserves the literal the caller wrote. */
+        const size_t length = token->end - token->start;
+        char *literal = (char *)malloc(length + 1u);
+        if (literal == NULL) { return false; }
+        memcpy(literal, document->source + token->start, length);
+        literal[length] = '\0';
+        const bool ok = append_text(buffer, used, capacity, literal);
+        free(literal);
+        return ok;
+    }
+    }
+}
+
+/*
+ * 'You are provided with the following tools:\n\n<tools>' then one line per
+ * tool, then '\n</tools>'.
+ */
+static bool render_tools(const char *tools_json, char **buffer, size_t *used,
+                         size_t *capacity, char *error, size_t error_size)
+{
+    k3_json_document document;
+    memset(&document, 0, sizeof document);
+    if (!k3_json_parse(&document, tools_json, strlen(tools_json), error,
+                       error_size)) {
+        return false;
+    }
+    if (document.root < 0 ||
+        document.tokens[document.root].type != K3_JSON_ARRAY) {
+        k3_json_document_free(&document);
+        set_error(error, error_size, "tools must be a JSON array");
+        return false;
+    }
+    bool ok = append_text(buffer, used, capacity,
+                          "You are provided with the following tools:"
+                          "\n\n<tools>");
+    for (int32_t tool = document.tokens[document.root].first_child;
+         ok && tool >= 0; tool = document.tokens[tool].next_sibling) {
+        ok = append_text(buffer, used, capacity, "\n") &&
+             serialize_json(&document, tool, buffer, used, capacity);
+    }
+    ok = ok && append_text(buffer, used, capacity, "\n</tools>");
+    k3_json_document_free(&document);
+    if (!ok) {
+        set_error(error, error_size, "rendering tools failed");
+    }
+    return ok;
+}
+
+/* <tool_call><function=NAME><parameter=K>V</parameter>...</function></tool_call> */
+static bool render_tool_calls(const mimo26_tool_call *calls, size_t count,
+                              char **buffer, size_t *used, size_t *capacity,
+                              char *error, size_t error_size)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (!append_text(buffer, used, capacity, "<tool_call><function=") ||
+            !append_text(buffer, used, capacity,
+                         calls[i].name != NULL ? calls[i].name : "") ||
+            !append_text(buffer, used, capacity, ">")) {
+            set_error(error, error_size, "rendering a tool call failed");
+            return false;
+        }
+        if (calls[i].arguments_json != NULL &&
+            calls[i].arguments_json[0] != '\0') {
+            k3_json_document document;
+            memset(&document, 0, sizeof document);
+            if (!k3_json_parse(&document, calls[i].arguments_json,
+                               strlen(calls[i].arguments_json), error,
+                               error_size)) {
+                return false;
+            }
+            if (document.root < 0 ||
+                document.tokens[document.root].type != K3_JSON_OBJECT) {
+                k3_json_document_free(&document);
+                set_error(error, error_size,
+                          "tool call arguments must be a JSON object");
+                return false;
+            }
+            bool ok = true;
+            for (int32_t key = document.tokens[document.root].first_child;
+                 ok && key >= 0;) {
+                const int32_t value = document.tokens[key].next_sibling;
+                if (value < 0) { break; }
+                char *name = NULL;
+                if (!k3_json_string_dup(&document, key, &name, error,
+                                        error_size)) {
+                    ok = false;
+                    break;
+                }
+                ok = append_text(buffer, used, capacity, "<parameter=") &&
+                     append_text(buffer, used, capacity, name) &&
+                     append_text(buffer, used, capacity, ">");
+                free(name);
+                if (ok) {
+                    /* render_value: strings raw, everything else as JSON. */
+                    if (document.tokens[value].type == K3_JSON_STRING) {
+                        char *decoded = NULL;
+                        ok = k3_json_string_dup(&document, value, &decoded,
+                                                error, error_size) &&
+                             append_text(buffer, used, capacity, decoded);
+                        free(decoded);
+                    } else {
+                        ok = serialize_json(&document, value, buffer, used,
+                                            capacity);
+                    }
+                }
+                ok = ok && append_text(buffer, used, capacity, "</parameter>");
+                key = document.tokens[value].next_sibling;
+            }
+            k3_json_document_free(&document);
+            if (!ok) {
+                return false;
+            }
+        }
+        if (!append_text(buffer, used, capacity, "</function></tool_call>")) {
+            set_error(error, error_size, "rendering a tool call failed");
+            return false;
+        }
+    }
+    return true;
+}
+
+
+
+static bool append_text(char **buffer, size_t *used, size_t *capacity,
                         const char *text)
 {
     const size_t length = strlen(text);
@@ -718,43 +918,47 @@ static bool append_text(char **buffer, size_t *used, size_t *capacity,
     return true;
 }
 
-bool mimo26_tokenizer_encode_chat(mimo26_tokenizer *tokenizer,
-                                  const mimo26_chat_message *messages,
-                                  size_t message_count,
-                                  bool add_generation_prompt,
-                                  bool enable_thinking,
-                                  mimo26_token_buffer *out, char *error,
-                                  size_t error_size)
+char *mimo26_tokenizer_render_chat(const mimo26_chat_message *messages,
+                                   size_t message_count,
+                                   const char *tools_json,
+                                   bool add_generation_prompt,
+                                   bool enable_thinking, char *error,
+                                   size_t error_size)
 {
-    if (tokenizer == NULL || out == NULL ||
-        (messages == NULL && message_count > 0)) {
+    if (messages == NULL && message_count > 0) {
         set_error(error, error_size, "invalid chat arguments");
-        return false;
+        return NULL;
     }
-    out->count = 0;
-
-    /*
-     * Rendered once as text, then encoded with specials enabled. Doing it
-     * this way rather than emitting ids directly means the markers go through
-     * exactly the same matching path the fixtures exercise, so a mistake in
-     * the template shows up as a rendering difference rather than as a
-     * plausible but wrong id sequence.
-     *
-     * Message content is inserted verbatim. If it happens to spell a marker,
-     * the marker-matching pass will encode it as one -- which is why request
-     * content must be validated by the caller before it reaches here.
-     */
     char *rendered = NULL;
     size_t used = 0, capacity = 0;
     bool ok = true;
+
+    /*
+     * Tools come first, as their own system turn, ahead of any system
+     * message the caller supplied. That is the template's order and it is
+     * not interchangeable -- putting them after would change every token
+     * from that point on.
+     */
+    if (ok && tools_json != NULL && tools_json[0] != '\0') {
+        ok = append_text(&rendered, &used, &capacity, "<|im_start|>system\n") &&
+             render_tools(tools_json, &rendered, &used, &capacity, error,
+                          error_size) &&
+             append_text(&rendered, &used, &capacity, "<|im_end|>");
+        if (!ok) {
+            free(rendered);
+            return NULL;
+        }
+    }
+
     for (size_t i = 0; ok && i < message_count; i++) {
         const char *role = messages[i].role != NULL ? messages[i].role : "";
+        const bool assistant = strcmp(role, "assistant") == 0;
         ok = append_text(&rendered, &used, &capacity, "<|im_start|>") &&
              append_text(&rendered, &used, &capacity, role) &&
              append_text(&rendered, &used, &capacity, "\n");
         /* An assistant turn always carries a think block: the recorded
          * reasoning when there is some, an empty one when there is not. */
-        if (ok && strcmp(role, "assistant") == 0) {
+        if (ok && assistant) {
             ok = append_text(&rendered, &used, &capacity, "<think>") &&
                  append_text(&rendered, &used, &capacity,
                              messages[i].reasoning != NULL
@@ -764,29 +968,280 @@ bool mimo26_tokenizer_encode_chat(mimo26_tokenizer *tokenizer,
         ok = ok &&
              append_text(&rendered, &used, &capacity,
                          messages[i].content != NULL ? messages[i].content
-                                                     : "") &&
-             append_text(&rendered, &used, &capacity, "<|im_end|>");
+                                                     : "");
+        if (ok && assistant && messages[i].tool_call_count > 0) {
+            ok = render_tool_calls(messages[i].tool_calls,
+                                   messages[i].tool_call_count, &rendered,
+                                   &used, &capacity, error, error_size);
+        }
+        ok = ok && append_text(&rendered, &used, &capacity, "<|im_end|>");
     }
     if (ok && add_generation_prompt) {
         ok = append_text(&rendered, &used, &capacity,
                          "<|im_start|>assistant\n");
         if (ok && !enable_thinking) {
-            ok = append_text(&rendered, &used, &capacity,
-                             "<think></think>");
+            ok = append_text(&rendered, &used, &capacity, "<think></think>");
         }
     }
     if (!ok) {
         free(rendered);
-        set_error(error, error_size, "out of memory rendering the chat");
-        return false;
+        set_error(error, error_size, "rendering the chat failed");
+        return NULL;
     }
     if (rendered == NULL) {
-        return true;   /* no messages and no generation prompt */
+        rendered = (char *)calloc(1u, 1u);   /* empty conversation */
     }
-    ok = mimo26_tokenizer_encode(tokenizer, rendered, true, out, error,
-                                 error_size);
+    return rendered;
+}
+
+bool mimo26_tokenizer_encode_chat(mimo26_tokenizer *tokenizer,
+                                  const mimo26_chat_message *messages,
+                                  size_t message_count,
+                                  const char *tools_json,
+                                  bool add_generation_prompt,
+                                  bool enable_thinking,
+                                  mimo26_token_buffer *out, char *error,
+                                  size_t error_size)
+{
+    if (tokenizer == NULL || out == NULL) {
+        set_error(error, error_size, "invalid chat arguments");
+        return false;
+    }
+    out->count = 0;
+    /*
+     * Rendered to text first, then encoded with markers recognized. Doing it
+     * this way rather than emitting ids directly means the markers go
+     * through exactly the same matching path the fixtures exercise, so a
+     * template mistake shows as a rendering difference rather than as a
+     * plausible but wrong id sequence.
+     *
+     * Message content is inserted verbatim, so a caller must validate it
+     * before it arrives here -- content that spells a marker will be encoded
+     * as one.
+     */
+    char *rendered = mimo26_tokenizer_render_chat(
+        messages, message_count, tools_json, add_generation_prompt,
+        enable_thinking, error, error_size);
+    if (rendered == NULL) {
+        return false;
+    }
+    const bool ok = rendered[0] == '\0' ||
+                    mimo26_tokenizer_encode(tokenizer, rendered, true, out,
+                                            error, error_size);
     free(rendered);
     return ok;
+}
+
+/* ---- tool call parsing ---- */
+
+void mimo26_tool_calls_free(mimo26_parsed_tool_call *calls, size_t count)
+{
+    if (calls == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < count; i++) {
+        free(calls[i].name);
+        free(calls[i].arguments_json);
+    }
+    free(calls);
+}
+
+/*
+ * A parameter value is written raw when it is a string and as JSON
+ * otherwise, so the wire form cannot say which it was. Recovered by trying
+ * JSON first: a value that parses as a scalar, object or array is taken as
+ * that, and anything else is a string. The ambiguous case -- a string that
+ * spells a JSON scalar -- resolves to the scalar, which is why the tool
+ * schema is the authority on argument types and this is documented rather
+ * than hidden.
+ */
+static bool append_parameter(char **buffer, size_t *used, size_t *capacity,
+                             const char *name, const char *value,
+                             size_t value_length, bool first)
+{
+    char *escaped_name = NULL;
+    size_t escaped_size = 0;
+    char scratch[256];
+    if (!k3_json_escape(name, strlen(name), &escaped_name, &escaped_size,
+                        scratch, sizeof scratch)) {
+        return false;
+    }
+    bool ok = (first || append_text(buffer, used, capacity, ", ")) &&
+              append_text(buffer, used, capacity, escaped_name) &&
+              append_text(buffer, used, capacity, ": ");
+    free(escaped_name);
+    if (!ok) {
+        return false;
+    }
+
+    char *literal = (char *)malloc(value_length + 1u);
+    if (literal == NULL) {
+        return false;
+    }
+    memcpy(literal, value, value_length);
+    literal[value_length] = '\0';
+
+    k3_json_document probe;
+    memset(&probe, 0, sizeof probe);
+    const bool is_json =
+        value_length > 0 &&
+        k3_json_parse(&probe, literal, value_length, scratch,
+                      sizeof scratch) &&
+        probe.root >= 0 && probe.tokens[probe.root].type != K3_JSON_STRING;
+    if (is_json) {
+        size_t inner_used = 0, inner_capacity = 0;
+        char *inner = NULL;
+        ok = serialize_json(&probe, probe.root, &inner, &inner_used,
+                            &inner_capacity) &&
+             append_text(buffer, used, capacity, inner);
+        free(inner);
+    } else {
+        char *escaped_value = NULL;
+        ok = k3_json_escape(literal, value_length, &escaped_value,
+                            &escaped_size, scratch, sizeof scratch) &&
+             append_text(buffer, used, capacity, escaped_value);
+        free(escaped_value);
+    }
+    k3_json_document_free(&probe);
+    free(literal);
+    return ok;
+}
+
+bool mimo26_tokenizer_parse_tool_calls(const char *text, char **content_out,
+                                       mimo26_parsed_tool_call **calls_out,
+                                       size_t *count_out, char *error,
+                                       size_t error_size)
+{
+    if (text == NULL || content_out == NULL || calls_out == NULL ||
+        count_out == NULL) {
+        set_error(error, error_size, "invalid parse arguments");
+        return false;
+    }
+    *content_out = NULL;
+    *calls_out = NULL;
+    *count_out = 0;
+
+    char *content = NULL;
+    size_t content_used = 0, content_capacity = 0;
+    mimo26_parsed_tool_call *calls = NULL;
+    size_t call_count = 0, call_capacity = 0;
+
+    const char *cursor = text;
+    while (*cursor != '\0') {
+        const char *open = strstr(cursor, "<tool_call>");
+        if (open == NULL) {
+            if (!append_text(&content, &content_used, &content_capacity,
+                             cursor)) {
+                goto failed;
+            }
+            break;
+        }
+        /* Text before the block is ordinary content. */
+        if (open > cursor) {
+            char *prefix = strndup(cursor, (size_t)(open - cursor));
+            const bool ok = prefix != NULL &&
+                            append_text(&content, &content_used,
+                                        &content_capacity, prefix);
+            free(prefix);
+            if (!ok) {
+                goto failed;
+            }
+        }
+        const char *close = strstr(open, "</tool_call>");
+        const char *name_start = strstr(open, "<function=");
+        if (close == NULL || name_start == NULL || name_start > close) {
+            set_error(error, error_size,
+                      "a tool call block is malformed or unterminated");
+            goto failed;
+        }
+        name_start += strlen("<function=");
+        const char *name_end = (const char *)memchr(
+            name_start, '>', (size_t)(close - name_start));
+        if (name_end == NULL) {
+            set_error(error, error_size, "a tool call has no function name");
+            goto failed;
+        }
+
+        if (call_count == call_capacity) {
+            const size_t grown = call_capacity ? call_capacity * 2u : 4u;
+            mimo26_parsed_tool_call *bigger = (mimo26_parsed_tool_call *)
+                realloc(calls, grown * sizeof *calls);
+            if (bigger == NULL) {
+                goto failed;
+            }
+            calls = bigger;
+            call_capacity = grown;
+        }
+        memset(&calls[call_count], 0, sizeof calls[call_count]);
+        calls[call_count].name =
+            strndup(name_start, (size_t)(name_end - name_start));
+        if (calls[call_count].name == NULL) {
+            goto failed;
+        }
+
+        char *arguments = NULL;
+        size_t arguments_used = 0, arguments_capacity = 0;
+        if (!append_text(&arguments, &arguments_used, &arguments_capacity,
+                         "{")) {
+            goto failed;
+        }
+        bool first = true;
+        const char *scan = name_end + 1;
+        while (scan < close) {
+            const char *parameter = strstr(scan, "<parameter=");
+            if (parameter == NULL || parameter >= close) {
+                break;
+            }
+            parameter += strlen("<parameter=");
+            const char *key_end = (const char *)memchr(
+                parameter, '>', (size_t)(close - parameter));
+            const char *value_end = strstr(parameter, "</parameter>");
+            if (key_end == NULL || value_end == NULL || value_end > close) {
+                free(arguments);
+                set_error(error, error_size,
+                          "a tool call parameter is unterminated");
+                goto failed;
+            }
+            char *key = strndup(parameter, (size_t)(key_end - parameter));
+            const bool ok = key != NULL &&
+                            append_parameter(&arguments, &arguments_used,
+                                             &arguments_capacity, key,
+                                             key_end + 1,
+                                             (size_t)(value_end - key_end - 1),
+                                             first);
+            free(key);
+            if (!ok) {
+                free(arguments);
+                goto failed;
+            }
+            first = false;
+            scan = value_end + strlen("</parameter>");
+        }
+        if (!append_text(&arguments, &arguments_used, &arguments_capacity,
+                         "}")) {
+            free(arguments);
+            goto failed;
+        }
+        calls[call_count].arguments_json = arguments;
+        call_count++;
+        cursor = close + strlen("</tool_call>");
+    }
+
+    if (content == NULL) {
+        content = (char *)calloc(1u, 1u);
+    }
+    *content_out = content;
+    *calls_out = calls;
+    *count_out = call_count;
+    return true;
+
+failed:
+    free(content);
+    mimo26_tool_calls_free(calls, call_count);
+    if (error != NULL && error[0] == '\0') {
+        set_error(error, error_size, "out of memory parsing tool calls");
+    }
+    return false;
 }
 
 /* ---- lifecycle ---- */

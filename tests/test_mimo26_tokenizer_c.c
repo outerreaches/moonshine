@@ -223,6 +223,11 @@ int main(void)
         char *roles[16] = {0};
         char *contents[16] = {0};
         char *reasonings[16] = {0};
+        char *calls_json[16] = {0};
+        char *call_names[16][8] = {{0}};
+        char *call_args[16][8] = {{0}};
+        mimo26_tool_call made_calls[16][8];
+        memset(made_calls, 0, sizeof made_calls);
         size_t turn_count = 0;
         for (int32_t m = fixture.tokens[messages].first_child;
              m >= 0 && turn_count < 16;
@@ -273,34 +278,81 @@ int main(void)
             turns[turn_count].role = roles[turn_count];
             turns[turn_count].content = contents[turn_count];
             turns[turn_count].reasoning = reasoning_text;
+
+            const int32_t tool_calls = k3_json_object_get(&fixture, m,
+                                                          "tool_calls");
+            if (tool_calls >= 0) {
+                size_t made = 0;
+                for (int32_t call = fixture.tokens[tool_calls].first_child;
+                     call >= 0 && made < 8;
+                     call = fixture.tokens[call].next_sibling) {
+                    const int32_t function =
+                        k3_json_object_get(&fixture, call, "function");
+                    if (function < 0) { continue; }
+                    const int32_t name_field =
+                        k3_json_object_get(&fixture, function, "name");
+                    const int32_t args =
+                        k3_json_object_get(&fixture, function, "arguments");
+                    if (name_field < 0) { continue; }
+                    k3_json_string_dup(&fixture, name_field,
+                                       &call_names[turn_count][made], error,
+                                       sizeof error);
+                    if (args >= 0) {
+                        const size_t length = fixture.tokens[args].end -
+                                              fixture.tokens[args].start;
+                        char *raw = (char *)malloc(length + 1u);
+                        memcpy(raw, fixture.source + fixture.tokens[args].start,
+                               length);
+                        raw[length] = '\0';
+                        call_args[turn_count][made] = raw;
+                    }
+                    made_calls[turn_count][made].name =
+                        call_names[turn_count][made];
+                    made_calls[turn_count][made].arguments_json =
+                        call_args[turn_count][made];
+                    made++;
+                }
+                turns[turn_count].tool_calls = made_calls[turn_count];
+                turns[turn_count].tool_call_count = made;
+            }
             turn_count++;
         }
 
-        /*
-         * Tool fixtures are deliberately not claimed. The plan requires tool
-         * support to arrive with its own template and parser and
-         * round-trip tests, and to be rejected until then -- so the server
-         * refuses tools rather than rendering them approximately, and this
-         * records that rather than hiding it behind a skip.
-         */
-        const bool tool_fixture = strstr(name, "tool") != NULL;
+        /* The tools array is handed to the renderer as raw JSON so it is
+         * serialized the way the template's tojson does. */
+        char *tools_json = NULL;
+        const int32_t tools = k3_json_object_get(&fixture, request, "tools");
+        if (tools >= 0) {
+            const size_t length = fixture.tokens[tools].end -
+                                  fixture.tokens[tools].start;
+            tools_json = (char *)malloc(length + 1u);
+            if (tools_json != NULL) {
+                memcpy(tools_json,
+                       fixture.source + fixture.tokens[tools].start, length);
+                tools_json[length] = '\0';
+            }
+        }
         mimo26_token_buffer got;
         memset(&got, 0, sizeof got);
-        if (tool_fixture) {
-            printf("  --   %-40s not supported: tools are rejected\n", name);
-        } else if (!mimo26_tokenizer_encode_chat(tokenizer, turns, turn_count,
-                                                 add_generation_prompt,
-                                                 enable_thinking, &got, error,
-                                                 sizeof error)) {
+        if (!mimo26_tokenizer_encode_chat(tokenizer, turns, turn_count,
+                                          tools_json, add_generation_prompt,
+                                          enable_thinking, &got, error,
+                                          sizeof error)) {
             ok(name, 0, error);
         } else {
             compare_ids(name, &fixture, ids_node, &got);
         }
+        free(tools_json);
         mimo26_token_buffer_free(&got);
         for (size_t i = 0; i < turn_count; i++) {
+            free(calls_json[i]);
             free(roles[i]);
             free(contents[i]);
             free(reasonings[i]);
+            for (size_t j = 0; j < 8; j++) {
+                free(call_names[i][j]);
+                free(call_args[i][j]);
+            }
         }
         free(name);
         child = fixture.tokens[entry].next_sibling;
@@ -390,6 +442,128 @@ int main(void)
            !found_marker && special.count < plain.count, detail);
         mimo26_token_buffer_free(&plain);
         mimo26_token_buffer_free(&special);
+    }
+
+    /*
+     * Tool round trips. The plan requires these before tool support may be
+     * offered, and they check the direction the fixtures cannot: the
+     * fixtures prove rendering matches the reference, these prove the
+     * parser recovers what the renderer wrote.
+     */
+    {
+        struct { const char *name; const char *arguments; } cases[] = {
+            {"get_weather", "{\"city\": \"Ottawa\", \"unit\": \"c\"}"},
+            {"set_count", "{\"n\": 3, \"enabled\": true}"},
+            {"nested", "{\"filter\": {\"tags\": [\"a\", \"b\"]}}"},
+            {"no_args", "{}"},
+            {"awkward", "{\"text\": \"quote \\\" and <angle> and \\\\ slash\"}"},
+        };
+        for (size_t c = 0; c < sizeof cases / sizeof cases[0]; c++) {
+            mimo26_tool_call call;
+            call.name = cases[c].name;
+            call.arguments_json = cases[c].arguments;
+            mimo26_chat_message turn;
+            memset(&turn, 0, sizeof turn);
+            turn.role = "assistant";
+            turn.content = "";
+            turn.tool_calls = &call;
+            turn.tool_call_count = 1u;
+
+            char *rendered = mimo26_tokenizer_render_chat(&turn, 1u, NULL,
+                                                          false, true, error,
+                                                          sizeof error);
+            char *content = NULL;
+            mimo26_parsed_tool_call *parsed = NULL;
+            size_t parsed_count = 0;
+            const bool matched =
+                rendered != NULL &&
+                mimo26_tokenizer_parse_tool_calls(rendered, &content, &parsed,
+                                                  &parsed_count, error,
+                                                  sizeof error) &&
+                parsed_count == 1u &&
+                strcmp(parsed[0].name, cases[c].name) == 0 &&
+                strcmp(parsed[0].arguments_json, cases[c].arguments) == 0;
+            char label[128];
+            snprintf(label, sizeof label, "tool round trip: %s",
+                     cases[c].name);
+            ok(label, matched,
+               matched ? NULL : (parsed_count == 1u
+                                     ? parsed[0].arguments_json : error));
+            free(rendered);
+            free(content);
+            mimo26_tool_calls_free(parsed, parsed_count);
+        }
+    }
+
+    /* Content and tool calls must separate cleanly, in either order. */
+    {
+        const char *output =
+            "Let me check. <tool_call><function=get_weather>"
+            "<parameter=city>Ottawa</parameter></function></tool_call>"
+            " Done.";
+        char *content = NULL;
+        mimo26_parsed_tool_call *parsed = NULL;
+        size_t parsed_count = 0;
+        const bool parsed_ok = mimo26_tokenizer_parse_tool_calls(
+            output, &content, &parsed, &parsed_count, error, sizeof error);
+        ok("content and tool calls separate",
+           parsed_ok && parsed_count == 1u &&
+               strcmp(content, "Let me check.  Done.") == 0 &&
+               strcmp(parsed[0].name, "get_weather") == 0,
+           parsed_ok ? content : error);
+        free(content);
+        mimo26_tool_calls_free(parsed, parsed_count);
+    }
+
+    /* Two calls in one turn. */
+    {
+        const char *output =
+            "<tool_call><function=a><parameter=x>1</parameter></function>"
+            "</tool_call><tool_call><function=b></function></tool_call>";
+        char *content = NULL;
+        mimo26_parsed_tool_call *parsed = NULL;
+        size_t parsed_count = 0;
+        const bool parsed_ok = mimo26_tokenizer_parse_tool_calls(
+            output, &content, &parsed, &parsed_count, error, sizeof error);
+        ok("two calls in one turn",
+           parsed_ok && parsed_count == 2u &&
+               strcmp(parsed[0].arguments_json, "{\"x\": 1}") == 0 &&
+               strcmp(parsed[1].arguments_json, "{}") == 0,
+           parsed_ok && parsed_count == 2u ? parsed[0].arguments_json
+                                           : error);
+        free(content);
+        mimo26_tool_calls_free(parsed, parsed_count);
+    }
+
+    /*
+     * Malformed blocks must fail rather than leak through as prose. A
+     * half-parsed tool call becoming visible text is how a user ends up
+     * being shown the model's internal syntax.
+     */
+    {
+        const char *broken[] = {
+            "<tool_call><function=x>",                      /* unterminated */
+            "<tool_call></tool_call>",                      /* no function */
+            "<tool_call><function=x><parameter=k>v</function></tool_call>",
+        };
+        size_t refused = 0;
+        for (size_t i = 0; i < sizeof broken / sizeof broken[0]; i++) {
+            char *content = NULL;
+            mimo26_parsed_tool_call *parsed = NULL;
+            size_t parsed_count = 0;
+            error[0] = '\0';
+            if (!mimo26_tokenizer_parse_tool_calls(broken[i], &content,
+                                                   &parsed, &parsed_count,
+                                                   error, sizeof error)) {
+                refused++;
+            }
+            free(content);
+            mimo26_tool_calls_free(parsed, parsed_count);
+        }
+        char detail[64];
+        snprintf(detail, sizeof detail, "%zu of 3 refused", refused);
+        ok("malformed tool calls are refused, not leaked", refused == 3u,
+           detail);
     }
 
     k3_json_document_free(&fixture);

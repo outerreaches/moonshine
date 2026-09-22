@@ -246,6 +246,29 @@ static bool read_request(int fd, http_request *request, char *error,
     return true;
 }
 
+/* Grow-and-append for assembling a JSON fragment. */
+static bool append_json(char **buffer, size_t *used, size_t *capacity,
+                        const char *text)
+{
+    const size_t length = strlen(text);
+    if (*used + length + 1u > *capacity) {
+        size_t grown = *capacity ? *capacity : 256u;
+        while (*used + length + 1u > grown) {
+            grown *= 2u;
+        }
+        char *next = (char *)realloc(*buffer, grown);
+        if (next == NULL) {
+            return false;
+        }
+        *buffer = next;
+        *capacity = grown;
+    }
+    memcpy(*buffer + *used, text, length);
+    *used += length;
+    (*buffer)[*used] = '\0';
+    return true;
+}
+
 /* ---- runtime ---- */
 
 typedef struct {
@@ -392,6 +415,9 @@ typedef struct {
     uint32_t max_tokens;
     bool     stream;
     bool     enable_thinking;
+    char    *tools_json;
+    /* Storage for assistant turns replayed with their tool calls. */
+    mimo26_tool_call calls[MAX_MESSAGES][8];
 } chat_request;
 
 static void chat_request_free(chat_request *request)
@@ -443,12 +469,44 @@ static bool parse_chat(const char *body, size_t body_size,
     if (root < 0 || document.tokens[root].type != K3_JSON_OBJECT) {
         REFUSE("invalid_request", "body must be a JSON object");
     }
-    if (k3_json_object_get(&document, root, "tools") >= 0 ||
-        k3_json_object_get(&document, root, "functions") >= 0 ||
-        k3_json_object_get(&document, root, "tool_choice") >= 0) {
-        REFUSE("tools_unsupported",
-               "tool calling is not supported by this backend yet and is "
-               "refused rather than ignored");
+    if (k3_json_object_get(&document, root, "functions") >= 0) {
+        REFUSE("option_unsupported",
+               "the legacy 'functions' form is not supported; use 'tools'");
+    }
+    {
+        /*
+         * tool_choice is refused rather than ignored. The template offers no
+         * way to force or forbid a call, so honouring "required" or a named
+         * function would mean pretending -- and a caller who asked for a
+         * forced call and got prose has no way to tell that from the model
+         * declining.
+         */
+        const int32_t choice = k3_json_object_get(&document, root,
+                                                  "tool_choice");
+        if (choice >= 0 && !k3_json_string_equal(&document, choice, "auto")) {
+            REFUSE("option_unsupported",
+                   "only tool_choice 'auto' is supported; this template "
+                   "cannot force or forbid a call");
+        }
+    }
+    {
+        /* Kept as raw source so the renderer serializes it the way the
+         * template's tojson does, rather than however the client spaced it. */
+        const int32_t tools = k3_json_object_get(&document, root, "tools");
+        if (tools >= 0) {
+            if (document.tokens[tools].type != K3_JSON_ARRAY) {
+                REFUSE("invalid_request", "tools must be an array");
+            }
+            const size_t length = document.tokens[tools].end -
+                                  document.tokens[tools].start;
+            char *raw = (char *)malloc(length + 1u);
+            if (raw == NULL) {
+                REFUSE("invalid_request", "tools are too large");
+            }
+            memcpy(raw, body + document.tokens[tools].start, length);
+            raw[length] = '\0';
+            request->tools_json = take(request, raw);
+        }
     }
     for (const char *unsupported : {"temperature", "top_p", "top_k", "n",
                                     "presence_penalty", "frequency_penalty",
@@ -504,9 +562,10 @@ static bool parse_chat(const char *body, size_t body_size,
         }
         if (!k3_json_string_equal(&document, role, "system") &&
             !k3_json_string_equal(&document, role, "user") &&
-            !k3_json_string_equal(&document, role, "assistant")) {
+            !k3_json_string_equal(&document, role, "assistant") &&
+            !k3_json_string_equal(&document, role, "tool")) {
             REFUSE("role_unsupported",
-                   "role must be system, user or assistant");
+                   "role must be system, user, assistant or tool");
         }
         char *role_text = NULL;
         if (!k3_json_string_dup(&document, role, &role_text, error,
@@ -577,6 +636,63 @@ static bool parse_chat(const char *body, size_t body_size,
         request->messages[request->message_count].role = role_text;
         request->messages[request->message_count].content = content_text;
         request->messages[request->message_count].reasoning = reasoning_text;
+
+        /* Replaying an assistant turn that made calls is how a caller
+         * continues a tool conversation; dropping them would make the model
+         * see a turn where it said nothing and call again. */
+        const int32_t tool_calls = k3_json_object_get(&document, m,
+                                                      "tool_calls");
+        if (tool_calls >= 0) {
+            size_t made = 0;
+            for (int32_t call = document.tokens[tool_calls].first_child;
+                 call >= 0 && made < 8u;
+                 call = document.tokens[call].next_sibling) {
+                const int32_t function = k3_json_object_get(&document, call,
+                                                            "function");
+                if (function < 0) {
+                    REFUSE("invalid_request",
+                           "a tool call has no function object");
+                }
+                const int32_t name_field = k3_json_object_get(&document,
+                                                              function,
+                                                              "name");
+                const int32_t args = k3_json_object_get(&document, function,
+                                                        "arguments");
+                char *call_name = NULL;
+                if (name_field < 0 ||
+                    !k3_json_string_dup(&document, name_field, &call_name,
+                                        error, error_size)) {
+                    REFUSE("invalid_request", "a tool call has no name");
+                }
+                take(request, call_name);
+                char *call_args = NULL;
+                if (args >= 0) {
+                    /* OpenAI sends arguments as a JSON string; the template
+                     * wants the object. Both spellings are accepted. */
+                    if (document.tokens[args].type == K3_JSON_STRING) {
+                        k3_json_string_dup(&document, args, &call_args, error,
+                                           error_size);
+                    } else {
+                        const size_t length = document.tokens[args].end -
+                                              document.tokens[args].start;
+                        call_args = (char *)malloc(length + 1u);
+                        if (call_args != NULL) {
+                            memcpy(call_args, body +
+                                   document.tokens[args].start, length);
+                            call_args[length] = '\0';
+                        }
+                    }
+                    take(request, call_args);
+                }
+                request->calls[request->message_count][made].name = call_name;
+                request->calls[request->message_count][made].arguments_json =
+                    call_args;
+                made++;
+            }
+            request->messages[request->message_count].tool_calls =
+                request->calls[request->message_count];
+            request->messages[request->message_count].tool_call_count = made;
+        }
         request->message_count++;
     }
     #undef REFUSE
@@ -686,7 +802,8 @@ static void handle_chat(server_runtime *runtime, int fd,
     memset(&prompt, 0, sizeof prompt);
     char error[512];
     if (!mimo26_tokenizer_encode_chat(runtime->tokenizer, request.messages,
-                                      request.message_count, true,
+                                      request.message_count,
+                                      request.tools_json, true,
                                       request.enable_thinking, &prompt, error,
                                       sizeof error)) {
         send_error(fd, 400, "Bad Request", "encode_failed", error);
@@ -800,6 +917,42 @@ static void handle_chat(server_runtime *runtime, int fd,
         } else if (next == MIMO26_TOK_THINK_CLOSE) {
             in_reasoning = false;
         }
+        /*
+         * The tool-call wrapper is a special token pair, so the streaming
+         * decoder drops it along with every other special -- which it has to,
+         * or <|im_end|> would reach the client. Re-inserted here as text so
+         * the parser sees a complete block. Without this the model's
+         * <function=...> arrives naked and is shown to the user as prose,
+         * which is exactly what the first live tool call did.
+         */
+        if (next == MIMO26_TOK_TOOL_CALL_OPEN ||
+            next == MIMO26_TOK_TOOL_CALL_CLOSE) {
+            const char *marker = next == MIMO26_TOK_TOOL_CALL_OPEN
+                                     ? "<tool_call>" : "</tool_call>";
+            const size_t marker_length = strlen(marker);
+            if (!in_reasoning) {
+                if (collected_used + marker_length + 1u > collected_capacity) {
+                    collected_capacity =
+                        (collected_used + marker_length + 1u) * 2u;
+                    char *grown = (char *)realloc(collected,
+                                                  collected_capacity);
+                    if (grown == NULL) { failed = true; break; }
+                    collected = grown;
+                }
+                memcpy(collected + collected_used, marker, marker_length);
+                collected_used += marker_length;
+                collected[collected_used] = '\0';
+            }
+            produced_tokens++;
+            if (mimo26_gpu_worker_decode(runtime->worker, next, logits, error,
+                                         sizeof error) !=
+                MIMO26_GPU_WORKER_OK) {
+                failed = true;
+                break;
+            }
+            next = mimo26_gpu_worker_argmax(logits);
+            continue;
+        }
         if (next == MIMO26_TOK_THINK_OPEN ||
             next == MIMO26_TOK_THINK_CLOSE) {
             /* The markers themselves belong in neither field. */
@@ -884,6 +1037,27 @@ static void handle_chat(server_runtime *runtime, int fd,
         send_all(fd, done, strlen(done));
         mimo26_slot_finish(&runtime->slot);
     } else {
+        /*
+         * Tool calls are parsed out of the completed text rather than
+         * detected token by token. The block only means anything once it is
+         * closed, and a partial <function= is not a call -- streaming a
+         * half-formed one would put the model's internal syntax in front of
+         * a user.
+         */
+        char *visible = NULL;
+        mimo26_parsed_tool_call *parsed = NULL;
+        size_t parsed_count = 0;
+        if (collected != NULL &&
+            mimo26_tokenizer_parse_tool_calls(collected, &visible, &parsed,
+                                              &parsed_count, error,
+                                              sizeof error)) {
+            free(collected);
+            collected = visible;
+            collected_used = strlen(visible);
+            if (parsed_count > 0) {
+                finish_reason = "tool_calls";
+            }
+        }
         char *escaped = NULL;
         size_t escaped_size = 0;
         if (collected != NULL) {
@@ -896,8 +1070,35 @@ static void handle_chat(server_runtime *runtime, int fd,
             k3_json_escape(reasoning, reasoning_used, &escaped_reasoning,
                            &escaped_reasoning_size, error, sizeof error);
         }
+        /* Render the calls in OpenAI's shape, with arguments as a JSON
+         * string, which is what clients parse. */
+        char *calls_text = NULL;
+        size_t calls_used = 0, calls_capacity = 0;
+        if (parsed_count > 0) {
+            append_json(&calls_text, &calls_used, &calls_capacity, "[");
+            for (size_t i = 0; i < parsed_count; i++) {
+                char *escaped_name = NULL, *escaped_args = NULL;
+                size_t ignored = 0;
+                k3_json_escape(parsed[i].name, strlen(parsed[i].name),
+                               &escaped_name, &ignored, error, sizeof error);
+                k3_json_escape(parsed[i].arguments_json,
+                               strlen(parsed[i].arguments_json),
+                               &escaped_args, &ignored, error, sizeof error);
+                char entry[512];
+                snprintf(entry, sizeof entry,
+                         "%s{\"id\":\"call_%s_%zu\",\"type\":\"function\","
+                         "\"function\":{\"name\":%s,\"arguments\":%s}}",
+                         i ? "," : "", state.id, i,
+                         escaped_name != NULL ? escaped_name : "\"\"",
+                         escaped_args != NULL ? escaped_args : "\"{}\"");
+                append_json(&calls_text, &calls_used, &calls_capacity, entry);
+                free(escaped_name);
+                free(escaped_args);
+            }
+            append_json(&calls_text, &calls_used, &calls_capacity, "]");
+        }
         const size_t body_capacity =
-            escaped_size + escaped_reasoning_size + 1024u;
+            escaped_size + escaped_reasoning_size + calls_used + 1024u;
         char *body = (char *)malloc(body_capacity);
         if (body != NULL) {
             const int size = snprintf(
@@ -905,13 +1106,14 @@ static void handle_chat(server_runtime *runtime, int fd,
                 "{\"id\":\"%s\",\"object\":\"chat.completion\","
                 "\"created\":%ld,\"model\":\"%s\",\"choices\":[{\"index\":0,"
                 "\"message\":{\"role\":\"assistant\",\"content\":%s,"
-                "\"reasoning_content\":%s},"
+                "\"reasoning_content\":%s,\"tool_calls\":%s},"
                 "\"finish_reason\":\"%s\"}],\"usage\":{"
                 "\"prompt_tokens\":%zu,\"completion_tokens\":%zu,"
                 "\"total_tokens\":%zu}}",
                 state.id, state.created, MODEL_ID,
                 escaped != NULL ? escaped : "\"\"",
                 escaped_reasoning != NULL ? escaped_reasoning : "null",
+                calls_text != NULL ? calls_text : "null",
                 finish_reason, prompt.count,
                 produced_tokens, prompt.count + produced_tokens);
             if (size > 0) {
@@ -922,6 +1124,8 @@ static void handle_chat(server_runtime *runtime, int fd,
         }
         free(escaped);
         free(escaped_reasoning);
+        free(calls_text);
+        mimo26_tool_calls_free(parsed, parsed_count);
         mimo26_slot_finish(&runtime->slot);
     }
 
