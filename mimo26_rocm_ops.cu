@@ -2,6 +2,9 @@
 
 #include <hip/hip_runtime.h>
 
+#include <stdio.h>
+#include <stdlib.h>
+
 #define MIMO26_ROCM_THREADS 256u
 #define MIMO26_ROCM_MAX_EXPERTS 1024u
 
@@ -524,7 +527,8 @@ __global__ static void mimo26_rope_apply_kernel(uint16_t *heads,
 __global__ static void mimo26_ordered_gemv_f32_kernel(float *output,
                                                       const uint16_t *weights,
                                                       const uint16_t *input,
-                                                      uint32_t columns)
+                                                      uint32_t columns,
+                                                      uint32_t round_bf16)
 {
     extern __shared__ float staged[];
     const uint32_t row = blockIdx.x;
@@ -540,7 +544,9 @@ __global__ static void mimo26_ordered_gemv_f32_kernel(float *output,
         for (uint32_t c = 0; c < columns; c++) {
             sum += staged[c];
         }
-        output[row] = sum;
+        output[row] = round_bf16
+                          ? mimo26_bf16_to_f32_d(mimo26_f32_to_bf16_d(sum))
+                          : sum;
     }
 }
 
@@ -632,7 +638,7 @@ __global__ static void mimo26_append_kv_kernel(
 
 __global__ static void mimo26_ordered_gemv_f32_batch_kernel(
         float *output, const uint16_t *weights, const uint16_t *input,
-        uint32_t columns, uint32_t rows)
+        uint32_t columns, uint32_t rows, uint32_t round_bf16)
 {
     extern __shared__ float staged[];
     const uint32_t row = blockIdx.x;
@@ -649,7 +655,22 @@ __global__ static void mimo26_ordered_gemv_f32_batch_kernel(
         for (uint32_t c = 0; c < columns; c++) {
             sum += staged[c];
         }
-        output[(uint64_t)token * rows + row] = sum;
+        /*
+         * round_bf16 exists to settle moe_router_dtype by experiment rather
+         * than by argument. The config declares bfloat16; the shipped
+         * reference ignores the field and hard-codes an F32 linear; vLLM
+         * honours it. Both cannot be what training did, and the shipped
+         * file is the one that also got the QKV layout wrong, so its
+         * behaviour is weak evidence.
+         *
+         * A BF16 router differs from an F32 one in exactly one observable
+         * way: the logit is rounded to BF16 before sigmoid and the
+         * correction bias, so a near-tie in the top-k selection can resolve
+         * differently. Accumulation is F32 on real hardware either way.
+         */
+        output[(uint64_t)token * rows + row] =
+            round_bf16 ? mimo26_bf16_to_f32_d(mimo26_f32_to_bf16_d(sum))
+                       : sum;
     }
 }
 
@@ -657,6 +678,27 @@ static inline uint32_t blocks_for(uint64_t count)
 {
     return (uint32_t)((count + MIMO26_ROCM_THREADS - 1u) /
                       MIMO26_ROCM_THREADS);
+}
+
+/*
+ * Off by default: F32 is what the shipped reference executes and what every
+ * gate in this lane was qualified against. Flipping it is an experiment, not
+ * a tuning knob, so it is read once and reported rather than silently
+ * changing behaviour between runs.
+ */
+static int g_router_bf16 = -1;
+
+extern "C" uint32_t mimo26_rocm_router_bf16_enabled(void)
+{
+    if (g_router_bf16 < 0) {
+        const char *setting = getenv("MIMO26_ROUTER_BF16");
+        g_router_bf16 = (setting != NULL && setting[0] == '1') ? 1 : 0;
+        if (g_router_bf16) {
+            fprintf(stderr, "mimo26: router logits rounded to BF16 "
+                            "(moe_router_dtype experiment)\n");
+        }
+    }
+    return (uint32_t)g_router_bf16;
 }
 
 extern "C" {
@@ -990,10 +1032,12 @@ bool mimo26_rocm_ordered_gemv_f32(float *output, const void *weights,
     if (shared > 65536u) {
         return false;
     }
+    /* Never rounds: this entry point also serves lm_head under
+     * MIMO26_GPU_EXACT_HEAD, and the router experiment must not reach it. */
     hipLaunchKernelGGL(mimo26_ordered_gemv_f32_kernel, dim3(rows),
                        dim3(MIMO26_ROCM_THREADS), shared, (hipStream_t)stream,
                        output, (const uint16_t *)weights,
-                       (const uint16_t *)input, columns);
+                       (const uint16_t *)input, columns, 0u);
     return hipGetLastError() == hipSuccess;
 }
 
@@ -1015,7 +1059,7 @@ bool mimo26_rocm_ordered_gemv_f32_batch(float *output, const void *weights,
                        dim3(rows, count), dim3(MIMO26_ROCM_THREADS), shared,
                        (hipStream_t)stream, output,
                        (const uint16_t *)weights, (const uint16_t *)input,
-                       columns, rows);
+                       columns, rows, mimo26_rocm_router_bf16_enabled());
     return hipGetLastError() == hipSuccess;
 }
 
@@ -1023,8 +1067,22 @@ bool mimo26_rocm_router_logits_f32(float *logits, const void *weight,
                                    const void *hidden, uint32_t experts,
                                    uint32_t hidden_size, void *stream)
 {
-    return mimo26_rocm_ordered_gemv_f32(logits, weight, hidden, experts,
-                                        hidden_size, stream);
+    if (logits == NULL || weight == NULL || hidden == NULL ||
+        experts == 0u || hidden_size == 0u) {
+        return false;
+    }
+    const size_t shared = (size_t)hidden_size * sizeof(float);
+    if (shared > 65536u) {
+        return false;
+    }
+    /* Its own launch rather than a call through the generic entry point, so
+     * the moe_router_dtype experiment applies here and nowhere else. */
+    hipLaunchKernelGGL(mimo26_ordered_gemv_f32_kernel, dim3(experts),
+                       dim3(MIMO26_ROCM_THREADS), shared, (hipStream_t)stream,
+                       logits, (const uint16_t *)weight,
+                       (const uint16_t *)hidden, hidden_size,
+                       mimo26_rocm_router_bf16_enabled());
+    return hipGetLastError() == hipSuccess;
 }
 
 }  /* extern "C" */

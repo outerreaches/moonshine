@@ -328,11 +328,38 @@ passed while a position-dependent error sat underneath it.
 
 What is genuinely open:
 
-1. **`moe_router_dtype`** is `bfloat16` in the config while this lane
-   computes the router in F32, following the reference's executed
-   arithmetic rather than its declared dtype. Measured and marginal -- it
-   moves ranks by one or two places -- but settling it properly needs an
-   oracle this host cannot run, so it is recorded rather than guessed at.
+1. **`moe_router_dtype`** -- CLOSED 2026-09-23, by measurement rather than
+   by an oracle. The config declares `bfloat16`; the shipped reference
+   ignores the field and hard-codes `F.linear(x.float(), w.float())`; vLLM
+   honours it. This lane follows the reference and computes F32.
+
+   A paired A/B settles whether it matters. Both arms see the same 613-token
+   corpus, so difficulty cancels and only the router dtype varies. BF16
+   routing means the logit is rounded to BF16 before sigmoid and the
+   correction bias, which is the one observable difference; accumulation is
+   F32 either way.
+
+   | | F32 | BF16 |
+   | --- | ---: | ---: |
+   | mean log-prob | -1.6850 | -1.6941 |
+   | top-1 | 56.77% | 55.63% |
+   | top-10 | 91.03% | 91.52% |
+
+   Paired: 300 wins against 312 losses, mean delta -0.0090 nats, t = -1.20,
+   95% CI [-0.0238, +0.0057]. **The two differ by at most 0.024 nats, 1.4%
+   of the mean, with 95% confidence.** It is not a no-op -- 580 of 613
+   positions keep the same argmax and only one keeps an identical log-prob
+   -- it simply confers no benefit either way.
+
+   The sign flipped between corpora (+0.0134 nats at n=97, -0.0090 at
+   n=613), which is what noise looks like and which retroactively voids the
+   smaller run. Anyone tempted to read the n=97 numbers should not.
+
+   F32 stays, because it is what the reference executes and what every gate
+   here was qualified against. This does **not** establish which dtype
+   training used; it establishes that the choice is immaterial to quality at
+   the 0.024 nat level, which is what the open item actually needed to know.
+   `MIMO26_ROUTER_BF16=1` reproduces the experiment.
 2. **Long-context RoPE conditioning.** cos error reaches 8.1e-3 at position
    2^20, twice a BF16 ulp. That bounds qualified context on numerical
    grounds independently of anything measured here, and nothing above 8K

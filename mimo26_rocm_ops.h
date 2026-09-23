@@ -87,6 +87,10 @@ bool mimo26_rocm_ordered_gemv_f32_batch(float *output, const void *weights,
                                         uint32_t columns, uint32_t count,
                                         void *stream);
 
+/* Whether router logits are rounded to BF16, per MIMO26_ROUTER_BF16. Read
+ * once; reported when enabled so a run cannot be silently different. */
+uint32_t mimo26_rocm_router_bf16_enabled(void);
+
 /* The router's use of it, named for what it computes. */
 bool mimo26_rocm_router_logits_f32(float *logits, const void *weight,
                                    const void *hidden, uint32_t experts,

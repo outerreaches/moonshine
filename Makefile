@@ -1085,6 +1085,16 @@ tools/mimo26_context_gate: tools/mimo26_context_gate.o mimo26_gpu_worker.o \
 mimo26-context-gate: tools/mimo26_context_gate
 	./tools/mimo26_context_gate $(MIMO26_ROOT) --depths $(MIMO26_DEPTHS)
 
+tools/mimo26_gpu_eval.o: tools/mimo26_gpu_eval.cu mimo26_gpu_worker.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tools/mimo26_gpu_eval: tools/mimo26_gpu_eval.o mimo26_gpu_worker.o \
+		mimo26_rocm_layer.o mimo26_rocm_ops.o k3_rocm_ops.o \
+		mimo26_weights.o mimo26_kv.o mimo26_manifest.o \
+		mimo26_architecture.o mimo26_attention.o mimo26_ops.o \
+		mimo26_router.o glm53_fp8_oracle.o k3_safetensors.o k3_json.o \
+		k3_io_uring.o k3_expert_cache.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+
 # The whole GPU gate set, in dependency order.
 mimo26-gpu: mimo26-gpu-ops mimo26-gpu-attention mimo26-gpu-mxfp4 \
 	mimo26-gpu-layer mimo26-gpu-qualify
