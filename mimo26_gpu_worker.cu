@@ -170,8 +170,22 @@ struct mimo26_gpu_worker {
 
     uint64_t resident_bytes;
     uint64_t position;
+    bool retention_faulted; /* sticky until destruction, not cleared by reset */
+    bool execution_active;  /* single-owner reentrancy guard, not a mutex */
     mimo26_gpu_worker_stats stats;
     char     last_error[512];
+};
+
+struct retention_execution_guard {
+    mimo26_gpu_worker *worker;
+    bool completed = false;
+    explicit retention_execution_guard(mimo26_gpu_worker *w) : worker(w) {
+        worker->execution_active = true;
+    }
+    ~retention_execution_guard() {
+        if (!completed) worker->retention_faulted = true;
+        worker->execution_active = false;
+    }
 };
 
 static mimo26_gpu_worker_status fail(char *error, size_t size,
@@ -204,6 +218,7 @@ void mimo26_gpu_worker_config_defaults(mimo26_gpu_worker_config *config)
     /* 32 tokens per chunk: enough to amortize the 10.72 GB of BF16
      * projections roughly 32-fold while keeping the batch scratch modest. */
     config->prefill_chunk = 32u;
+    config->expert_lookahead = false;
 }
 
 uint64_t mimo26_gpu_worker_planned_bytes(
@@ -336,8 +351,9 @@ static void slot_views(expert_slot *slot)
  * written to its destination slot, so admitting the eighth expert can never
  * overwrite the first that the same token is about to consume.
  */
-static bool prepare_batch(void *context, uint32_t layer,
-                          const uint32_t *experts, size_t count)
+static bool prepare_batch_impl(void *context, uint32_t layer,
+                              const uint32_t *experts, size_t count,
+                              const uint32_t *next_use)
 {
     mimo26_gpu_worker *worker = (mimo26_gpu_worker *)context;
     uint16_t ids[MIMO26_ROUTER_TOP_K];
@@ -346,13 +362,18 @@ static bool prepare_batch(void *context, uint32_t layer,
         return false;
     }
     for (size_t k = 0; k < count; k++) {
+        if (experts[k] >= MIMO26_ROUTER_EXPERTS) return false;
         ids[k] = (uint16_t)experts[k];
     }
 
     char error[256];
-    if (!k3_expert_cache_plan(worker->cache, (uint16_t)layer, ids,
-                              (uint16_t)count, accesses, error,
-                              sizeof error)) {
+    const bool planned = next_use != NULL
+        ? k3_expert_cache_plan_next_use(worker->cache, (uint16_t)layer, ids,
+              (uint16_t)count, next_use, MIMO26_ROUTER_EXPERTS,
+              accesses, error, sizeof error)
+        : k3_expert_cache_plan(worker->cache, (uint16_t)layer, ids,
+              (uint16_t)count, accesses, error, sizeof error);
+    if (!planned) {
         fprintf(stderr, "mimo26 layer %u: expert plan failed: %s\n", layer,
                 error);
         return false;
@@ -485,6 +506,31 @@ static bool prepare_batch(void *context, uint32_t layer,
     }
     worker->resolved_count = count;
     return true;
+}
+
+static bool prepare_batch(void *context, uint32_t layer,
+                          const uint32_t *experts, size_t count)
+{
+    return prepare_batch_impl(context, layer, experts, count, NULL);
+}
+
+static bool prepare_batch_future(void *context, uint32_t layer,
+                                 const uint32_t *experts, size_t count,
+                                 const uint32_t *future, size_t future_tokens)
+{
+    const mimo26_gpu_worker *worker = (const mimo26_gpu_worker *)context;
+    if (count != MIMO26_ROUTER_TOP_K || future_tokens >= worker->prefill_chunk ||
+        (future_tokens && future == NULL)) return false;
+    uint32_t next_use[MIMO26_ROUTER_EXPERTS];
+    for (unsigned i = 0; i < MIMO26_ROUTER_EXPERTS; ++i) next_use[i] = UINT32_MAX;
+    for (size_t t = 0; t < future_tokens; ++t) {
+        for (size_t k = 0; k < MIMO26_ROUTER_TOP_K; ++k) {
+            uint32_t id = future[t * MIMO26_ROUTER_TOP_K + k];
+            if (id >= MIMO26_ROUTER_EXPERTS) return false;
+            if (next_use[id] == UINT32_MAX) next_use[id] = (uint32_t)t;
+        }
+    }
+    return prepare_batch_impl(context, layer, experts, count, next_use);
 }
 
 static bool provide_expert(void *context, uint32_t layer, uint32_t expert,
@@ -936,6 +982,8 @@ mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
                     "context capacity %zu reached",
                     worker->config.global_kv_capacity);
     }
+    if (worker->execution_active) return MIMO26_GPU_WORKER_INVALID_ARGUMENT;
+    retention_execution_guard retention_guard(worker);
     struct timespec started;
     clock_gettime(CLOCK_MONOTONIC, &started);
 
@@ -1154,6 +1202,7 @@ mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
         (double)(finished.tv_sec - started.tv_sec) +
         (double)(finished.tv_nsec - started.tv_nsec) / 1e9;
     worker->stats.tokens++;
+    retention_guard.completed = true;
     return MIMO26_GPU_WORKER_OK;
 }
 
@@ -1165,6 +1214,8 @@ mimo26_gpu_worker_status mimo26_gpu_worker_prefill(
     if (worker == NULL || tokens == NULL || logits == NULL) {
         return MIMO26_GPU_WORKER_INVALID_ARGUMENT;
     }
+    if (count == 0u || worker->execution_active)
+        return MIMO26_GPU_WORKER_INVALID_ARGUMENT;
     /* Without a configured chunk this is the decode loop, kept so the old
      * path stays reachable for comparison rather than deleted. */
     if (worker->prefill_chunk == 0u) {
@@ -1175,9 +1226,11 @@ mimo26_gpu_worker_status mimo26_gpu_worker_prefill(
             if (status != MIMO26_GPU_WORKER_OK) {
                 return status;
             }
-            if (progress != NULL && !progress(progress_context, i + 1u,
-                                              count)) {
-                break;
+            if (progress != NULL) {
+                retention_execution_guard callback_guard(worker);
+                const bool keep_going = progress(progress_context, i + 1u, count);
+                callback_guard.completed = true;
+                if (!keep_going) break;
             }
         }
         return MIMO26_GPU_WORKER_OK;
@@ -1194,6 +1247,8 @@ mimo26_gpu_worker_status mimo26_gpu_worker_prefill(
                     "prompt of %zu tokens exceeds the context of %zu",
                     count, worker->config.global_kv_capacity);
     }
+
+    retention_execution_guard retention_guard(worker);
 
     struct timespec started;
     clock_gettime(CLOCK_MONOTONIC, &started);
@@ -1282,6 +1337,8 @@ mimo26_gpu_worker_status mimo26_gpu_worker_prefill(
             context.prepare = w->is_moe ? prepare_batch : NULL;
             context.provider = w->is_moe ? provide_expert : NULL;
             context.provider_context = worker;
+            context.prepare_future = w->is_moe && worker->config.expert_lookahead
+                                         ? prepare_batch_future : NULL;
 
             const mimo26_rocm_layer_status status = mimo26_rocm_layer_prefill(
                 &context, &worker->scratch, worker->hidden,
@@ -1364,6 +1421,7 @@ mimo26_gpu_worker_status mimo26_gpu_worker_prefill(
          * transactional across all 48 layers, so stopping inside one would
          * leave the journal half-written. */
         if (progress != NULL && !progress(progress_context, done, count)) {
+            retention_guard.completed = true; /* committed chunk boundary */
             return fail(error, error_size, MIMO26_GPU_WORKER_OK,
                         "prefill stopped after %zu of %zu tokens", done,
                         count);
@@ -1403,6 +1461,7 @@ mimo26_gpu_worker_status mimo26_gpu_worker_prefill(
     worker->stats.last_decode_seconds =
         (double)(finished.tv_sec - started.tv_sec) +
         (double)(finished.tv_nsec - started.tv_nsec) / 1e9;
+    retention_guard.completed = true;
     return MIMO26_GPU_WORKER_OK;
 }
 
@@ -1444,6 +1503,22 @@ mimo26_gpu_worker_status mimo26_gpu_worker_rollback(mimo26_gpu_worker *worker,
         return MIMO26_GPU_WORKER_DECODE_FAILED;
     }
     worker->position -= count;
+    return MIMO26_GPU_WORKER_OK;
+}
+
+mimo26_gpu_worker_status mimo26_gpu_worker_reset_context(
+    mimo26_gpu_worker *worker, char *error, size_t error_size)
+{
+    if (worker == NULL) return MIMO26_GPU_WORKER_INVALID_ARGUMENT;
+    if (worker->execution_active || worker->retention_faulted ||
+        mimo26_kv_in_transaction(worker->kv) ||
+        k3_io_uring_outstanding(worker->ring) != 0u) {
+        return fail(error, error_size, MIMO26_GPU_WORKER_DECODE_FAILED,
+                    "weight retention requires a healthy idle worker; recreate after faults");
+    }
+    mimo26_kv_reset(worker->kv);
+    worker->position = 0u;
+    worker->resolved_count = 0u;
     return MIMO26_GPU_WORKER_OK;
 }
 

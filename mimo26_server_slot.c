@@ -65,7 +65,8 @@ void mimo26_slot_cancel(mimo26_slot *slot)
     }
 }
 
-mimo26_slot_step mimo26_slot_step_check(mimo26_slot *slot, double now_seconds)
+mimo26_slot_step mimo26_slot_control_check(const mimo26_slot *slot,
+                                           double now_seconds)
 {
     if (slot == NULL) {
         return MIMO26_SLOT_STOP_CANCELLED;
@@ -77,6 +78,13 @@ mimo26_slot_step mimo26_slot_step_check(mimo26_slot *slot, double now_seconds)
         now_seconds - slot->started_seconds >= slot->deadline_seconds) {
         return MIMO26_SLOT_STOP_DEADLINE;
     }
+    return MIMO26_SLOT_CONTINUE;
+}
+
+mimo26_slot_step mimo26_slot_step_check(mimo26_slot *slot, double now_seconds)
+{
+    const mimo26_slot_step control = mimo26_slot_control_check(slot, now_seconds);
+    if (control != MIMO26_SLOT_CONTINUE) return control;
     if (slot->max_tokens > 0u && slot->produced >= slot->max_tokens) {
         return MIMO26_SLOT_STOP_LENGTH;
     }
@@ -196,6 +204,7 @@ const char *mimo26_slot_finish_reason(mimo26_slot_step step)
     case MIMO26_SLOT_STOP_CANCELLED: return "cancelled";
     case MIMO26_SLOT_STOP_DEADLINE:  return "deadline";
     case MIMO26_SLOT_STOP_LENGTH:    return "length";
+    case MIMO26_SLOT_STOP_SHUTDOWN:  return "shutdown";
     }
     return "stop";
 }

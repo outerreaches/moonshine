@@ -75,6 +75,13 @@ typedef bool (*mimo26_rocm_expert_prepare)(void *context, uint32_t layer,
                                            const uint32_t *experts,
                                            size_t count);
 
+/* Optional prefill-only callback. Future routes are valid only during this
+ * synchronous call: [future_tokens][TOP_K], from this same chunk, excluding
+ * the current token. Never retain these pointers or use them asynchronously. */
+typedef bool (*mimo26_rocm_expert_prepare_future)(
+    void *context, uint32_t layer, const uint32_t *experts, size_t count,
+    const uint32_t *future, size_t future_tokens);
+
 typedef struct {
     uint32_t layer;
     bool     is_swa;
@@ -136,6 +143,7 @@ typedef struct {
     mimo26_rocm_expert_prepare       prepare;   /* optional */
     mimo26_rocm_expert_provider      provider;  /* required on MoE layers */
     void                            *provider_context;
+    mimo26_rocm_expert_prepare_future prepare_future; /* optional; zero-init */
 } mimo26_rocm_layer;
 
 /*

@@ -16,9 +16,11 @@
  * rather than queued behind a deadline the caller cannot see.
  *
  *   tools/mimo26_server ROOT [--port N] [--host H] [--slots N] [--context N]
+ *       [--prefill-chunk N] [--expert-lookahead on|off]
  */
 #include "k3_json.h"
 #include "mimo26_gpu_worker.h"
+#include "mimo26_server_options.h"
 #include "mimo26_server_slot.h"
 #include "mimo26_tokenizer.h"
 
@@ -58,13 +60,46 @@ static double now_seconds(void)
 
 /* ---- transport ---- */
 
-static bool send_all(int fd, const void *data, size_t size)
+#ifndef MIMO26_HTTP_TIMEOUT_SECONDS
+#define MIMO26_HTTP_TIMEOUT_SECONDS 5.0
+#endif
+
+/* Absolute deadline: drip-fed bytes cannot renew the request budget.
+ * Nonblocking calls also avoid a readiness race turning into an unbounded I/O. */
+static bool transport_wait(int fd, short events, double deadline)
+{
+    while (!g_shutdown) {
+        double remaining = deadline - now_seconds();
+        if (remaining <= 0) { errno = ETIMEDOUT; return false; }
+        int milliseconds = remaining < .1 ? (int)(remaining * 1000) + 1 : 100;
+        struct pollfd waiting{fd, events, 0};
+        int result = poll(&waiting, 1, milliseconds);
+        if (result < 0) { if (errno == EINTR) continue; return false; }
+        if (result && (waiting.revents & (events | POLLHUP | POLLERR))) return true;
+        if (result && (waiting.revents & POLLNVAL)) return false;
+    }
+    errno = ECANCELED;
+    return false;
+}
+
+static ssize_t transport_recv(int fd, void *data, size_t bytes, double deadline)
+{
+    while (transport_wait(fd, POLLIN, deadline)) {
+        ssize_t got = recv(fd, data, bytes, MSG_DONTWAIT);
+        if (got < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+        return got;
+    }
+    return -1;
+}
+
+static bool send_all_until(int fd, const void *data, size_t size, double deadline)
 {
     const char *cursor = (const char *)data;
     while (size > 0) {
-        const ssize_t written = send(fd, cursor, size, MSG_NOSIGNAL);
+        if (!transport_wait(fd, POLLOUT, deadline)) return false;
+        const ssize_t written = send(fd, cursor, size, MSG_NOSIGNAL | MSG_DONTWAIT);
         if (written <= 0) {
-            if (written < 0 && errno == EINTR) {
+            if (written < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
                 continue;
             }
             return false;
@@ -73,6 +108,11 @@ static bool send_all(int fd, const void *data, size_t size)
         size -= (size_t)written;
     }
     return true;
+}
+
+static bool send_all(int fd, const void *data, size_t size)
+{
+    return send_all_until(fd, data, size, now_seconds() + MIMO26_HTTP_TIMEOUT_SECONDS);
 }
 
 static bool send_response(int fd, int status, const char *reason,
@@ -115,7 +155,7 @@ static void send_error(int fd, int status, const char *reason,
         status >= 500 ? "server_error" : "invalid_request_error", code,
         escaped != NULL ? escaped : "\"request failed\"");
     free(escaped);
-    if (size > 0) {
+    if (size > 0 && (size_t)size < sizeof body) {
         send_response(fd, status, reason, "application/json", body,
                       (size_t)size);
     }
@@ -163,15 +203,15 @@ static bool read_request(int fd, http_request *request, char *error,
     }
     size_t used = 0;
     size_t header_end = 0;
+    const double deadline = now_seconds() + MIMO26_HTTP_TIMEOUT_SECONDS;
     /* Headers first, bounded. */
     while (header_end == 0) {
-        if (used >= MAX_REQUEST_BYTES) {
+        if (used >= 16384u) {
             free(buffer);
             snprintf(error, error_size, "request headers are too large");
             return false;
         }
-        const ssize_t got = recv(fd, buffer + used, MAX_REQUEST_BYTES - used,
-                                 0);
+        const ssize_t got = transport_recv(fd, buffer + used, 16384u - used, deadline);
         if (got <= 0) {
             free(buffer);
             snprintf(error, error_size, "connection closed while reading");
@@ -185,6 +225,22 @@ static bool read_request(int fd, http_request *request, char *error,
         }
     }
 
+    /* One strict HTTP/1.x message; no transfer coding or pipelining. */
+    auto reject = [&](const char *message) {
+        free(buffer); request_free(request);
+        snprintf(error, error_size, "%s", message); return false;
+    };
+    if (memchr(buffer, '\0', header_end)) return reject("NUL in headers");
+    const char *line_end = strstr(buffer, "\r\n");
+    if (!line_end) return reject("missing request line");
+    for (size_t i=0;i<header_end;++i) {
+        unsigned char c=(unsigned char)buffer[i];
+        if ((c<32 && c!='\r' && c!='\n' && c!='\t') || c==127)
+            return reject("control character in headers");
+        if ((c=='\n' && (!i || buffer[i-1]!='\r')) ||
+            (c=='\r' && (i+1>=header_end || buffer[i+1]!='\n')))
+            return reject("invalid header line ending");
+    }
     /* Request line. */
     const char *space = (const char *)memchr(buffer, ' ', header_end);
     if (space == NULL) {
@@ -205,15 +261,46 @@ static bool read_request(int fd, http_request *request, char *error,
         return false;
     }
     request->path = strndup(path_start, (size_t)(path_end - path_start));
+    if (!request->method || !request->path) return reject("out of memory");
+    if (space>=line_end || path_end>=line_end || space==buffer || path_end==path_start ||
+        path_start[0]!='/' || (size_t)(line_end-path_end)!=9 ||
+        (memcmp(path_end+1,"HTTP/1.1",8) && memcmp(path_end+1,"HTTP/1.0",8)))
+        return reject("invalid request line");
+    for (const char *p=buffer;p<space;++p) if (*p<'A' || *p>'Z') return reject("invalid method");
+    for (const char *p=path_start;p<path_end;++p) if ((unsigned char)*p<=32 || (unsigned char)*p==127) return reject("invalid target");
 
-    /* Content-Length, case-insensitively. */
     size_t content_length = 0;
-    for (size_t i = 0; i + 15u < header_end; i++) {
-        if (strncasecmp(buffer + i, "Content-Length:", 15u) == 0) {
-            content_length = (size_t)strtoul(buffer + i + 15u, NULL, 10);
-            break;
+    bool has_length=false;
+    for (const char *line=line_end+2; line<buffer+header_end-2;) {
+        const char *end=strstr(line,"\r\n");
+        if (!end || end==line || *line==' ' || *line=='\t') return reject("invalid header");
+        const char *colon=(const char*)memchr(line,':',end-line);
+        if (!colon || colon==line) return reject("invalid header name");
+        for (const char *p=line;p<colon;++p) {
+            unsigned char c=(unsigned char)*p;
+            if (!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||strchr("!#$%&'*+-.^_`|~",c)))
+                return reject("invalid header name");
         }
+        size_t name=colon-line;
+        if ((name==17 && !strncasecmp(line,"Transfer-Encoding",name)) ||
+            (name==6 && !strncasecmp(line,"Expect",name))) return reject("unsupported transfer coding or expectation");
+        if (name==14 && !strncasecmp(line,"Content-Length",name)) {
+            if (has_length) return reject("duplicate Content-Length");
+            has_length=true;
+            const char *p=colon+1,*last=end;
+            while(p<last && (*p==' '||*p=='\t'))++p;
+            while(last>p && (last[-1]==' '||last[-1]=='\t'))--last;
+            if(p==last)return reject("empty Content-Length");
+            for(;p<last;++p) {
+                if(*p<'0'||*p>'9'||content_length>(MAX_REQUEST_BYTES-(size_t)(*p-'0'))/10)
+                    return reject("invalid Content-Length");
+                content_length=content_length*10+(size_t)(*p-'0');
+            }
+        }
+        line=end+2;
     }
+    if (!strcmp(request->method,"POST") && !has_length) return reject("POST requires Content-Length");
+    if (used-header_end>content_length) return reject("unexpected bytes beyond request body");
     if (content_length > MAX_REQUEST_BYTES - header_end) {
         free(buffer);
         request_free(request);
@@ -222,8 +309,8 @@ static bool read_request(int fd, http_request *request, char *error,
         return false;
     }
     while (used - header_end < content_length) {
-        const ssize_t got = recv(fd, buffer + used,
-                                 MAX_REQUEST_BYTES - used, 0);
+        const ssize_t got = transport_recv(fd, buffer + used,
+                                 content_length - (used-header_end), deadline);
         if (got <= 0) {
             free(buffer);
             request_free(request);
@@ -278,6 +365,8 @@ typedef struct {
     mimo26_slot        slot;
     const char        *model_root;
     size_t             context_capacity;
+    uint16_t           prefill_chunk;
+    bool               expert_lookahead;
     uint64_t           served;
     /* Consecutive supervised restarts that did not lead to a clean request.
      * Bounded so a persistently broken worker stops thrashing and stays
@@ -291,9 +380,11 @@ typedef struct {
  * Supervised restart after a fault.
  *
  * Quarantine without a way out means one failed decode takes the server down
- * until someone notices, which is worse than the fault. Recovery resets the
- * worker -- dropping the KV history, which is the state that cannot be
- * trusted after a mid-step failure -- and only then clears the quarantine.
+ * until someone notices. A metadata reset is not recovery from failed I/O:
+ * registered reads may still be outstanding and copied payloads may disagree
+ * with the old cache mappings. Until supervised worker/process recreation is
+ * qualified, execution faults must stay quarantined. Only an already healthy
+ * worker (e.g. after a request-side failure) can take the cold-reset path.
  *
  * Bounded on purpose. If resets keep being followed by faults the problem is
  * not transient, and continuing to reset would hide a hardware or checkpoint
@@ -308,6 +399,12 @@ static bool attempt_recovery(server_runtime *runtime)
         return false;
     }
     runtime->recovery_attempts++;
+    char error[256]{};
+    if (mimo26_gpu_worker_reset_context(runtime->worker, error, sizeof error)
+            != MIMO26_GPU_WORKER_OK) {
+        fprintf(stderr, "mimo26: recovery refused; worker recreation required: %s\n", error);
+        return false;
+    }
     fprintf(stderr,
             "mimo26: supervised restart %u of %u after a worker fault\n",
             runtime->recovery_attempts, MAX_RECOVERY_ATTEMPTS);
@@ -330,7 +427,7 @@ static void send_health(int fd, server_runtime *runtime)
     const int size = snprintf(
         body, sizeof body,
         "{\"status\":\"%s\",\"ready\":%s,\"model\":\"%s\","
-        "\"phase\":\"%s\",\"context\":%zu,"
+        "\"phase\":\"%s\",\"context\":%zu,\"prefill_chunk\":%u,\"expert_lookahead\":%s,"
         "\"served\":%llu,\"tokens\":%llu,"
         "\"expert_hit_rate\":%.4f,\"resident_gib\":%.2f,"
         "\"admitted\":%llu,\"rejected_busy\":%llu,"
@@ -339,6 +436,7 @@ static void send_health(int fd, server_runtime *runtime)
         slot->phase == MIMO26_SLOT_QUARANTINED ? "degraded" : "ok",
         mimo26_slot_ready(slot) ? "true" : "false", MODEL_ID,
         mimo26_slot_phase_name(slot->phase), runtime->context_capacity,
+        (unsigned)runtime->prefill_chunk, runtime->expert_lookahead ? "true" : "false",
         (unsigned long long)runtime->served,
         (unsigned long long)stats.tokens,
         stats.expert_accesses
@@ -373,12 +471,16 @@ static void send_health(int fd, server_runtime *runtime)
  */
 static void refuse_backlog(server_runtime *runtime)
 {
-    for (;;) {
+    /* One bounded batch per safe boundary; a flood must not starve the
+     * requesting client, shutdown, deadlines or GPU progress. All busy writes
+     * share this budget, rather than getting five seconds each. */
+    const double deadline = now_seconds() + .1;
+    for (unsigned count = 0; count < 8 && !g_shutdown && now_seconds() < deadline; ++count) {
         struct pollfd waiting;
         waiting.fd = runtime->listener;
         waiting.events = POLLIN;
         waiting.revents = 0;
-        if (poll(&waiting, 1u, 0) <= 0) {
+        if (poll(&waiting, 1u, 0) <= 0 || !(waiting.revents & POLLIN)) {
             return;
         }
         const int client = accept(runtime->listener, NULL, NULL);
@@ -386,9 +488,16 @@ static void refuse_backlog(server_runtime *runtime)
             return;
         }
         mimo26_slot_count_rejection(&runtime->slot, MIMO26_SLOT_REJECT_BUSY);
-        send_error(client, 503, "Service Unavailable", "slot_busy",
-                   "another request is using the single execution slot; "
-                   "retry shortly");
+        static const char body[] = "{\"error\":{\"type\":\"server_error\","
+            "\"code\":\"slot_busy\",\"message\":\"another request is using the single "
+            "execution slot; retry shortly\"}}";
+        char wire[512];
+        int length = snprintf(wire, sizeof wire,
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n"
+            "Content-Length: %zu\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n%s",
+            sizeof body - 1, body);
+        if (length > 0 && (size_t)length < sizeof wire)
+            send_all_until(client, wire, (size_t)length, deadline);
         close(client);
     }
 }
@@ -757,14 +866,40 @@ static bool stream_chunk(response_state *state, const char *text,
     return size > 0 && send_all(state->fd, frame, (size_t)size);
 }
 
-/* Refuse queued work and honour a cancellation between prefill chunks. */
+/* Controls are checked only before work or at committed GPU boundaries.
+ * Shutdown drains the slot; it is not a client cancellation. */
+static mimo26_slot_step request_control(server_runtime *runtime, int client)
+{
+    if (g_shutdown) {
+        mimo26_slot_drain(&runtime->slot);
+        return MIMO26_SLOT_STOP_SHUTDOWN;
+    }
+    if (peer_disconnected(client)) mimo26_slot_cancel(&runtime->slot);
+    return mimo26_slot_control_check(&runtime->slot, now_seconds());
+}
+
+/* Preserve why a prefill returned without final logits, including when the
+ * final prompt chunk stopped before the output projection. */
+typedef struct {
+    server_runtime *runtime;
+    int client;
+    mimo26_slot_step stop;
+} prefill_request_context;
+
 static bool prefill_progress(void *context, size_t done, size_t total)
 {
-    server_runtime *runtime = (server_runtime *)context;
+    prefill_request_context *request = (prefill_request_context *)context;
+    server_runtime *runtime = request->runtime;
     (void)done;
     (void)total;
-    refuse_backlog(runtime);
-    return !runtime->slot.cancel_requested;
+    if (request->stop == MIMO26_SLOT_CONTINUE) {
+        request->stop = request_control(runtime, request->client);
+        if (request->stop == MIMO26_SLOT_CONTINUE) {
+            refuse_backlog(runtime);
+            request->stop = request_control(runtime, request->client);
+        }
+    }
+    return request->stop == MIMO26_SLOT_CONTINUE;
 }
 
 static void handle_chat(server_runtime *runtime, int fd,
@@ -869,18 +1004,22 @@ static void handle_chat(server_runtime *runtime, int fd,
      */
     bool failed = false;
     uint32_t next = 0;
-    if (mimo26_gpu_worker_prefill(runtime->worker, prompt.ids, prompt.count,
-                                  logits, prefill_progress, runtime, error,
+    prefill_request_context progress_context = {runtime, fd, request_control(runtime, fd)};
+    if (progress_context.stop != MIMO26_SLOT_CONTINUE) {
+        /* No work or logits to consume when already stopped before prefill. */
+    } else if (mimo26_gpu_worker_prefill(runtime->worker, prompt.ids, prompt.count,
+                                  logits, prefill_progress, &progress_context, error,
                                   sizeof error) != MIMO26_GPU_WORKER_OK) {
         failed = true;
-    } else {
+    } else if (progress_context.stop == MIMO26_SLOT_CONTINUE) {
+        /* A stopped prefill returns OK without producing final logits. */
         next = mimo26_gpu_worker_argmax(logits);
     }
     if (failed) {
         /* A decode failure means the worker's state is not trusted. */
         mimo26_slot_fault(&runtime->slot);
-        fprintf(stderr, "mimo26 request %llu: prefill failed: %s\n",
-                (unsigned long long)state.id[0], error);
+        fprintf(stderr, "mimo26 request %s: prefill failed: %s\n",
+                state.id, error);
         send_error(fd, 500, "Internal Server Error", "decode_failed",
                    "the worker faulted during prefill and is quarantined");
         free(logits);
@@ -889,7 +1028,8 @@ static void handle_chat(server_runtime *runtime, int fd,
         return;
     }
 
-    if (state.streaming && !stream_begin(&state)) {
+    if (state.streaming && !stream_begin(&state) && !g_shutdown &&
+        progress_context.stop == MIMO26_SLOT_CONTINUE) {
         mimo26_slot_cancel(&runtime->slot);
     }
 
@@ -913,12 +1053,14 @@ static void handle_chat(server_runtime *runtime, int fd,
     char *reasoning = NULL;
     size_t reasoning_used = 0, reasoning_capacity = 0;
     while (true) {
-        refuse_backlog(runtime);
-        if (peer_disconnected(fd)) {
-            mimo26_slot_cancel(&runtime->slot);
+        mimo26_slot_step step = progress_context.stop;
+        if (step == MIMO26_SLOT_CONTINUE) step = request_control(runtime, fd);
+        if (step == MIMO26_SLOT_CONTINUE) {
+            refuse_backlog(runtime);
+            step = request_control(runtime, fd);
         }
-        const mimo26_slot_step step =
-            mimo26_slot_step_check(&runtime->slot, now_seconds());
+        if (step == MIMO26_SLOT_CONTINUE)
+            step = mimo26_slot_step_check(&runtime->slot, now_seconds());
         if (step != MIMO26_SLOT_CONTINUE) {
             finish_reason = mimo26_slot_finish_reason(step);
             if (step == MIMO26_SLOT_STOP_DEADLINE) {
@@ -1050,6 +1192,10 @@ static void handle_chat(server_runtime *runtime, int fd,
                        "the worker faulted during generation and is "
                        "quarantined");
         }
+    } else if (!strcmp(finish_reason, "shutdown")) {
+        /* Transport observes the signal too; don't attempt a new response
+         * or publish a partially collected tool call during shutdown. */
+        mimo26_slot_finish(&runtime->slot);
     } else if (state.streaming) {
         stream_chunk(&state, NULL, 0, finish_reason);
         const char *done = "data: [DONE]\n\n";
@@ -1175,32 +1321,26 @@ int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
     setvbuf(stderr, NULL, _IOLBF, 0);
-    if (argc < 2) {
+    if (argc < 2 || (argc == 2 && strcmp(argv[1], "--help") == 0)) {
         fprintf(stderr,
                 "usage: %s ROOT [--port N] [--host H] [--slots N] "
-                "[--context N]\n", argv[0]);
-        return 2;
+                "[--context N] [--prefill-chunk 0..128] "
+                "[--expert-lookahead on|off]\n", argv[0]);
+        return argc < 2 ? 2 : 0;
     }
-    const char *root = argv[1];
     /* Local-only by default. Remote exposure needs an authentication and
      * network policy the plan requires before it is offered. */
-    const char *host = "127.0.0.1";
-    int port = 8640;
-    mimo26_gpu_worker_config config;
-    mimo26_gpu_worker_config_defaults(&config);
-
-    for (int i = 2; i + 1 < argc; i += 2) {
-        if (strcmp(argv[i], "--port") == 0) {
-            port = (int)strtol(argv[i + 1], NULL, 10);
-        } else if (strcmp(argv[i], "--host") == 0) {
-            host = argv[i + 1];
-        } else if (strcmp(argv[i], "--slots") == 0) {
-            config.expert_slots_per_layer =
-                (uint16_t)strtoul(argv[i + 1], NULL, 10);
-        } else if (strcmp(argv[i], "--context") == 0) {
-            config.global_kv_capacity = strtoul(argv[i + 1], NULL, 10);
-        }
+    mimo26_server_options options{};
+    mimo26_gpu_worker_config_defaults(&options.worker);
+    char option_error[256];
+    if (!mimo26_server_parse_options(argc, argv, &options, option_error, sizeof option_error)) {
+        fprintf(stderr, "configuration: %s\n", option_error);
+        return 2;
     }
+    const char *root = options.root;
+    const char *host = options.host;
+    const int port = options.port;
+    const mimo26_gpu_worker_config config = options.worker;
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
@@ -1210,6 +1350,8 @@ int main(int argc, char **argv)
     memset(&runtime, 0, sizeof runtime);
     runtime.model_root = root;
     runtime.context_capacity = config.global_kv_capacity;
+    runtime.prefill_chunk = config.prefill_chunk;
+    runtime.expert_lookahead = config.expert_lookahead;
     mimo26_slot_init(&runtime.slot);
 
     char error[512];
@@ -1218,9 +1360,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "tokenizer: %s\n", error);
         return 1;
     }
-    printf("loading the worker (%u expert slots per layer, context %zu)\n",
+    printf("loading the worker (%u expert slots per layer, context %zu, "
+           "prefill chunk %u, expert lookahead %s)\n",
            (unsigned)config.expert_slots_per_layer,
-           config.global_kv_capacity);
+           config.global_kv_capacity, (unsigned)config.prefill_chunk,
+           config.expert_lookahead ? "on" : "off");
     if (mimo26_gpu_worker_create(&runtime.worker, root, &config, error,
                                  sizeof error) != MIMO26_GPU_WORKER_OK) {
         fprintf(stderr, "worker: %s\n", error);
@@ -1233,7 +1377,7 @@ int main(int argc, char **argv)
                1073741824.0,
            stats.load_seconds);
 
-    const int listener = socket(AF_INET, SOCK_STREAM, 0);
+    const int listener = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     int reuse = 1;
     setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof reuse);
     struct sockaddr_in address;

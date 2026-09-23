@@ -64,6 +64,9 @@ typedef struct {
      * that scales with the chunk.
      */
     uint16_t prefill_chunk;
+    /* Experimental prefill-only next-use eviction. Default false; arithmetic,
+     * decode scheduling and payload format are unchanged. */
+    bool expert_lookahead;
 } mimo26_gpu_worker_config;
 
 void mimo26_gpu_worker_config_defaults(mimo26_gpu_worker_config *config);
@@ -148,6 +151,13 @@ mimo26_gpu_worker_status mimo26_gpu_worker_rollback(mimo26_gpu_worker *worker,
                                                     size_t count);
 uint64_t mimo26_gpu_worker_position(const mimo26_gpu_worker *worker);
 void mimo26_gpu_worker_reset(mimo26_gpu_worker *worker);
+/* Single-owner, between requests only. Clears logical KV/position/resolved
+ * pointers, preserving expert payloads, mappings and cumulative counters.
+ * Refuses during execution or after any execution fault; cold reset does not
+ * requalify a faulted worker for retention. Recreate it instead. No server
+ * caller uses this opt-in API until separate serving qualification passes. */
+mimo26_gpu_worker_status mimo26_gpu_worker_reset_context(
+    mimo26_gpu_worker *worker, char *error, size_t error_size);
 void mimo26_gpu_worker_get_stats(const mimo26_gpu_worker *worker,
                                  mimo26_gpu_worker_stats *stats);
 

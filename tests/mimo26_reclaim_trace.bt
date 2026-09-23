@@ -1,0 +1,28 @@
+// Read-only, bounded observation. No policy changes, page addresses or user stacks.
+// Run beside a single frozen `probe` process with the GPU otherwise idle.
+BEGIN {
+    @start = nsecs;
+    printf("TRACE_READY monotonic_ns=%llu\n", nsecs);
+}
+tracepoint:vmscan:mm_vmscan_wakeup_kswapd {
+    @wakeup[comm, args->nid, args->zid, args->order, args->gfp_flags] = count();
+    if (comm == "probe") {
+        @worker_wakeup_stack[args->order, args->zid, kstack(16)] = count();
+        printf("WORKER_WAKE ns=%llu pid=%d tid=%d zone=%d order=%d gfp=%lx\n",
+               nsecs, pid, tid, args->zid, args->order, args->gfp_flags);
+    }
+}
+tracepoint:vmscan:mm_vmscan_kswapd_wake {
+    @kswapd[args->nid, args->zid, args->order] = count();
+    printf("KSWAPD_WAKE ns=%llu zone=%d order=%d\n", nsecs, args->zid, args->order);
+}
+tracepoint:kmem:mm_page_alloc_extfrag /comm == "probe"/ {
+    @worker_extfrag[args->alloc_order, args->fallback_order,
+                    args->alloc_migratetype, args->fallback_migratetype,
+                    args->change_ownership] = count();
+}
+interval:s:90 { exit(); }
+END {
+    printf("TRACE_END monotonic_ns=%llu duration_ns=%llu\n", nsecs, nsecs-@start);
+    clear(@start);
+}

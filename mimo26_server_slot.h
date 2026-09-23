@@ -54,7 +54,8 @@ typedef enum {
     MIMO26_SLOT_CONTINUE = 0,   /* keep generating */
     MIMO26_SLOT_STOP_CANCELLED, /* client went away or asked to stop */
     MIMO26_SLOT_STOP_DEADLINE,  /* wall-clock budget exhausted */
-    MIMO26_SLOT_STOP_LENGTH     /* max_tokens reached */
+    MIMO26_SLOT_STOP_LENGTH,   /* max_tokens reached */
+    MIMO26_SLOT_STOP_SHUTDOWN  /* server stopped at a committed boundary */
 } mimo26_slot_step;
 
 typedef struct {
@@ -96,6 +97,11 @@ mimo26_slot_admission mimo26_slot_admit(mimo26_slot *slot, double now_seconds,
  * after the last token and before the response is written.
  */
 void mimo26_slot_cancel(mimo26_slot *slot);
+
+/* Non-mutating cancellation/deadline check, also safe between prefill chunks.
+ * Unlike step_check, this neither counts output tokens nor checks max_tokens. */
+mimo26_slot_step mimo26_slot_control_check(const mimo26_slot *slot,
+                                           double now_seconds);
 
 /*
  * Called between tokens. Returns what the generation loop should do and

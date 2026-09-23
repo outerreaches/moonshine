@@ -273,11 +273,13 @@ deliver.
 Decode 0.176 s/token at 144 expert slots. Prefill is layer-major and
 0.098 s/token, down from 0.422 when it was still the decode loop.
 
-The bottleneck is disk, not arithmetic. Profiling puts expert admission at
-94% of prefill and roughly three quarters of decode, while compute sits near
-the memory-bandwidth bound. The lever is residency: 48 slots leaves
-admission at 152 s for a 538-token prompt, 144 slots at a 92% hit rate
-brings it to 39 s.
+Expert admission is a major bottleneck, but its share depends on the workload.
+The 94% prefill figure belongs to the earlier 48-slot short run. At 144 slots,
+admission is 38.90 of 52.5 s for 538 prompt tokens and 544.47 of 887.9 s for
+8158 tokens. At the longer depth, other layer work accounts for about 38% of
+total prefill. Admission includes I/O and copy, not just physical SSD time.
+Residency remains a lever: the 48-slot run spends about 152 s in admission
+for the short prompt, versus 39 s with 144 slots.
 
 A correction worth carrying: the expert path is **not** the dominant traffic
 term. Counting a whole token, the BF16 projections are 10.72 GB against
@@ -300,6 +302,14 @@ would pass at any depth while proving nothing.
 
 8K prefill is 14.8 minutes. Qualified, not comfortable.
 
+The table's residency is the worker's logical resident-byte ledger, not total
+physical host/device use or evidence of no swapping. The 2026-09-22 follow-up
+probes at 144 and 96 slots were stopped by a zero-worker-swap guard during
+loading, before inference; those isolated runs do not invalidate the earlier
+context outputs, but a swap-free serving configuration needs separate
+qualification. See the vault's `MiMo Performance Takeover and Experiments
+2026-09-22` note and `Evidence/mimo26-takeover-20260922/` for pinned reports.
+
 ## Running it
 
     make test-mimo26-schema                        # no checkpoint needed
@@ -308,10 +318,117 @@ would pass at any depth while proving nothing.
     make mimo26-gpu MIMO26_ROOT=...                # five GPU gates
     make mimo26-eval MIMO26_ROOT=...               # frozen quality gate
     make mimo26-context-gate MIMO26_ROOT=... MIMO26_DEPTHS=512,2048
-    tools/mimo26_server ROOT --port 8640 --slots 144 --context 4096
+    tools/mimo26_server ROOT --port 8640 --slots 16 --context 1024
     make mimo26-soak MIMO26_SERVER_URL=http://127.0.0.1:8640
 
 The server is local-only by default and is not installed as a service.
+The conservative command above is not a claim of production qualification;
+the previous 144-slot example is withdrawn following the swap guard findings.
+
+### Opt-in context-reset candidate (2026-09-22)
+
+`mimo26_gpu_worker_reset_context` clears logical conversation state while
+retaining expert weights and cumulative cache telemetry. It refuses during
+execution, with outstanding I/O or a KV transaction, or after any execution
+fault. The fault marker survives cold reset; recreate a faulted worker before
+using retention. This is a single-owner API, not a thread-safety primitive.
+The server still calls the original cold reset; no retention deployment or
+live fault-recovery qualification is implied. The isolated GPU gate is
+`tests/run_mimo26_reset_gate.py`; see the vault note `MiMo Guarded Context Reset
+2026-09-22` for exact artifacts and acceptance scope.
+
+Follow-up I/O gates (`tests/run_mimo26_io_fault_gate.py`) pass injected submit,
+wait and short-read errors on real checkpoint reads. They confirm cold reset
+does not drain pending I/O. Candidate server recovery now checks the guarded
+reset before clearing quarantine: execution faults stay quarantined pending
+qualified worker/process recreation. The actual recovery function passes a
+CPU test with mocked worker calls and the real slot state machine. The new
+server binary is isolated, not deployed or live-fault qualified; normal request
+weight retention remains disabled.
+
+`tools/mimo26_supervise.py` is a separate opt-in, loopback-only process
+supervisor candidate. It has a lifetime replacement budget, waits for owned
+child exit, checks port/GPU availability, and never replays requests. Busy or
+timed-out health after initial readiness is not treated as a fault. Ten CPU
+tests and a persistent injected GPU-fault test pass (one replacement, then
+budget exhaustion); automatic transient GPU recovery through a successful
+request remains unqualified. No service installation or default change.
+
+Performance replay: chunk-local next-use eviction in
+`tests/analyze_mimo26_lookahead.py` predicts 30.38% fewer misses at 48 slots
+on the frozen 128-token trace. It uses only already-known chunk routes and
+protects the current selection. This is not implemented in the runtime or
+a latency result; multi-prompt replay and exact-output gates are next.
+
+Follow-up: `config.expert_lookahead` (default false) uses an optional synchronous
+chunk-route callback and additive `k3_expert_cache_plan_next_use` API. On three
+additional 128-token prompts at 48 slots/chunk32, loads fell 25.8–28.5%; all nine
+full prefill/decode logit vectors and all routes matched the frozen control.
+Rebuilt default-off also matched. Total prefill was 77.26 s on versus 100.97 s
+rebuilt-off (23.5% lower) in an ordered short-corpus comparison, not a randomized
+throughput benchmark. Active-policy I/O fault gates pass; no sampled swap.
+Not enabled in the server. See the vault's `MiMo Chunk Lookahead Runtime
+Experiment 2026-09-22` for evidence and longer-context promotion gates.
+
+The 2026-09-23 longer-prompt gate extends this to one synthetic 513-token
+mixed-domain input with a partial final chunk. Chunk32 off/on/on/off means
+138.52/98.16 s (29.1% less prefill time; 1.411x throughput). One chunk64
+off/on pair measures 137.84/91.13 s (33.9% less; 1.513x); it is not a repeated
+chunk64 benchmark. All six runs agree on input tokens, every selected expert,
+and complete prefill plus two decode vectors, including across chunk widths.
+Counter replays match; 971 one-second samples show zero worker swap. Kernel
+and runtime sources are unchanged from the prior candidate; only harnesses
+were extended. Startup/decode excluded, tracing included. Not a serving or
+general-quality qualification; no default/server binary change. See the vault's
+`MiMo Lookahead Longer-Prompt Qualification 2026-09-23` and its permanent
+evidence bundle. Chunk64 still needs broader/repeated tests and the opt-in
+server needs mixed-request/cancellation/recovery gates before promotion.
+
+### Opt-in server gate and memory caveat (2026-09-23)
+
+The source candidate now accepts explicit `--expert-lookahead on|off` and
+`--prefill-chunk 0..128`. Defaults remain off/chunk32/cache16/context2048.
+Lookahead plus chunk0 is rejected. CLI parsing now rejects unknown/duplicate
+options, missing values, invalid numeric ranges and junk/overflow; numeric
+context acceptance is not a qualification of that context. Health/startup
+output reports the selected lookahead/chunk configuration. The original
+`tools/mimo26_server` binary is unchanged; isolated candidates are not installed.
+
+Fixed a pre-existing prefill disconnect bug: the callback was not checking the
+requesting socket. It now cancels at the next committed chunk boundary, and
+the server does not read unproduced logits from a stopped prefill. The actual
+callback's CPU socket regression fails before and passes after the fix.
+`make test-mimo26-server-options` runs the strict parser and callback tests.
+
+At **cache16/chunk64/context1024**, the isolated loopback off/on mixed-request
+test passes JSON/SSE consistency, busy refusal, disconnect at token128/380,
+post-cancellation recovery and **56 full-vector validation checks**. An injected
+failure after a real I/O submission stays quarantined through five HTTP503
+refusals; explicit fresh-process recovery matches prior output. A clean binary
+also passes an HTTP smoke request. All five processes exit zero; 501 one-second
+worker-swap samples are zero. No automatic-restart, tool-loop, sustained-soak,
+hardware-fault, remote-security or upstream-quality qualification is implied.
+
+The broader **cache48** chunk64/129-token three-domain sweep completed
+off/on/on with exact outputs and ~30–33% fewer expert loads. Its last off run
+hit **197112 KiB worker swap at ~43 s** and was guard-terminated without a
+prompt result. This is an incomplete ABBA comparison, not a passing benchmark.
+Earlier 48-slot no-swap runs remain valid but do not establish a reliably
+swap-free budget. Keep the guard and investigate host/GTT/reclaim conditions;
+do not deploy cache48 from the logical ledger alone. See the vault's
+`MiMo Opt-In Server and Cancellation Gate 2026-09-23` for preserved evidence.
+
+A separate frozen-binary diagnostic with bounded kernel tracing identifies
+14 order-10 Normal-zone kswapd wakeups from the worker through
+`amdgpu_gem_object_create` → TTM → `ttm_pool_alloc_page`. At 4-KiB base pages
+these requests are 4 MiB. The run still passes exact outputs with 551 zero-swap
+worker samples; global swap-out/reclaim increases. Populated zones remain well
+above sampled high watermarks, no watermark boost is sampled, and current plus
+ancestor cgroups show unlimited high/max and no new high/max/OOM events.
+This identifies a reclaim caller, **not** the cause of the historical untraced
+worker swap, a safe capacity ceiling, or a fix. The earlier ABBA failure stands;
+no global memory/driver policy or allocator change. See
+`MiMo Reclaim Trace and MZG2 GPU Gate 2026-09-23` in the vault.
 
 ## Not done
 
@@ -324,20 +441,67 @@ but unused.
 **Expert-major grouping in prefill.** Deliberately deferred: it would cut
 GTT traffic, and GTT traffic is no longer the constraint. Admission is.
 
-**MZG2.** Measured rather than assumed: MiMo's experts compress to **88.7%**
-of packed, because MXFP4 is already near its entropy at 3.55-3.78 bits of 4
-and essentially all the gain comes from the scales, which are a sixteenth of
-the payload. That is ~11% fewer read bytes for a 133 GiB derived artifact
-and a decompression path in the hot loop, and decompressing into the cache
-costs more GPU traffic than the copy it replaces. Recommended against on
-those numbers.
+**MZG2-family research.** The earlier 88.7%-of-packed estimate is not a
+qualified codec or end-to-end speed result. A reproducible 2026-09-22 CPU
+screen trains on three experts and holds out six: byte-exact recovery saves
+9.54% at 16 KiB tiles and 10.15% at 64 KiB, including illustrative aligned
+expert headers/descriptors but excluding shared tables and the file index.
+Packed symbols and scales each supply roughly half of the pre-metadata saving.
+This candidate retains all 16 codes; the K3 MZG2 ABI's 15-code alphabet and
+negative-zero canonicalization cannot be reused unchanged. No full transcode,
+persistent MiMo format or admission-speed win is qualified yet.
+The 2026-09-23 standalone GPU prototype now exactly recovers all six held-outs
+at 16/32/64-KiB tiles and 1/4/8 waves per block (54 configurations), plus 12
+synthetic configurations and 1,722 selected header/descriptor/model/stream
+fault checks with intact output canaries. Publication refusal is a test-only
+seam, not worker-cache integration. The fused 32-bit checksum is not
+cryptographic authentication. One warm-memory screen favors 16-KiB tiles with
+4/8 waves (~0.38 ms decode+integrity versus ~0.158 ms raw copy per expert),
+despite slightly smaller storage savings; 64-KiB tiles take ~1.03–1.11 ms.
+All original packed bytes, including code 8, and all scale bytes are retained.
+Next gate: actual raw read+copy versus compressed read+decode+integrity with
+expert-compute contention, then real transactional cache-admission fault tests.
+Avoid recommending for or against deployment from size or warm timings alone.
+
+Direct-I/O follow-up (2026-09-23): two bounded six-expert runs, 540 trials
+(480 measured), exact recovered bytes and concurrent real-MLP outputs, zero
+sampled worker swap. QD6 rANS16 admission alone is ~10.65 ms versus raw original
+~11.55–11.76 ms, but combined MLP+admission is ~15.1–15.3 ms versus raw
+~13.8–14.0 ms. Compute contention reverses the isolated benefit; do not promote
+compression into serving. QD6 is limited by six held-outs, not worker QD8
+qualification. Raw/cache16 remains the production candidate. Next gates are
+automatic transient-fault replacement and sustained mixed-request soak on a
+pinned clean profile. Supervisor CLI supports explicit chunk/lookahead with
+12 CPU tests passing; no deployment or new live-recovery qualification.
+See vault `MiMo Direct-I-O Compression and Production Gates 2026-09-23`.
 
 **Authentication and remote exposure.** Local-only. The plan requires an
 explicit authentication and network policy first.
 
-**Supervised restart has never run against a real fault.** The path is
-exercised by the slot's unit tests; no decode has actually faulted on this
-hardware.
+**Supervised recovery now has bounded injected-I/O evidence.** Persistent
+fault budget exhaustion and automatic one-time submitted-read failure →
+quarantine → owned exit → replacement → exact new request pass. This is not
+hardware/driver-fault qualification. The clean cache16/chunk64/context1024/
+lookahead-on candidate also passes a478-second mixed soak (955 zero-swap
+samples, stable idle FD/RSS). The initial transport audit reproduced permissive
+HTTP framing and blocking reads without deadlines, addressed in the follow-up
+below. See `docs/mimo26-production-candidate.md` and vault
+`MiMo Automatic Recovery and Clean Soak 2026-09-23`.
+
+**Transport follow-up,2026-09-23:** the separately frozen hardened candidate
+now has strict restricted HTTP framing, absolute five-second header/body
+reads and per-write budgets. CPU ASan/UBSan,1,000 deterministic mutations
+and five live malformed/slow-client refusals pass. All56 captured complete
+logit vectors remain byte-identical to the prior candidate. Automatic one-time
+submitted-read fault replacement is requalified (196 zero-swap samples), as
+is a478.17-second clean mixed soak (955 zero-swap samples, idle FD range0,
+warmed endpoint RSS+8KiB); functional gates add508 zero-swap samples. No
+deployment or default change. New CPU audit reproduces that connected-peer
+prefill ignores shutdown and an expired generation deadline; this is the
+next runtime fix, not a passing control test. Slow cancellation (~73 seconds),
+longer outputs/tools/reasoning, production memory guard and release packaging
+remain open. See vault `MiMo HTTP Transport Hardening 2026-09-23` for exact
+candidate/report hashes and boundaries. Upstream quality stays deferred.
 
 **Sparky's shards are unhashed**, so copy equality with the local checkpoint
 is unproven at whole-file level.

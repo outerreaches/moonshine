@@ -14,6 +14,7 @@ core.*
 /tools/mimo26_gpu_bench
 /tools/mimo26_gpu_run
 /tools/mimo26_server
+/tests/mimo26_server_prefill_gate
 /tools/mimo26_context_gate
 mimo26-eval.jsonl
 mimo26-eval-tokens.txt
@@ -28,9 +29,12 @@ tests/test_mimo26_*
 !tests/test_mimo26_*.c
 !tests/test_mimo26_*.cu
 !tests/test_mimo26_*.py
+!tests/test_mimo26_rans_screen.cpp
 __pycache__/
 *.pyc
 .venv-sdk/
 moonshine-pre-public-history-*.bundle
 .DS_Store
 .*.swp
+tests/mimo26_transport_gate
+tests/mimo26_server_controls_gate

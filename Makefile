@@ -1,4 +1,5 @@
 CC ?= cc
+CXX ?= c++
 AR ?= ar
 HIPCC ?= $(shell command -v hipcc 2>/dev/null || echo /opt/rocm/bin/hipcc)
 ROCM_HOME ?= /opt/rocm
@@ -690,6 +691,51 @@ tests/test_k3_bundle: tests/test_k3_bundle.o k3_bundle.o k3_json.o
 tests/test_k3_expert_cache: tests/test_k3_expert_cache.o k3_expert_cache.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
+tests/test_mimo26_next_use_cache.o: tests/test_mimo26_next_use_cache.c k3_expert_cache.h
+tests/test_mimo26_next_use_cache: tests/test_mimo26_next_use_cache.o k3_expert_cache.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+.PHONY: test-mimo26-next-use-cache
+test-mimo26-next-use-cache: tests/test_mimo26_next_use_cache
+	./tests/test_mimo26_next_use_cache
+
+tests/test_mimo26_server_options: tests/test_mimo26_server_options.c \
+	mimo26_server_options.h mimo26_gpu_worker.h
+	$(CC) $(CFLAGS) -I. -o $@ $<
+
+# Compile the actual server callback into a CPU-only socket regression;
+# unused GPU entry points are discarded, not linked or initialized.
+tests/mimo26_server_prefill_gate: tests/mimo26_server_prefill_gate.cu \
+	mimo26_server.cu mimo26_server_options.h mimo26_server_slot.h \
+	mimo26_gpu_worker.h mimo26_tokenizer.h k3_json.h mimo26_server_slot.c k3_json.c
+	$(CXX) -O1 -g -ffunction-sections -fdata-sections -I. -x c++ \
+		tests/mimo26_server_prefill_gate.cu mimo26_server_slot.c k3_json.c \
+		-Wl,--gc-sections -o $@
+
+.PHONY: test-mimo26-server-options
+test-mimo26-server-options: tests/test_mimo26_server_options tests/mimo26_server_prefill_gate
+	./tests/test_mimo26_server_options
+	./tests/mimo26_server_prefill_gate
+
+tests/mimo26_transport_gate: tests/mimo26_transport_gate.cu mimo26_server.cu \
+	mimo26_server_options.h mimo26_server_slot.h mimo26_gpu_worker.h mimo26_tokenizer.h k3_json.h
+	$(CXX) -O1 -g -ffunction-sections -fdata-sections -pthread -I. -x c++ $< \
+		-Wl,--gc-sections -o $@
+
+.PHONY: test-mimo26-transport
+test-mimo26-transport: tests/mimo26_transport_gate
+	./tests/mimo26_transport_gate
+
+tests/mimo26_server_controls_gate: tests/mimo26_server_controls_gate.cu mimo26_server.cu \
+	mimo26_server_options.h mimo26_server_slot.h mimo26_gpu_worker.h mimo26_tokenizer.h k3_json.h \
+	mimo26_server_slot.c k3_json.c
+	$(CXX) -O1 -g -ffunction-sections -fdata-sections -I. -x c++ $< \
+		mimo26_server_slot.c k3_json.c -Wl,--gc-sections -o $@
+
+.PHONY: test-mimo26-server-controls
+test-mimo26-server-controls: tests/mimo26_server_controls_gate
+	./tests/mimo26_server_controls_gate
+
 tests/test_k3_json: tests/test_k3_json.o k3_json.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
@@ -980,7 +1026,7 @@ mimo26-gpu-layer: tests/test_mimo26_gpu_layer
 
 mimo26_gpu_worker.o: mimo26_gpu_worker.cu mimo26_gpu_worker.h \
 	mimo26_rocm_layer.h mimo26_rocm_ops.h k3_rocm_ops.h mimo26_weights.h \
-	mimo26_kv.h mimo26_manifest.h mimo26_attention.h
+	mimo26_kv.h mimo26_manifest.h mimo26_attention.h k3_expert_cache.h
 	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
 tools/mimo26_gpu_run.o: tools/mimo26_gpu_run.cu mimo26_gpu_worker.h
 	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
@@ -1008,7 +1054,7 @@ mimo26-gpu-qualify: tests/test_mimo26_gpu_qualify
 	MIMO26_ROOT=$(MIMO26_ROOT) ./tests/test_mimo26_gpu_qualify
 
 mimo26_server.o: mimo26_server.cu mimo26_gpu_worker.h \
-	mimo26_server_slot.h mimo26_tokenizer.h k3_json.h
+	mimo26_server_slot.h mimo26_server_options.h mimo26_tokenizer.h k3_json.h
 	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
 tools/mimo26_server: mimo26_server.o mimo26_server_slot.o \
 		mimo26_tokenizer.o mimo26_gpu_worker.o mimo26_rocm_layer.o \

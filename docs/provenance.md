@@ -121,6 +121,32 @@ GPU ANS design. The Moonshine implementation is independent K3-specific
 HIP/wave32 code; no DietGPU source is vendored or copied into this repository.
 DietGPU is design prior art, not a runtime dependency.
 
+The 2026-09-22 MiMo CPU size screen (`tests/mimo26_rans_screen.cpp`) adapts
+the maintainer's local GLM byte-rANS screen and Moonshine's MZG2 symbol
+ordering. The same rANS/DietGPU design acknowledgement applies; no new external
+codec source was imported. Unlike the K3 format, this research candidate
+preserves all 16 MXFP4 codes, including both zero encodings, and all 256 scale
+bytes. It is not a K3 MZG2-compatible file format or a qualified GPU decoder.
+Input bytes come from the local official `XiaomiMiMo/MiMo-V2.6-Flash-RL`
+checkpoint at `3b38d063180c3e4aed9691fdc735f3d10b266ee4`; model-derived
+artifacts remain separate from this repository's source license.
+
+The 2026-09-23 test-only MiMo GPU gate (`tests/mimo26_rans_gpu_gate.cu`)
+reuses that CPU histogram normalization/ordering and adapts the local
+`k3_mzg2.cu` wave decoder and 32-bit checksum, extending tables to the full
+16/256 alphabets. The DietGPU acknowledgement above continues to apply.
+No new external codec implementation was imported. Its in-memory prototype
+metadata is not a persistent MiMo format and does not modify the K3 ABI.
+
+The same day's read-only memory investigation consulted Linux's
+[VM sysctl documentation](https://kernel.org/doc/html/v6.10/admin-guide/sysctl/vm.html),
+[GFP allocation documentation](https://cdn.kernel.org/doc/html/latest/core-api/mm-api.html),
+and upstream v7.0 [TTM pool source](https://github.com/torvalds/linux/blob/v7.0/drivers/gpu/drm/ttm/ttm_pool.c)
+to interpret actual host tracepoints. No kernel code was copied or settings
+changed; upstream source is context, not a claim that Ubuntu's running kernel
+is byte-identical. The local trace, not source inspection alone, identifies
+the observed order-10 AMDGPU/TTM reclaim callers.
+
 The standalone MZG2 bundle is a derived representation of the pinned official
 Kimi K3 weights: non-routed language tensors retain exact source BF16/F32 bytes,
 while routed experts retain the qualified MZG2 canonicalization of redundant

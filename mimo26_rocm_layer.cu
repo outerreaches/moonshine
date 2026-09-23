@@ -301,9 +301,14 @@ static mimo26_rocm_layer_status run_mlp_moe_batch(
     for (uint32_t token = 0; token < count && status == MIMO26_ROCM_LAYER_OK;
          token++) {
         const uint32_t *selection = ids + (size_t)token * MIMO26_ROCM_TOP_K;
-        if (layer->prepare != NULL &&
-            !layer->prepare(layer->provider_context, w->layer, selection,
-                            MIMO26_ROCM_TOP_K)) {
+        const bool prepared = layer->prepare_future != NULL
+            ? layer->prepare_future(layer->provider_context, w->layer, selection,
+                                    MIMO26_ROCM_TOP_K,
+                                    ids + (size_t)(token + 1) * MIMO26_ROCM_TOP_K,
+                                    count - token - 1)
+            : (layer->prepare == NULL || layer->prepare(
+                   layer->provider_context, w->layer, selection, MIMO26_ROCM_TOP_K));
+        if (!prepared) {
             status = MIMO26_ROCM_LAYER_EXPERT_UNAVAILABLE;
             break;
         }
