@@ -108,6 +108,34 @@ exactly.** Four numbers discriminated three readings that all produced
 plausible-looking weights, and two of those readings came from reading source
 code rather than bytes.
 
+### Confirmed by upstream llama.cpp (2026-09-23)
+
+An independent implementation now agrees. `conversion/mimo.py::_tp_aware_qkv_dequant`
+in llama.cpp derives the same layout in its own words — ranks stacked as
+`[Q_per | K_per | V_per]`, `ceil(rows_per_rank/128)` scale block-rows per rank,
+"phantom rows not in the weight", and the same per-row scale index
+`rank * blocks_per_rank + (rr // bs)`. It detects `tp` from the scale row count
+where this lane pins 4 and fails closed; the two agree at tp=4.
+
+The global layers make this a real check rather than two implementations
+sharing a convention: a non-sharded reading needs 106 block-rows and the
+checkpoint ships 108, which only per-rank `ceil` at tp=4 produces. The SWA
+layers do **not** discriminate — 3712 rows per rank is an exact multiple of
+128, so tp=1, 2 and 4 all yield 116 and the scale data cannot distinguish the
+row permutation. Agreement on SWA row order rests on the convention plus the
+behavioural evidence from bring-up, not on arithmetic.
+
+That closes the deferred upstream-oracle item for the QKV layout. It does not
+close output-quality comparison, which is a separate question; see the vault
+note `MiMo V2.6 Flash RL Two-Node GGUF Bring-up 2026-09-23` for the two-node
+GGUF recipe that makes a greedy-agreement test possible.
+
+Every hyper-parameter the converter writes into the GGUF also matches what this
+lane derived: per-layer KV head counts `[4,8,8,8,8,4,…]`, the non-periodic
+sliding-window pattern, K 192 / V 128, `rope.dimension_count` 64, dual RoPE
+theta 1e7 global / 1e4 SWA, `attention.value_scale` 0.707, 256 experts top-8,
+expert FFN 2048, RMS eps 1e-6. Nothing had to be corrected.
+
 **`quantization_config.ignored_layers` names 49 modules.** All 48 text
 `o_proj` plus `model.decoder.self_attn.o_proj`, which has no counterpart in
 `configuration_mimo_v2.py`. Surface it rather than skipping it.
@@ -510,3 +538,11 @@ is unproven at whole-file level.
 the router in F32, following the executed reference. It was measured and is
 not the bug -- it moves ranks marginally -- but deciding it properly needs
 an oracle this host cannot run.
+
+**An oracle this host *can* run now exists.** Upstream llama.cpp converts and
+serves this checkpoint, and it fits across Beelink + Sparky (163 GiB resident,
+~11.7 tok/s, correct output). vLLM 0.30.0 still cannot load it at any legal TP
+size, but that no longer matters. The QKV layout question is settled above;
+what remains unmeasured is token-level agreement between the two
+implementations, which the two-node recipe makes cheap. See the vault note
+`MiMo V2.6 Flash RL Two-Node GGUF Bring-up 2026-09-23`.
