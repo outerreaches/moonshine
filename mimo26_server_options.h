@@ -13,6 +13,17 @@ typedef struct {
     const char *host;
     uint16_t port;
     bool retain_experts;
+    /*
+     * Minimum host memory, in GiB, that must remain available after the
+     * profile's predicted resident footprint. 0 disables the check.
+     *
+     * A profile's memory cost is a property of the flags, not something to
+     * discover by swapping: 128 slots leaves ~35 GiB free on this part and
+     * 160 leaves ~16, and host page-outs have been observed even at 128.
+     * Refusing at startup makes the larger profile a deliberate choice --
+     * pass a lower floor explicitly -- rather than an accident found later.
+     */
+    uint32_t min_headroom_gib;
     mimo26_gpu_worker_config worker;
 } mimo26_server_options;
 
@@ -41,6 +52,7 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
     mimo26_server_options parsed = *options;
     parsed.root = argv[1]; parsed.host = "127.0.0.1"; parsed.port = 8640;
     parsed.retain_experts = false;
+    parsed.min_headroom_gib = 20u;
     unsigned seen = 0;
     for (int i = 2; i < argc; i += 2) {
         const char *key = argv[i];
@@ -52,6 +64,7 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
         else if (!strcmp(key,"--prefill-chunk")) bit=16;
         else if (!strcmp(key,"--expert-lookahead")) bit=32;
         else if (!strcmp(key,"--retain-experts")) bit=64;
+        else if (!strcmp(key,"--min-headroom-gib")) bit=128;
         if (!bit || (seen & bit) || i + 1 >= argc) {
             snprintf(error,error_size,"unknown, duplicate or missing-value option: %s",key); return false;
         }
@@ -74,6 +87,7 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
             if (bit == 2) high=65535;
             if (bit == 4) {low=8;high=256;}
             if (bit == 16) {low=0;high=128;}
+            if (bit == 128) {low=0;high=512;}
             if (!mimo26_server_decimal(value,low,high,&number)) {
                 snprintf(error,error_size,"invalid integer for %s",key); return false;
             }
@@ -81,6 +95,7 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
             if (bit == 4) parsed.worker.expert_slots_per_layer=(uint16_t)number;
             if (bit == 8) parsed.worker.global_kv_capacity=(size_t)number;
             if (bit == 16) parsed.worker.prefill_chunk=(uint16_t)number;
+            if (bit == 128) parsed.min_headroom_gib=(uint32_t)number;
         }
     }
     if (parsed.worker.expert_lookahead && !parsed.worker.prefill_chunk) {

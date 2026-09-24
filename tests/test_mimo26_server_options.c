@@ -50,6 +50,23 @@ int main(void) {
     CHECK(false,"root","--slots","7"); CHECK(false,"root","--slots","257");
     CHECK(false,"root","--prefill-chunk","129");
     CHECK(false,"root","--context","0"); CHECK(false,"root","--context","4294967296");
+    /* The memory guard's floor: 0 disables it, and it must reject junk the
+     * same way every other numeric option does. Default is 20 GiB. */
+    CHECK(true,"root","--min-headroom-gib","0");
+    CHECK(true,"root","--min-headroom-gib","512");
+    CHECK(false,"root","--min-headroom-gib","513");
+    CHECK(false,"root","--min-headroom-gib","-1");
+    CHECK(false,"root","--min-headroom-gib","20junk");
+    CHECK(false,"root","--min-headroom-gib","");
+    {
+        mimo26_server_options got; char error[256];
+        const char *argv[]={"x","root"};
+        assert(mimo26_server_parse_options(2,(char**)argv,&got,error,sizeof error));
+        assert(got.min_headroom_gib==20u);
+        const char *argv2[]={"x","root","--min-headroom-gib","12"};
+        assert(mimo26_server_parse_options(4,(char**)argv2,&got,error,sizeof error));
+        assert(got.min_headroom_gib==12u);
+    }
     const char *bad[]={"-1","+1"," 16","16 ","16junk","","18446744073709551616","999999999999999999999999999"};
     for(unsigned i=0;i<sizeof bad/sizeof *bad;++i) { CHECK(false,"root","--slots",(char*)bad[i]); }
     printf("PASS %u strict server option cases; no default mutation on failure\n",checks);

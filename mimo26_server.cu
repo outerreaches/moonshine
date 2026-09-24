@@ -17,6 +17,7 @@
  *
  *   tools/mimo26_server ROOT [--port N] [--host H] [--slots N] [--context N]
  *       [--prefill-chunk N] [--expert-lookahead on|off]
+ *       [--retain-experts on|off] [--min-headroom-gib N]
  */
 #include "k3_json.h"
 #include "mimo26_gpu_worker.h"
@@ -160,6 +161,29 @@ static void send_error(int fd, int status, const char *reason,
         send_response(fd, status, reason, "application/json", body,
                       (size_t)size);
     }
+}
+
+/*
+ * MemAvailable, the kernel's own estimate of what can be allocated without
+ * swapping. Returns 0 if it cannot be read, which disables the guard rather
+ * than refusing on a host whose /proc layout is unexpected.
+ */
+static uint64_t host_available_bytes(void)
+{
+    FILE *meminfo = fopen("/proc/meminfo", "re");
+    if (meminfo == NULL) {
+        return 0u;
+    }
+    char line[256];
+    uint64_t kib = 0u;
+    while (fgets(line, sizeof line, meminfo) != NULL) {
+        if (strncmp(line, "MemAvailable:", 13) == 0) {
+            kib = strtoull(line + 13, NULL, 10);
+            break;
+        }
+    }
+    fclose(meminfo);
+    return kib * 1024ull;
 }
 
 /* Has the peer gone away? Checked between tokens so a vanished client stops
@@ -1424,7 +1448,8 @@ int main(int argc, char **argv)
         fprintf(stderr,
                 "usage: %s ROOT [--port N] [--host H] [--slots N] "
                 "[--context N] [--prefill-chunk 0..128] "
-                "[--expert-lookahead on|off] [--retain-experts on|off]\n", argv[0]);
+                "[--expert-lookahead on|off] [--retain-experts on|off] "
+                "[--min-headroom-gib N]\n", argv[0]);
         return argc < 2 ? 2 : 0;
     }
     /* Local-only by default. Remote exposure needs an authentication and
@@ -1466,6 +1491,34 @@ int main(int argc, char **argv)
            (unsigned)config.expert_slots_per_layer,
            config.global_kv_capacity, (unsigned)config.prefill_chunk,
            config.expert_lookahead ? "on" : "off");
+    /*
+     * Profile-aware memory guard, before anything is allocated.
+     *
+     * The footprint is predictable from the flags, so refuse a profile this
+     * host cannot hold rather than discovering it by swapping -- a swapping
+     * host invalidates every measurement taken on it, and the failure
+     * otherwise arrives deep inside a multi-minute load.
+     */
+    {
+        const uint64_t planned = mimo26_gpu_worker_planned_bytes(&config);
+        const uint64_t available = host_available_bytes();
+        const uint64_t floor_bytes =
+            (uint64_t)options.min_headroom_gib * 1073741824ull;
+        printf("profile needs ~%.1f GiB, host has %.1f GiB available, "
+               "floor %u GiB\n", (double)planned / 1073741824.0,
+               (double)available / 1073741824.0, options.min_headroom_gib);
+        if (floor_bytes > 0u && available > 0u &&
+            (planned + floor_bytes) > available) {
+            fprintf(stderr,
+                    "configuration: this profile needs about %.1f GiB and "
+                    "would leave less than the %u GiB floor of the %.1f GiB "
+                    "available. Reduce --slots or --context, or pass a lower "
+                    "--min-headroom-gib deliberately.\n",
+                    (double)planned / 1073741824.0, options.min_headroom_gib,
+                    (double)available / 1073741824.0);
+            return 1;
+        }
+    }
     if (mimo26_gpu_worker_create(&runtime.worker, root, &config, error,
                                  sizeof error) != MIMO26_GPU_WORKER_OK) {
         fprintf(stderr, "worker: %s\n", error);
