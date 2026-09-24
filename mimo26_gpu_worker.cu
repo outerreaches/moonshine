@@ -467,6 +467,15 @@ static bool prepare_batch_impl(void *context, uint32_t layer,
 
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
+    /*
+     * Timed separately from the read. Both accumulators used to receive the
+     * same `elapsed`, so the profiler always printed "copy 0.000" and the
+     * split between waiting on the drive and copying staging into the slot
+     * was never actually measured -- which matters, because on an APU the
+     * slot is system RAM too, so that copy is RAM-to-RAM of the entire read
+     * volume.
+     */
+    double copy_seconds = 0.0;
     size_t done = 0u;
     while (done < pending_count) {
         const size_t batch =
@@ -514,9 +523,15 @@ static bool prepare_batch_impl(void *context, uint32_t layer,
                 const uint8_t *source =
                     (const uint8_t *)worker->staging_host[index] +
                     entry->offset_in_buffer;
-                if (hipMemcpy(worker->slots[entry->slot].block, source,
-                              PACKED_EXPERT_BYTES,
-                              hipMemcpyHostToDevice) != hipSuccess) {
+                struct timespec c0, c1;
+                clock_gettime(CLOCK_MONOTONIC, &c0);
+                const hipError_t copied =
+                    hipMemcpy(worker->slots[entry->slot].block, source,
+                              PACKED_EXPERT_BYTES, hipMemcpyHostToDevice);
+                clock_gettime(CLOCK_MONOTONIC, &c1);
+                copy_seconds += (double)(c1.tv_sec - c0.tv_sec) +
+                                (double)(c1.tv_nsec - c0.tv_nsec) / 1e9;
+                if (copied != hipSuccess) {
                     fprintf(stderr, "mimo26 layer %u: staging copy failed "
                             "for expert %u\n", layer, entry->expert);
                     k3_expert_cache_abort(worker->cache, (uint16_t)layer);
@@ -531,7 +546,8 @@ static bool prepare_batch_impl(void *context, uint32_t layer,
     clock_gettime(CLOCK_MONOTONIC, &t1);
     const double elapsed = (double)(t1.tv_sec - t0.tv_sec) +
                            (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
-    g_read_seconds += elapsed;
+    g_read_seconds += elapsed - copy_seconds;
+    g_copy_seconds += copy_seconds;
     g_upload_seconds += elapsed;
 
     /* Every admission has landed, so hits and admissions can be published
@@ -1324,6 +1340,8 @@ mimo26_gpu_worker_status mimo26_gpu_worker_prefill(
     double kv_seconds = 0.0, rope_seconds = 0.0, layer_seconds = 0.0;
     double readback_seconds = 0.0, commit_seconds = 0.0;
     g_upload_seconds = 0.0;
+    g_read_seconds = 0.0;
+    g_copy_seconds = 0.0;
     struct timespec mark, mark2;
     #define PTICK() do { if (profile) { hipDeviceSynchronize(); \
         clock_gettime(CLOCK_MONOTONIC, &mark); } } while (0)
@@ -1497,9 +1515,10 @@ mimo26_gpu_worker_status mimo26_gpu_worker_prefill(
     }
     if (profile) {
         fprintf(stderr, "    prefill %zu tokens: layers %.2f s (admission "
-                        "%.2f), kv-up %.2f, rope %.2f, readback %.2f, "
-                        "commit %.2f\n",
-                count, layer_seconds, g_upload_seconds, kv_seconds,
+                        "%.2f [read %.2f, copy %.2f], compute %.2f), "
+                        "kv-up %.2f, rope %.2f, readback %.2f, commit %.2f\n",
+                count, layer_seconds, g_upload_seconds, g_read_seconds,
+                g_copy_seconds, layer_seconds - g_upload_seconds, kv_seconds,
                 rope_seconds, readback_seconds, commit_seconds);
     }
     #undef PTICK
