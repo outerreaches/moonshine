@@ -665,7 +665,18 @@ static void scratch_resize(mimo26_gpu_worker *worker, size_t chunk,
         {&s->mlp_gate,   chunk * 16384u * sizeof(uint16_t)},
         {&s->mlp_up,     chunk * 16384u * sizeof(uint16_t)},
         {&s->mlp_active, chunk * 16384u * sizeof(uint16_t)},
-        {&s->expert_out, HIDDEN * sizeof(uint16_t)},
+        /*
+         * Widened for expert-major execution: one batched down-projection
+         * writes a row per token in the expert's group, not a single row.
+         * The three buffers after it cost ~10 MiB at chunk 128 and exist only
+         * on a prefill scratch.
+         */
+        {&s->expert_out, chunk * HIDDEN * sizeof(uint16_t)},
+        {&s->expert_gathered, chunk * HIDDEN * sizeof(uint16_t)},
+        {(void **)&s->expert_stash,
+         chunk * MIMO26_ROUTER_TOP_K * HIDDEN * sizeof(uint16_t)},
+        {(void **)&s->expert_row_ids,
+         2u * chunk * MIMO26_ROUTER_TOP_K * sizeof(uint32_t)},
     };
     for (size_t i = 0; i < sizeof widened / sizeof widened[0]; i++) {
         hipFree(*widened[i].slot);

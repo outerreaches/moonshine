@@ -243,6 +243,170 @@ mimo26_rocm_layer_status mimo26_rocm_layer_decode(
  * two candidate causes. The cache still amortizes across the chunk, since a
  * second token wanting the same expert finds it resident.
  */
+/*
+ * Expert-major MoE execution for a prefill chunk -- the optimization the
+ * comment above defers.
+ *
+ * Measured on real captured routes, a 128-token chunk touches only ~135 of a
+ * layer's 256 experts, so each is shared by about 7.6 tokens and grouping by
+ * expert reads 13.2% of the weight traffic. That traffic is the dominant
+ * prefill cost: 12.19 TB for a 2425-token prompt at ~171 GB/s, most of this
+ * part's bandwidth.
+ *
+ * MEASURED RESULT (2026-09-24): not worth enabling as implemented. Output is
+ * bit-exact, and the GTT weight traffic really does fall, but admitting one
+ * expert at a time defeats the cache's LRU -- each expert is touched once per
+ * chunk in ascending id order, so nothing is resident when the next chunk
+ * wants it. Against a matched baseline, warm, retention on, chunk 128:
+ *
+ *   slots 128:  184.6 s -> 215.3 s  (17% SLOWER), uploads 121k -> 203k
+ *   slots 160:  151.7 s -> 144.2 s  (5% faster),  uploads  54k -> 213k
+ *
+ * Hit rate falls 0.956 -> 0.369 at 128 slots and 0.980 -> 0.669 at 160. The
+ * saved GTT traffic is spent again on SSD reads. Fixing it needs the cache to
+ * treat a chunk's distinct experts as one working set -- pin the group, or
+ * walk experts in current-residency order -- not a change to this execution
+ * path. Kept, gated off, because it is proven equal and the grouping itself
+ * works; enabling it without that fix is a regression.
+ *
+ * Arithmetic is preserved exactly, which is the entire constraint:
+ *   - k3_rocm_mxfp4_gemm_bf16 keeps each row's GEMV reduction order
+ *     independently, and tests/test_k3_prefill_ops.cu asserts by memcmp that
+ *     it is bit-identical to the per-vector loop.
+ *   - Per-projection BF16 rounding is unchanged; the same kernels run.
+ *   - Expert outputs are stashed by (token, rank) and accumulated afterwards
+ *     in the original rank order, so the F32 accumulation sequence does not
+ *     depend on the order experts happened to execute in. Accumulating as
+ *     results arrive would reorder that sum and is not an equivalent
+ *     shortcut.
+ */
+static bool expert_major_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        cached = getenv("MIMO26_EXPERT_MAJOR") != NULL ? 1 : 0;
+    }
+    return cached == 1;
+}
+
+static mimo26_rocm_layer_status run_mlp_moe_expert_major(
+    const mimo26_rocm_layer *layer, mimo26_rocm_layer_scratch *scratch,
+    uint32_t count, const uint32_t *ids, const float *weights,
+    hipStream_t stream)
+{
+    const mimo26_rocm_layer_weights *w = layer->weights;
+    const size_t selections = (size_t)count * MIMO26_ROCM_TOP_K;
+
+    /* Counting sort of (token, rank) pairs by expert id. */
+    uint32_t offset[MIMO26_ROCM_EXPERTS + 1u];
+    memset(offset, 0, sizeof offset);
+    for (size_t i = 0; i < selections; i++) {
+        if (ids[i] >= MIMO26_ROCM_EXPERTS) {
+            return MIMO26_ROCM_LAYER_EXPERT_UNAVAILABLE;
+        }
+        offset[ids[i] + 1u]++;
+    }
+    for (uint32_t e = 0; e < MIMO26_ROCM_EXPERTS; e++) {
+        offset[e + 1u] += offset[e];
+    }
+    uint32_t *host_ids = (uint32_t *)malloc(2u * selections * sizeof *host_ids);
+    if (host_ids == NULL) {
+        return MIMO26_ROCM_LAYER_LAUNCH_FAILED;
+    }
+    uint32_t *gather = host_ids;               /* row of scratch->normed */
+    uint32_t *scatter = host_ids + selections; /* row of scratch->expert_stash */
+    {
+        uint32_t cursor[MIMO26_ROCM_EXPERTS];
+        memcpy(cursor, offset, sizeof cursor);
+        for (size_t i = 0; i < selections; i++) {
+            const uint32_t slot = cursor[ids[i]]++;
+            gather[slot] = (uint32_t)(i / MIMO26_ROCM_TOP_K);
+            scatter[slot] = (uint32_t)i;
+        }
+    }
+    const bool uploaded =
+        hipMemcpyAsync(scratch->expert_row_ids, host_ids,
+                       2u * selections * sizeof *host_ids,
+                       hipMemcpyHostToDevice, stream) == hipSuccess;
+    free(host_ids);
+    if (!uploaded) {
+        return MIMO26_ROCM_LAYER_LAUNCH_FAILED;
+    }
+    const uint32_t *device_gather = scratch->expert_row_ids;
+    const uint32_t *device_scatter = scratch->expert_row_ids + selections;
+
+    for (uint32_t e = 0; e < MIMO26_ROCM_EXPERTS; e++) {
+        const uint32_t members = offset[e + 1u] - offset[e];
+        if (members == 0u) {
+            continue;
+        }
+        /*
+         * One expert admitted at a time. A chunk can select more distinct
+         * experts than the cache has slots, so admitting the whole chunk up
+         * front would thrash; admitting immediately before its group runs
+         * also means each expert is read at most once per chunk.
+         */
+        if (layer->prepare != NULL &&
+            !layer->prepare(layer->provider_context, w->layer, &e, 1u)) {
+            return MIMO26_ROCM_LAYER_EXPERT_UNAVAILABLE;
+        }
+        mimo26_rocm_expert expert;
+        memset(&expert, 0, sizeof expert);
+        if (!layer->provider(layer->provider_context, w->layer, e, &expert) ||
+            expert.gate_packed == NULL || expert.down_scales == NULL) {
+            return MIMO26_ROCM_LAYER_EXPERT_UNAVAILABLE;
+        }
+        if (!k3_rocm_gather_rows_bf16(scratch->expert_gathered, scratch->normed,
+                                      device_gather + offset[e], members,
+                                      MIMO26_ROCM_HIDDEN, stream) ||
+            !k3_rocm_mxfp4_gemm_bf16(scratch->mlp_gate, expert.gate_packed,
+                                     expert.gate_scales,
+                                     scratch->expert_gathered, members,
+                                     EXPERT_INTERMEDIATE, MIMO26_ROCM_HIDDEN,
+                                     stream) ||
+            !k3_rocm_mxfp4_gemm_bf16(scratch->mlp_up, expert.up_packed,
+                                     expert.up_scales,
+                                     scratch->expert_gathered, members,
+                                     EXPERT_INTERMEDIATE, MIMO26_ROCM_HIDDEN,
+                                     stream) ||
+            !mimo26_rocm_silu_product_bf16(
+                scratch->mlp_active, scratch->mlp_gate, scratch->mlp_up,
+                (uint64_t)members * EXPERT_INTERMEDIATE, stream) ||
+            !k3_rocm_mxfp4_gemm_bf16(scratch->expert_out, expert.down_packed,
+                                     expert.down_scales, scratch->mlp_active,
+                                     members, MIMO26_ROCM_HIDDEN,
+                                     EXPERT_INTERMEDIATE, stream) ||
+            !k3_rocm_scatter_rows_bf16(scratch->expert_stash,
+                                       scratch->expert_out,
+                                       device_scatter + offset[e], members,
+                                       MIMO26_ROCM_HIDDEN, stream)) {
+            return MIMO26_ROCM_LAYER_LAUNCH_FAILED;
+        }
+    }
+
+    if (!mimo26_rocm_zero_f32(scratch->accumulator,
+                              (uint64_t)count * MIMO26_ROCM_HIDDEN, stream)) {
+        return MIMO26_ROCM_LAYER_LAUNCH_FAILED;
+    }
+    /* Original (token, rank) order, so the F32 sum matches per-token exactly. */
+    for (uint32_t token = 0; token < count; token++) {
+        float *accumulator_row =
+            scratch->accumulator + (size_t)token * MIMO26_ROCM_HIDDEN;
+        for (uint32_t k = 0; k < MIMO26_ROCM_TOP_K; k++) {
+            const size_t index = (size_t)token * MIMO26_ROCM_TOP_K + k;
+            const uint16_t *stashed = (const uint16_t *)scratch->expert_stash +
+                                      index * MIMO26_ROCM_HIDDEN;
+            if (!mimo26_rocm_expert_accumulate_f32(accumulator_row, stashed,
+                                                   weights[index],
+                                                   MIMO26_ROCM_HIDDEN,
+                                                   stream)) {
+                return MIMO26_ROCM_LAYER_LAUNCH_FAILED;
+            }
+        }
+    }
+    return MIMO26_ROCM_LAYER_OK;
+}
+
 static mimo26_rocm_layer_status run_mlp_moe_batch(
     const mimo26_rocm_layer *layer, mimo26_rocm_layer_scratch *scratch,
     uint32_t count, uint32_t *routes, hipStream_t stream)
@@ -290,6 +454,29 @@ static mimo26_rocm_layer_status run_mlp_moe_batch(
     }
     if (routes != NULL) {
         memcpy(routes, ids, selection_bytes * sizeof *ids);
+    }
+
+    /*
+     * Opt-in until its equality gate has run on this host. The scratch check
+     * is not belt-and-braces: a decode-only scratch has no stash to hold the
+     * per-rank outputs, and silently falling back is better than overrunning.
+     */
+    if (expert_major_enabled() && count > 1u &&
+        scratch->expert_stash != NULL && scratch->expert_gathered != NULL &&
+        scratch->expert_row_ids != NULL) {
+        const mimo26_rocm_layer_status grouped =
+            run_mlp_moe_expert_major(layer, scratch, count, ids, weights,
+                                     stream);
+        free(ids);
+        free(weights);
+        if (grouped != MIMO26_ROCM_LAYER_OK) {
+            return grouped;
+        }
+        return mimo26_rocm_expert_finalize_bf16(
+                   scratch->projected, scratch->accumulator,
+                   (uint64_t)count * MIMO26_ROCM_HIDDEN, stream)
+                   ? MIMO26_ROCM_LAYER_OK
+                   : MIMO26_ROCM_LAYER_LAUNCH_FAILED;
     }
 
     mimo26_rocm_layer_status status = MIMO26_ROCM_LAYER_OK;

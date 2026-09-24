@@ -119,7 +119,23 @@ typedef struct {
     void  *mlp_gate;      /* [16384] bf16, dense layer needs the full width */
     void  *mlp_up;        /* [16384] bf16 */
     void  *mlp_active;    /* [16384] bf16 */
-    void  *expert_out;    /* [4096] bf16 */
+    void  *expert_out;    /* [batch][4096] bf16; [4096] when decode-only */
+    /*
+     * Expert-major prefill scratch. Per-token execution re-reads a selected
+     * expert's 12.75 MiB from GTT once for every token that picks it;
+     * grouping a chunk's tokens by expert reads it once. Measured reuse at
+     * chunk 128 is 7.56x, because a chunk touches only ~135 of 256 experts
+     * per layer rather than all of them.
+     *
+     * gathered holds one expert's token rows contiguously for the batched
+     * GEMM. stash holds every (token, rank) expert output, so the final F32
+     * accumulation still runs in the original top-k rank order rather than in
+     * whatever order the experts happened to be executed. All three are NULL
+     * on a decode-only scratch.
+     */
+    void     *expert_gathered;  /* [batch][4096] bf16 */
+    void     *expert_stash;     /* [batch][8][4096] bf16 */
+    uint32_t *expert_row_ids;   /* [2 * batch * 8] u32: gather ids, then scatter */
     float *accumulator;   /* [4096] f32 */
     float *router_logits; /* [256] f32 */
     float *router_weights;/* [8] f32 */
