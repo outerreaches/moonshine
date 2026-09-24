@@ -539,10 +539,37 @@ the router in F32, following the executed reference. It was measured and is
 not the bug -- it moves ranks marginally -- but deciding it properly needs
 an oracle this host cannot run.
 
-**An oracle this host *can* run now exists.** Upstream llama.cpp converts and
-serves this checkpoint, and it fits across Beelink + Sparky (163 GiB resident,
-~11.7 tok/s, correct output). vLLM 0.30.0 still cannot load it at any legal TP
-size, but that no longer matters. The QKV layout question is settled above;
-what remains unmeasured is token-level agreement between the two
-implementations, which the two-node recipe makes cheap. See the vault note
+**An oracle this host *can* run now exists, and it has been run.** Upstream
+llama.cpp converts and serves this checkpoint across Beelink + Sparky (163 GiB
+resident, ~11.7 tok/s). vLLM 0.30.0 still cannot load it at any legal TP size,
+but that no longer matters. With both servers resident at once:
+
+| comparison | completions identical | tokens before first divergence |
+|---|---|---|
+| this lane vs itself | **8/8** | **293/293 (100.0%)** |
+| llama.cpp vs itself | 6/8 | 253/290 (87.2%) |
+| this lane vs llama.cpp | 5/8 | 237/290 (81.7%) |
+
+Cross-implementation agreement sits just under llama.cpp's own reproducibility
+ceiling, and two of the three divergences are on the two prompts where
+llama.cpp fails to reproduce itself. The one divergence reproducible on both
+sides is a 0.038-margin near-tie (`' named'` 0.4306 vs `'.'` 0.3927) with both
+continuations correct — the regime
+[the precision contract](mimo26-precision-contract.md) already describes. No
+residual signal suggesting a defect in this lane, which is additionally
+bit-reproducible run to run where llama.cpp is not.
+
+Scope is 8 prompts and 290 compared tokens at ≤48 tokens each, so this is a
+real check and not a certification: long context, tool loops and sustained
+generation are untested against upstream. The control matters — an uncontrolled
+first pass produced "27% agreement" that turned out to be measuring llama.cpp's
+default sampler, since it falls back to the GGUF's `temp 1.0 / top_p 0.95`
+unless pinned. See the vault note
 `MiMo V2.6 Flash RL Two-Node GGUF Bring-up 2026-09-23`.
+
+**Open, found by this comparison:** the server accepts
+`chat_template_kwargs: {"enable_thinking": false}` with a 200 and does not
+honour it — the rendered prompt is unchanged and the model still emits
+reasoning. That is inconsistent with the server's own stance on `temperature`,
+which it refuses outright with `option_unsupported` rather than accept and
+ignore. Either honour it or refuse it.
