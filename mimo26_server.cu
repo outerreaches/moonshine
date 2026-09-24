@@ -639,10 +639,77 @@ static bool parse_chat(const char *body, size_t body_size,
     if (stream >= 0) {
         k3_json_bool(&document, stream, &request->stream);
     }
+    bool thinking_seen = false;
     const int32_t thinking = k3_json_object_get(&document, root,
                                                 "enable_thinking");
     if (thinking >= 0) {
-        k3_json_bool(&document, thinking, &request->enable_thinking);
+        if (!k3_json_bool(&document, thinking, &request->enable_thinking)) {
+            REFUSE("invalid_request", "enable_thinking must be a boolean");
+        }
+        thinking_seen = true;
+    }
+    {
+        /*
+         * OpenAI-compatible clients -- llama.cpp and vLLM among them -- pass
+         * template arguments nested under chat_template_kwargs rather than at
+         * the top level, so dropping the object silently meant a caller who
+         * asked for no thinking got thinking and nothing said so. The
+         * capability was already there; only this spelling of it was missing.
+         *
+         * Keys inside are refused exactly as unsupported top-level options
+         * are, because the same reasoning applies one level down: a misspelled
+         * kwarg that quietly changes nothing is the failure this server
+         * refuses 'temperature' to avoid.
+         */
+        const int32_t kwargs = k3_json_object_get(&document, root,
+                                                  "chat_template_kwargs");
+        if (kwargs >= 0) {
+            if (document.tokens[kwargs].type != K3_JSON_OBJECT) {
+                REFUSE("invalid_request",
+                       "chat_template_kwargs must be an object");
+            }
+            for (int32_t key = document.tokens[kwargs].first_child; key >= 0;) {
+                const int32_t value = document.tokens[key].next_sibling;
+                if (value < 0) {
+                    REFUSE("invalid_request",
+                           "malformed chat_template_kwargs");
+                }
+                if (!k3_json_string_equal(&document, key, "enable_thinking")) {
+                    /* Name the key back to the caller: the whole point is
+                     * that a typo must not read as success. */
+                    char name[64];
+                    const size_t start = document.tokens[key].start;
+                    size_t length = document.tokens[key].end - start;
+                    if (length >= sizeof name) {
+                        length = sizeof name - 1u;
+                    }
+                    memcpy(name, body + start, length);
+                    name[length] = '\0';
+                    char message[224];
+                    snprintf(message, sizeof message,
+                             "chat_template_kwargs '%s' is not supported; this "
+                             "template accepts only 'enable_thinking'", name);
+                    REFUSE("option_unsupported", message);
+                }
+                bool nested = true;
+                if (!k3_json_bool(&document, value, &nested)) {
+                    REFUSE("invalid_request",
+                           "chat_template_kwargs.enable_thinking must be a "
+                           "boolean");
+                }
+                /* Both spellings given and disagreeing: refuse rather than
+                 * pick, since either choice silently discards what the caller
+                 * asked for in the other field. */
+                if (thinking_seen && nested != request->enable_thinking) {
+                    REFUSE("invalid_request",
+                           "enable_thinking and "
+                           "chat_template_kwargs.enable_thinking disagree");
+                }
+                request->enable_thinking = nested;
+                thinking_seen = true;
+                key = document.tokens[value].next_sibling;
+            }
+        }
     }
     const int32_t max_tokens = k3_json_object_get(&document, root,
                                                   "max_tokens");

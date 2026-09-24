@@ -717,6 +717,19 @@ test-mimo26-server-options: tests/test_mimo26_server_options tests/mimo26_server
 	./tests/test_mimo26_server_options
 	./tests/mimo26_server_prefill_gate
 
+# Request-option parsing only: the real parse_chat, no GPU and no sockets.
+# Unlike the transport gate, this one actually calls parse_chat, so the JSON
+# reader cannot be discarded by --gc-sections and has to be linked in.
+tests/mimo26_chat_options_gate: tests/mimo26_chat_options_gate.cu mimo26_server.cu \
+	mimo26_server_options.h mimo26_server_slot.h mimo26_gpu_worker.h mimo26_tokenizer.h \
+	k3_json.h k3_json.c
+	$(CXX) -O1 -g -ffunction-sections -fdata-sections -pthread -I. -x c++ $< \
+		-x c k3_json.c -Wl,--gc-sections -o $@
+
+.PHONY: test-mimo26-chat-options
+test-mimo26-chat-options: tests/mimo26_chat_options_gate
+	./tests/mimo26_chat_options_gate
+
 tests/mimo26_transport_gate: tests/mimo26_transport_gate.cu mimo26_server.cu \
 	mimo26_server_options.h mimo26_server_slot.h mimo26_gpu_worker.h mimo26_tokenizer.h k3_json.h
 	$(CXX) -O1 -g -ffunction-sections -fdata-sections -pthread -I. -x c++ $< \
