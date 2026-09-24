@@ -253,21 +253,22 @@ mimo26_rocm_layer_status mimo26_rocm_layer_decode(
  * prefill cost: 12.19 TB for a 2425-token prompt at ~171 GB/s, most of this
  * part's bandwidth.
  *
- * MEASURED RESULT (2026-09-24): not worth enabling as implemented. Output is
- * bit-exact, and the GTT weight traffic really does fall, but admitting one
- * expert at a time defeats the cache's LRU -- each expert is touched once per
- * chunk in ascending id order, so nothing is resident when the next chunk
- * wants it. Against a matched baseline, warm, retention on, chunk 128:
+ * MEASURED (2026-09-24), warm, retention on, chunk 128, matched baselines:
  *
- *   slots 128:  184.6 s -> 215.3 s  (17% SLOWER), uploads 121k -> 203k
- *   slots 160:  151.7 s -> 144.2 s  (5% faster),  uploads  54k -> 213k
+ *   slots 128  baseline            184.6 s   uploads 121,441   hit 0.956
+ *   slots 128  grouped, by id      215.3 s   uploads 202,907   hit 0.369
+ *   slots 128  grouped, by size    193.4 s   uploads 173,344   hit 0.461
+ *   slots 160  baseline            151.7 s   uploads  53,745   hit 0.980
+ *   slots 160  grouped, by id      144.2 s   uploads 213,010   hit 0.669
+ *   slots 160  grouped, by size    124.6 s   uploads  80,652   hit 0.749
  *
- * Hit rate falls 0.956 -> 0.369 at 128 slots and 0.980 -> 0.669 at 160. The
- * saved GTT traffic is spent again on SSD reads. Fixing it needs the cache to
- * treat a chunk's distinct experts as one working set -- pin the group, or
- * walk experts in current-residency order -- not a change to this execution
- * path. Kept, gated off, because it is proven equal and the grouping itself
- * works; enabling it without that fix is a regression.
+ * So it pays, but only with the group ordering below AND enough slots to hold
+ * a chunk's working set: 18% faster than the matched 160-slot baseline and 33%
+ * faster than the current 128-slot default. At 128 slots it is still a loss,
+ * because a chunk touches ~135 distinct experts and they cannot all stay
+ * resident. Left gated off until the profile-aware memory guards make 160
+ * slots safe; a full-vector equality gate at the production profile is also
+ * required before promotion, beyond the chunk-32 memcmp already done.
  *
  * Arithmetic is preserved exactly, which is the entire constraint:
  *   - k3_rocm_mxfp4_gemm_bf16 keeps each row's GEMV reduction order
@@ -335,11 +336,45 @@ static mimo26_rocm_layer_status run_mlp_moe_expert_major(
     const uint32_t *device_gather = scratch->expert_row_ids;
     const uint32_t *device_scatter = scratch->expert_row_ids + selections;
 
+    /*
+     * Visit groups least-shared first.
+     *
+     * Expert-major gives every expert exactly one access per chunk, which
+     * erases the access-frequency signal LRU depends on: in the per-token
+     * path a heavily-shared expert is touched by many tokens and stays hot,
+     * whereas here a 30-token expert and a 1-token expert look identical to
+     * the policy. Ascending id order then evicts almost everything between
+     * chunks, which cost 4x more SSD reads than the per-token path.
+     *
+     * Ordering by group size restores the signal through recency instead:
+     * the most-shared experts are touched last, so they are the ones LRU
+     * keeps for the next chunk, which is also the ones most likely to be
+     * wanted. Execution order does not affect the result -- outputs are
+     * stashed per (token, rank) and accumulated separately.
+     */
+    uint32_t order[MIMO26_ROCM_EXPERTS];
+    uint32_t order_count = 0u;
     for (uint32_t e = 0; e < MIMO26_ROCM_EXPERTS; e++) {
-        const uint32_t members = offset[e + 1u] - offset[e];
-        if (members == 0u) {
-            continue;
+        if (offset[e + 1u] > offset[e]) {
+            order[order_count++] = e;
         }
+    }
+    for (uint32_t i = 1u; i < order_count; i++) {
+        const uint32_t key = order[i];
+        const uint32_t key_members = offset[key + 1u] - offset[key];
+        uint32_t j = i;
+        while (j > 0u &&
+               (offset[order[j - 1u] + 1u] - offset[order[j - 1u]]) >
+                   key_members) {
+            order[j] = order[j - 1u];
+            j--;
+        }
+        order[j] = key;
+    }
+
+    for (uint32_t index = 0; index < order_count; index++) {
+        const uint32_t e = order[index];
+        const uint32_t members = offset[e + 1u] - offset[e];
         /*
          * One expert admitted at a time. A chunk can select more distinct
          * experts than the cache has slots, so admitting the whole chunk up
