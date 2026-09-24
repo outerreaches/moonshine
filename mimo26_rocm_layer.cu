@@ -253,7 +253,38 @@ mimo26_rocm_layer_status mimo26_rocm_layer_decode(
  * prefill cost: 12.19 TB for a 2425-token prompt at ~171 GB/s, most of this
  * part's bandwidth.
  *
- * MEASURED (2026-09-24), warm, retention on, chunk 128, matched baselines:
+ * DO NOT ENABLE. A full-vector gate at the production profile found this path
+ * produces DIFFERENT results once a prefill exceeds ~192 tokens, and the
+ * timings below were taken on a 2425-token prompt -- far past that -- so they
+ * do not describe an equivalent computation and are retracted.
+ *
+ * What the gate established (tests/mimo26_expert_major_gate.cu, slots 160,
+ * context 4096, full float32 logit vectors compared by memcmp):
+ *
+ *   100 tokens, one partial chunk      IDENTICAL
+ *   128 tokens, one full chunk         IDENTICAL
+ *   129 tokens (2nd chunk falls back)  IDENTICAL
+ *   160, 192 tokens                    IDENTICAL
+ *   224 tokens                         DIFFER
+ *   256 tokens, chunk 64               DIFFER
+ *   224 tokens in a single 224 chunk   DIFFER
+ *
+ * So it tracks total tokens, not chunk structure, and a single oversized chunk
+ * reproduces it -- the fault is within-chunk, at the point where the distinct
+ * experts a chunk touches exceed the cache's slots and eviction begins.
+ *
+ * Ruled out: the baseline is deterministic at these lengths (base vs base is
+ * identical); k3_rocm_mxfp4_gemm_bf16 matches the GEMV loop bit-exactly at
+ * widths 1..128 on production shapes (tests/test_k3_mxfp4_gemm_widths.cu, the
+ * existing assertion only covered 2); gather/scatter directions are correct;
+ * and a hipDeviceSynchronize after every group does NOT fix it, so it is a
+ * logic error rather than a race.
+ *
+ * Note why the earlier chunk-32 memcmp passed and this did not: a prefill only
+ * returns the LAST token's logits, so a chunk whose earlier tokens are wrong
+ * still compares equal until a later chunk attends to the KV they wrote.
+ *
+ * Superseded timings, kept only to show what was measured:
  *
  *   slots 128  baseline            184.6 s   uploads 121,441   hit 0.956
  *   slots 128  grouped, by id      215.3 s   uploads 202,907   hit 0.369
