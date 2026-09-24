@@ -243,9 +243,26 @@ void mimo26_gpu_worker_config_defaults(mimo26_gpu_worker_config *config)
      */
     config->expert_slots_per_layer = 128u;
     config->memory_limit_bytes = 0u;
-    /* 32 tokens per chunk: enough to amortize the 10.72 GB of BF16
-     * projections roughly 32-fold while keeping the batch scratch modest. */
-    config->prefill_chunk = 32u;
+    /*
+     * 128 tokens per chunk, the maximum the CLI allows. The chunk is a
+     * locality knob for the expert cache, not just projection amortization:
+     * prefill plans experts per token, so a wider chunk means more tokens
+     * sharing a layer's resident slots before the walk moves on. Measured on
+     * a 2425-token prompt at the 128-slot default:
+     *
+     *   chunk   prefill   MB/prompt token   hit
+     *       8   11.7 t/s        224         0.956
+     *      16   12.7 t/s        212         0.958
+     *      32   13.4 t/s        194         0.962   (the old default)
+     *      64   14.1 t/s        168         0.967
+     *     128   14.7 t/s        141         0.972
+     *
+     * Monotonic and still improving at the ceiling, though flattening: each
+     * doubling is worth less than the last (+8.5%, +5.5%, +5.2%, +4.3%).
+     * 128 over 32 is +9.7% prefill and 27% less expert traffic. The scratch
+     * cost is trivial -- a few MiB -- now that the buffers are sized right.
+     */
+    config->prefill_chunk = 128u;
     config->expert_lookahead = false;
 }
 
@@ -899,7 +916,19 @@ mimo26_gpu_worker_status mimo26_gpu_worker_create(
     #define DEVICE(field, bytes)                                              \
         REQUIRE(hipMalloc(&worker->field, (bytes)) == hipSuccess,             \
                 "device allocation failed")
-    DEVICE(hidden, HIDDEN * sizeof(uint16_t));
+    /*
+     * hidden holds the whole prefill chunk, not one token. It was sized for
+     * one, and prefill's embedding gather has been writing chunk * HIDDEN
+     * into it ever since -- 512 KiB into an 8 KiB allocation at chunk 64.
+     * The overflow was masked because it runs into normed and device_logits,
+     * which are both fully rewritten before they are next read, so nothing
+     * downstream ever observed the corruption; it only surfaced as a
+     * "embedding gather failed" once chunk 128 pushed it past a boundary
+     * hipMemcpy refuses. Size it correctly instead of relying on that.
+     */
+    const size_t hidden_tokens =
+        config->prefill_chunk > 0u ? (size_t)config->prefill_chunk : 1u;
+    DEVICE(hidden, hidden_tokens * HIDDEN * sizeof(uint16_t));
     DEVICE(normed, HIDDEN * sizeof(uint16_t));
     DEVICE(device_logits, (size_t)VOCAB * sizeof(float));
     DEVICE(device_keys,
