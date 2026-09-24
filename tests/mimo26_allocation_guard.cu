@@ -26,6 +26,10 @@ extern "C" void mimo26_test_allocation_guards() {
     for (const auto &entry : allocations) check_one(entry.first, entry.second);
     fprintf(stderr, "TEST_ALLOCATION_GUARDS live=%zu checked=%zu\n", allocations.size(), checked);
 }
+extern "C" void mimo26_test_allocations_empty() {
+    fprintf(stderr, "TEST_ALLOCATION_CLEANUP live=%zu checked=%zu\n", allocations.size(), checked);
+    assert(allocations.empty() && "device allocations leaked after worker destruction");
+}
 extern "C" hipError_t __wrap_hipMalloc(void **out, size_t bytes) {
     assert(bytes <= SIZE_MAX - 2 * guard_bytes);
     void *base = nullptr;

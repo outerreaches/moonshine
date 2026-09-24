@@ -82,6 +82,13 @@ typedef bool (*mimo26_rocm_expert_prepare_future)(
     void *context, uint32_t layer, const uint32_t *experts, size_t count,
     const uint32_t *future, size_t future_tokens);
 
+// Experimental grouped-prefill lookahead. remaining is the unique, ordered
+// list of groups still to execute in THIS chunk, not token/top-k tuples.
+// Synchronous callback only; no host pointer may be retained.
+typedef bool (*mimo26_rocm_expert_prepare_group_future)(
+    void *context, uint32_t layer, uint32_t expert,
+    const uint32_t *remaining, size_t remaining_count);
+
 typedef struct {
     uint32_t layer;
     bool     is_swa;
@@ -123,12 +130,13 @@ typedef struct {
     /*
      * Expert-major prefill scratch. Per-token execution re-reads a selected
      * expert's 12.75 MiB from GTT once for every token that picks it;
-     * grouping a chunk's tokens by expert reads it once. Measured reuse at
-     * chunk 128 is 7.56x, because a chunk touches only ~135 of 256 experts
-     * per layer rather than all of them.
+     * grouping a chunk's tokens permits reuse. The exact grouped-GEMV path
+     * only amortizes launches; it does NOT load weights once per group.
+     * One route sample suggests 7.56x ideal sharing, not measured traffic
+     * reduction (and the former weight-reuse kernel failed equality).
      *
      * gathered holds one expert's token rows contiguously for the batched
-     * GEMM. stash holds every (token, rank) expert output, so the final F32
+     * projection. stash holds every (token, rank) expert output, so the final F32
      * accumulation still runs in the original top-k rank order rather than in
      * whatever order the experts happened to be executed. All three are NULL
      * on a decode-only scratch.
@@ -160,6 +168,7 @@ typedef struct {
     mimo26_rocm_expert_provider      provider;  /* required on MoE layers */
     void                            *provider_context;
     mimo26_rocm_expert_prepare_future prepare_future; /* optional; zero-init */
+    mimo26_rocm_expert_prepare_group_future prepare_group_future; /* optional; zero-init */
 } mimo26_rocm_layer;
 
 /*

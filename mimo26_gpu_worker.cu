@@ -1,4 +1,5 @@
 #include "mimo26_gpu_worker.h"
+#include "mimo26_expert_group_plan.h"
 
 #include "k3_expert_cache.h"
 #include "k3_io_uring.h"
@@ -622,6 +623,16 @@ static bool prepare_batch_future(void *context, uint32_t layer,
     return prepare_batch_impl(context, layer, experts, count, next_use);
 }
 
+static bool prepare_group_future(void *context, uint32_t layer,
+                                 uint32_t expert, const uint32_t *remaining,
+                                 size_t remaining_count)
+{
+    uint32_t next_use[MIMO26_ROUTER_EXPERTS];
+    if (!mimo26_expert_group_next_use(expert, remaining, remaining_count, next_use))
+        return false;
+    return prepare_batch_impl(context, layer, &expert, 1u, next_use);
+}
+
 static bool provide_expert(void *context, uint32_t layer, uint32_t expert,
                            mimo26_rocm_expert *out)
 {
@@ -759,6 +770,9 @@ void mimo26_gpu_worker_destroy(mimo26_gpu_worker *worker)
     hipFree(worker->scratch.mlp_up);
     hipFree(worker->scratch.mlp_active);
     hipFree(worker->scratch.expert_out);
+    hipFree(worker->scratch.expert_gathered);
+    hipFree(worker->scratch.expert_stash);
+    hipFree(worker->scratch.expert_row_ids);
     hipFree(worker->scratch.accumulator);
     hipFree(worker->scratch.router_logits);
     hipFree(worker->scratch.router_weights);
@@ -1467,6 +1481,8 @@ mimo26_gpu_worker_status mimo26_gpu_worker_prefill(
             context.provider_context = worker;
             context.prepare_future = w->is_moe && worker->config.expert_lookahead
                                          ? prepare_batch_future : NULL;
+            context.prepare_group_future = w->is_moe && worker->config.expert_lookahead
+                                         ? prepare_group_future : NULL;
 
             const mimo26_rocm_layer_status status = mimo26_rocm_layer_prefill(
                 &context, &worker->scratch, worker->hidden,

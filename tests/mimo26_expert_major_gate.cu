@@ -11,7 +11,7 @@
 // tolerance, no argmax-only check. Text is long enough to span several chunks
 // at chunk 128, which is the case per-token execution never exercises.
 //
-//   mimo26_expert_major_gate ROOT OUT_PREFIX SLOTS CHUNK CONTEXT DECODES [TOKENS]
+//   mimo26_expert_major_gate ROOT OUT_PREFIX SLOTS CHUNK CONTEXT DECODES [TOKENS [REPEATS [LOOKAHEAD]]]
 #include "mimo26_gpu_worker.h"
 #include "mimo26_tokenizer.h"
 #include <cstdio>
@@ -19,6 +19,10 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <chrono>
+
+extern "C" void mimo26_test_allocation_guards() __attribute__((weak));
+extern "C" void mimo26_test_allocations_empty() __attribute__((weak));
 
 static const char *TEXT =
     "The town library keeps maps, letters, and records of local weather. "
@@ -42,9 +46,9 @@ static const char *TEXT =
 
 int main(int argc, char **argv)
 {
-    if (argc != 7 && argc != 8) {
+    if (argc < 7 || argc > 10) {
         std::fprintf(stderr,
-                     "usage: %s ROOT OUT SLOTS CHUNK CONTEXT DECODES [TOKENS]\n",
+                     "usage: %s ROOT OUT SLOTS CHUNK CONTEXT DECODES [TOKENS [REPEATS [LOOKAHEAD]]]\n",
                      argv[0]);
         return 2;
     }
@@ -54,8 +58,15 @@ int main(int argc, char **argv)
     const unsigned chunk = (unsigned)std::strtoul(argv[4], nullptr, 10);
     const unsigned context = (unsigned)std::strtoul(argv[5], nullptr, 10);
     const unsigned decodes = (unsigned)std::strtoul(argv[6], nullptr, 10);
-    const unsigned forced = argc == 8
+    const unsigned forced = argc >= 8
         ? (unsigned)std::strtoul(argv[7], nullptr, 10) : 0u;
+    const unsigned repeats = argc >= 9
+        ? (unsigned)std::strtoul(argv[8], nullptr, 10) : 1u;
+    const bool lookahead = argc == 10 && std::strcmp(argv[9], "on") == 0;
+    if (argc == 10 && !lookahead && std::strcmp(argv[9], "off") != 0) return 2;
+    if (repeats == 0 || repeats > 4 || chunk == 0 || chunk > 256 ||
+        slots < 8 || slots > 160 || context == 0 || context > 4096 ||
+        forced > context || decodes > context - forced) return 2;
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
 
     char error[512] = {0};
@@ -74,6 +85,15 @@ int main(int argc, char **argv)
         std::fprintf(stderr, "encode: %s\n", error);
         return 1;
     }
+    while (forced && ids.count < forced) {
+        mimo26_token_buffer_free(&ids);
+        text += TEXT;
+        if (!mimo26_tokenizer_encode(tokenizer, text.c_str(), false, &ids,
+                                     error, sizeof error)) {
+            std::fprintf(stderr, "encode extended prompt: %s\n", error);
+            return 1;
+        }
+    }
     /* Trim so prefill spans whole chunks plus a partial one: the boundary is
      * where a grouping bug is most likely to show. */
     size_t count = ids.count;
@@ -81,8 +101,8 @@ int main(int argc, char **argv)
     if (count > want) {
         count = want;
     }
-    if (count < 2u) {
-        std::fprintf(stderr, "prompt too short: %zu\n", count);
+    if (count < 2u || (forced && count != forced)) {
+        std::fprintf(stderr, "prompt too short: %zu (wanted %zu)\n", count, want);
         return 1;
     }
 
@@ -91,6 +111,7 @@ int main(int argc, char **argv)
     config.expert_slots_per_layer = (uint16_t)slots;
     config.prefill_chunk = (uint16_t)chunk;
     config.global_kv_capacity = context;
+    config.expert_lookahead = lookahead;
 
     mimo26_gpu_worker *worker = nullptr;
     if (mimo26_gpu_worker_create(&worker, root, &config, error,
@@ -99,41 +120,57 @@ int main(int argc, char **argv)
         return 1;
     }
     std::vector<float> logits(152576);
+    unsigned repeat = 0;
     auto dump = [&](const std::string &name) -> bool {
-        FILE *f = std::fopen((out + "-" + name + ".bin").c_str(), "wbx");
+        const std::string tag = repeat ? "repeat" + std::to_string(repeat) + "-" : "";
+        FILE *f = std::fopen((out + "-" + tag + name + ".bin").c_str(), "wbx");
         if (!f) return false;
         const bool ok =
             std::fwrite(logits.data(), 4, logits.size(), f) == logits.size();
         return std::fclose(f) == 0 && ok;
     };
 
-    if (mimo26_gpu_worker_prefill(worker, ids.ids, count, logits.data(),
-                                  nullptr, nullptr, error,
-                                  sizeof error) != MIMO26_GPU_WORKER_OK) {
-        std::fprintf(stderr, "prefill: %s\n", error);
-        return 1;
-    }
-    if (!dump("prefill")) {
-        std::fprintf(stderr, "write prefill\n");
-        return 1;
-    }
-    uint32_t next = mimo26_gpu_worker_argmax(logits.data());
-    std::printf("{\"phase\":\"prefill\",\"tokens\":%zu,\"slots\":%u,"
-                "\"chunk\":%u,\"argmax\":%u}\n", count, slots, chunk, next);
+    for (repeat = 0; repeat < repeats; repeat++) {
+        if (repeat && mimo26_gpu_worker_reset_context(worker, error, sizeof error) != MIMO26_GPU_WORKER_OK) {
+            std::fprintf(stderr, "retained reset: %s\n", error);
+            return 1;
+        }
+        mimo26_gpu_worker_stats before{}, after{};
+        mimo26_gpu_worker_get_stats(worker, &before);
+        const auto began = std::chrono::steady_clock::now();
+        if (mimo26_gpu_worker_prefill(worker, ids.ids, count, logits.data(),
+                                      nullptr, nullptr, error,
+                                      sizeof error) != MIMO26_GPU_WORKER_OK) {
+            std::fprintf(stderr, "prefill: %s\n", error);
+            return 1;
+        }
+        const double seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - began).count();
+        mimo26_gpu_worker_get_stats(worker, &after);
+        if (!dump("prefill")) {
+            std::fprintf(stderr, "write prefill\n");
+            return 1;
+        }
+        uint32_t next = mimo26_gpu_worker_argmax(logits.data());
+        std::printf("{\"phase\":\"prefill\",\"tokens\":%zu,\"slots\":%u,"
+                    "\"chunk\":%u,\"argmax\":%u,\"repeat\":%u,\"seconds\":%.9f,\"uploads\":%llu}\n",
+                    count, slots, chunk, next, repeat, seconds,
+                    (unsigned long long)(after.expert_uploads - before.expert_uploads));
 
-    for (unsigned d = 0; d < decodes; d++) {
-        if (mimo26_gpu_worker_decode(worker, next, logits.data(), error,
-                                     sizeof error) != MIMO26_GPU_WORKER_OK) {
-            std::fprintf(stderr, "decode %u: %s\n", d, error);
-            return 1;
+        for (unsigned d = 0; d < decodes; d++) {
+            if (mimo26_gpu_worker_decode(worker, next, logits.data(), error,
+                                         sizeof error) != MIMO26_GPU_WORKER_OK) {
+                std::fprintf(stderr, "decode %u: %s\n", d, error);
+                return 1;
+            }
+            if (!dump("decode" + std::to_string(d))) {
+                std::fprintf(stderr, "write decode %u\n", d);
+                return 1;
+            }
+            next = mimo26_gpu_worker_argmax(logits.data());
+            std::printf("{\"phase\":\"decode\",\"step\":%u,\"argmax\":%u}\n", d,
+                        next);
         }
-        if (!dump("decode" + std::to_string(d))) {
-            std::fprintf(stderr, "write decode %u\n", d);
-            return 1;
-        }
-        next = mimo26_gpu_worker_argmax(logits.data());
-        std::printf("{\"phase\":\"decode\",\"step\":%u,\"argmax\":%u}\n", d,
-                    next);
     }
 
     mimo26_gpu_worker_stats stats{};
@@ -144,7 +181,9 @@ int main(int argc, char **argv)
                 (unsigned long long)stats.expert_hits,
                 (unsigned long long)stats.expert_uploads,
                 (unsigned long long)mimo26_gpu_worker_resident_bytes(worker));
+    if (mimo26_test_allocation_guards) mimo26_test_allocation_guards();
     mimo26_gpu_worker_destroy(worker);
+    if (mimo26_test_allocations_empty) mimo26_test_allocations_empty();
     mimo26_token_buffer_free(&ids);
     mimo26_tokenizer_destroy(tokenizer);
     return 0;

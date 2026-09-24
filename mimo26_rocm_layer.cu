@@ -236,87 +236,36 @@ mimo26_rocm_layer_status mimo26_rocm_layer_decode(
 /*
  * The MoE half for a chunk.
  *
- * Experts are still applied per token rather than grouped expert-major.
- * That is the next optimization and it is deliberately not bundled with
- * this change: going layer-major already removes the BF16 re-reads, which
- * are the larger term, and doing both at once would leave a regression with
- * two candidate causes. The cache still amortizes across the chunk, since a
- * second token wanting the same expert finds it resident.
+ * The default applies experts per token. Explicit expert-major experiments
+ * group token rows, but retain the same per-row projection arithmetic.
  */
 /*
- * Expert-major MoE execution for a prefill chunk -- the optimization the
- * comment above defers.
+ * Experimental expert-major execution. Enable only with
+ * MIMO26_EXPERT_MAJOR=1, and qualify the exact binary/profile before use.
  *
- * Measured on real captured routes, a 128-token chunk touches only ~135 of a
- * layer's 256 experts, so each is shared by about 7.6 tokens and grouping by
- * expert reads 13.2% of the weight traffic. That traffic is the dominant
- * prefill cost: 12.19 TB for a 2425-token prompt at ~171 GB/s, most of this
- * part's bandwidth.
+ * The first implementation used tiled MXFP4 GEMM and was NOT equivalent.
+ * A real-input projection guard found a down-projection mismatch in layer 3
+ * of the FIRST 128-token chunk: one BF16 element was 0x35f7 versus GEMV's
+ * 0x35f6. The old synthetic width gate covered only gate/up and missed it.
+ * Final-logit failures at 224+ tokens did not establish an eviction bug or
+ * prove the preceding tokens' hidden/KV state correct. All old grouped
+ * speedups are withdrawn; see the vault's 2026-09-24 review evidence.
  *
- * DO NOT ENABLE. A full-vector gate at the production profile found this path
- * produces DIFFERENT results once a prefill exceeds ~192 tokens, and the
- * timings below were taken on a 2425-token prompt -- far past that -- so they
- * do not describe an equivalent computation and are retracted.
+ * This path instead launches the UNCHANGED GEMV kernel over a 2-D grid.
+ * Each vector has its own block and preserves baseline reduction/rounding.
+ * It amortizes launches, but does not implement explicit cross-vector
+ * weight reuse: route sharing (7.56x on one captured prompt) is an opportunity,
+ * not measured bandwidth reduction or a speedup for this implementation.
  *
- * What the gate established (tests/mimo26_expert_major_gate.cu, slots 160,
- * context 4096, full float32 logit vectors compared by memcmp):
- *
- *   100 tokens, one partial chunk      IDENTICAL
- *   128 tokens, one full chunk         IDENTICAL
- *   129 tokens (2nd chunk falls back)  IDENTICAL
- *   160, 192 tokens                    IDENTICAL
- *   224 tokens                         DIFFER
- *   256 tokens, chunk 64               DIFFER
- *   224 tokens in a single 224 chunk   DIFFER
- *
- * So it tracks total tokens, not chunk structure, and a single oversized chunk
- * reproduces it -- the fault is within-chunk, at the point where the distinct
- * experts a chunk touches exceed the cache's slots and eviction begins.
- *
- * Ruled out: the baseline is deterministic at these lengths (base vs base is
- * identical); k3_rocm_mxfp4_gemm_bf16 matches the GEMV loop bit-exactly at
- * widths 1..128 on production shapes (tests/test_k3_mxfp4_gemm_widths.cu, the
- * existing assertion only covered 2); gather/scatter directions are correct;
- * and a hipDeviceSynchronize after every group does NOT fix it, so it is a
- * logic error rather than a race.
- *
- * Note why the earlier chunk-32 memcmp passed and this did not: a prefill only
- * returns the LAST token's logits, so a chunk whose earlier tokens are wrong
- * still compares equal until a later chunk attends to the KV they wrote.
- *
- * Superseded timings, kept only to show what was measured:
- *
- *   slots 128  baseline            184.6 s   uploads 121,441   hit 0.956
- *   slots 128  grouped, by id      215.3 s   uploads 202,907   hit 0.369
- *   slots 128  grouped, by size    193.4 s   uploads 173,344   hit 0.461
- *   slots 160  baseline            151.7 s   uploads  53,745   hit 0.980
- *   slots 160  grouped, by id      144.2 s   uploads 213,010   hit 0.669
- *   slots 160  grouped, by size    124.6 s   uploads  80,652   hit 0.749
- *
- * So it pays, but only with the group ordering below AND enough slots to hold
- * a chunk's working set: 18% faster than the matched 160-slot baseline and 33%
- * faster than the current 128-slot default. At 128 slots it is still a loss,
- * because a chunk touches ~135 distinct experts and they cannot all stay
- * resident. Left gated off until the profile-aware memory guards make 160
- * slots safe; a full-vector equality gate at the production profile is also
- * required before promotion, beyond the chunk-32 memcmp already done.
- *
- * Arithmetic is preserved exactly, which is the entire constraint:
- *   - k3_rocm_mxfp4_gemm_bf16 keeps each row's GEMV reduction order
- *     independently, and tests/test_k3_prefill_ops.cu asserts by memcmp that
- *     it is bit-identical to the per-vector loop.
- *   - Per-projection BF16 rounding is unchanged; the same kernels run.
- *   - Expert outputs are stashed by (token, rank) and accumulated afterwards
- *     in the original rank order, so the F32 accumulation sequence does not
- *     depend on the order experts happened to execute in. Accumulating as
- *     results arrive would reorder that sum and is not an equivalent
- *     shortcut.
+ * Outputs are stashed by (token, rank), then accumulated in original rank
+ * order, preserving the F32 sum regardless of group execution order.
  */
 static bool expert_major_enabled(void)
 {
     static int cached = -1;
     if (cached < 0) {
-        cached = getenv("MIMO26_EXPERT_MAJOR") != NULL ? 1 : 0;
+        const char *value = getenv("MIMO26_EXPERT_MAJOR");
+        cached = value != NULL && strcmp(value, "1") == 0 ? 1 : 0;
     }
     return cached == 1;
 }
@@ -412,8 +361,11 @@ static mimo26_rocm_layer_status run_mlp_moe_expert_major(
          * front would thrash; admitting immediately before its group runs
          * also means each expert is read at most once per chunk.
          */
-        if (layer->prepare != NULL &&
-            !layer->prepare(layer->provider_context, w->layer, &e, 1u)) {
+        const bool prepared = layer->prepare_group_future != NULL
+            ? layer->prepare_group_future(layer->provider_context, w->layer, e,
+                                          order + index + 1u, order_count - index - 1u)
+            : layer->prepare == NULL || layer->prepare(layer->provider_context, w->layer, &e, 1u);
+        if (!prepared) {
             return MIMO26_ROCM_LAYER_EXPERT_UNAVAILABLE;
         }
         mimo26_rocm_expert expert;
@@ -425,12 +377,12 @@ static mimo26_rocm_layer_status run_mlp_moe_expert_major(
         if (!k3_rocm_gather_rows_bf16(scratch->expert_gathered, scratch->normed,
                                       device_gather + offset[e], members,
                                       MIMO26_ROCM_HIDDEN, stream) ||
-            !k3_rocm_mxfp4_gemm_bf16(scratch->mlp_gate, expert.gate_packed,
+            !k3_rocm_mxfp4_gemv_rows_bf16(scratch->mlp_gate, expert.gate_packed,
                                      expert.gate_scales,
                                      scratch->expert_gathered, members,
                                      EXPERT_INTERMEDIATE, MIMO26_ROCM_HIDDEN,
                                      stream) ||
-            !k3_rocm_mxfp4_gemm_bf16(scratch->mlp_up, expert.up_packed,
+            !k3_rocm_mxfp4_gemv_rows_bf16(scratch->mlp_up, expert.up_packed,
                                      expert.up_scales,
                                      scratch->expert_gathered, members,
                                      EXPERT_INTERMEDIATE, MIMO26_ROCM_HIDDEN,
@@ -438,7 +390,7 @@ static mimo26_rocm_layer_status run_mlp_moe_expert_major(
             !mimo26_rocm_silu_product_bf16(
                 scratch->mlp_active, scratch->mlp_gate, scratch->mlp_up,
                 (uint64_t)members * EXPERT_INTERMEDIATE, stream) ||
-            !k3_rocm_mxfp4_gemm_bf16(scratch->expert_out, expert.down_packed,
+            !k3_rocm_mxfp4_gemv_rows_bf16(scratch->expert_out, expert.down_packed,
                                      expert.down_scales, scratch->mlp_active,
                                      members, MIMO26_ROCM_HIDDEN,
                                      EXPERT_INTERMEDIATE, stream) ||
@@ -523,7 +475,7 @@ static mimo26_rocm_layer_status run_mlp_moe_batch(
     }
 
     /*
-     * Opt-in until its equality gate has run on this host. The scratch check
+     * Explicit experimental opt-in; never a production default. The scratch check
      * is not belt-and-braces: a decode-only scratch has no stash to hold the
      * per-rank outputs, and silently falling back is better than overrunning.
      */

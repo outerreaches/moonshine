@@ -695,6 +695,13 @@ tests/test_mimo26_next_use_cache.o: tests/test_mimo26_next_use_cache.c k3_expert
 tests/test_mimo26_next_use_cache: tests/test_mimo26_next_use_cache.o k3_expert_cache.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
+tests/test_mimo26_expert_group_plan.o: tests/test_mimo26_expert_group_plan.c mimo26_expert_group_plan.h k3_expert_cache.h
+tests/test_mimo26_expert_group_plan: tests/test_mimo26_expert_group_plan.o k3_expert_cache.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+.PHONY: test-mimo26-expert-group-plan
+test-mimo26-expert-group-plan: tests/test_mimo26_expert_group_plan
+	./tests/test_mimo26_expert_group_plan
+
 .PHONY: test-mimo26-next-use-cache
 test-mimo26-next-use-cache: tests/test_mimo26_next_use_cache
 	./tests/test_mimo26_next_use_cache
@@ -1047,7 +1054,7 @@ tests/test_mimo26_gpu_layer: tests/test_mimo26_gpu_layer.o \
 mimo26-gpu-layer: tests/test_mimo26_gpu_layer
 	MIMO26_ROOT=$(MIMO26_ROOT) ./tests/test_mimo26_gpu_layer
 
-mimo26_gpu_worker.o: mimo26_gpu_worker.cu mimo26_gpu_worker.h \
+mimo26_gpu_worker.o: mimo26_gpu_worker.cu mimo26_gpu_worker.h mimo26_expert_group_plan.h \
 	mimo26_rocm_layer.h mimo26_rocm_ops.h k3_rocm_ops.h mimo26_weights.h \
 	mimo26_kv.h mimo26_manifest.h mimo26_attention.h k3_expert_cache.h
 	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
@@ -1103,6 +1110,39 @@ tools/mimo26_context_gate: tools/mimo26_context_gate.o mimo26_gpu_worker.o \
 		mimo26_router.o glm53_fp8_oracle.o k3_safetensors.o k3_json.o \
 		k3_io_uring.o k3_expert_cache.o
 	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS) $(ICU_LDLIBS)
+
+# Fresh, isolated builds are required when changing the shared scratch ABI.
+MIMO26_EM_GATE_OBJS = mimo26_gpu_worker.o mimo26_tokenizer.o \
+	mimo26_rocm_layer.o mimo26_rocm_ops.o k3_rocm_ops.o mimo26_weights.o \
+	mimo26_kv.o mimo26_manifest.o mimo26_architecture.o mimo26_attention.o \
+	mimo26_ops.o mimo26_router.o glm53_fp8_oracle.o k3_safetensors.o \
+	k3_json.o k3_io_uring.o k3_expert_cache.o
+tests/mimo26_expert_major_gate.o: tests/mimo26_expert_major_gate.cu mimo26_gpu_worker.h mimo26_tokenizer.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/mimo26_expert_major_projection_guard.o: tests/mimo26_expert_major_projection_guard.cu mimo26_rocm_layer.h k3_rocm_ops.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/mimo26_expert_major_gate: tests/mimo26_expert_major_gate.o $(MIMO26_EM_GATE_OBJS)
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS) $(ICU_LDLIBS)
+tests/mimo26_expert_major_repeat_gate: tests/mimo26_expert_major_gate.o $(MIMO26_EM_GATE_OBJS)
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS) $(ICU_LDLIBS)
+tests/mimo26_allocation_guard.o: tests/mimo26_allocation_guard.cu
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/mimo26_allocation_guard_gate.o: tests/mimo26_allocation_guard_gate.cu
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/mimo26_allocation_guard_gate: tests/mimo26_allocation_guard_gate.o tests/mimo26_allocation_guard.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ -Wl,--wrap=hipMalloc -Wl,--wrap=hipFree -Wl,--wrap=hipMemcpy $(ROCM_LDLIBS)
+tests/mimo26_expert_major_guarded_gate: tests/mimo26_expert_major_gate.o tests/mimo26_allocation_guard.o $(MIMO26_EM_GATE_OBJS)
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ -Wl,--wrap=hipMalloc -Wl,--wrap=hipFree -Wl,--wrap=hipMemcpy $(ROCM_LDLIBS) $(ICU_LDLIBS)
+tests/mimo26_expert_major_projection_gate: tests/mimo26_expert_major_gate.o tests/mimo26_expert_major_projection_guard.o $(MIMO26_EM_GATE_OBJS)
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ -Wl,--wrap=k3_rocm_mxfp4_gemm_bf16 -Wl,--wrap=k3_rocm_mxfp4_gemv_rows_bf16 -Wl,--wrap=mimo26_rocm_layer_prefill $(ROCM_LDLIBS) $(ICU_LDLIBS)
+tests/replay_mimo26_projection.o: tests/replay_mimo26_projection.cu k3_rocm_ops.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/replay_mimo26_projection: tests/replay_mimo26_projection.o k3_rocm_ops.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_k3_mxfp4_gemv_rows.o: tests/test_k3_mxfp4_gemv_rows.cu k3_rocm_ops.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/test_k3_mxfp4_gemv_rows: tests/test_k3_mxfp4_gemv_rows.o k3_rocm_ops.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
 
 # The context ladder: prefill latency, retrieval, replay and memory per rung.
 mimo26-context-gate: tools/mimo26_context_gate
