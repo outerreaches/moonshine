@@ -15,13 +15,15 @@ import urllib.request
 
 class Supervisor:
     def __init__(self, command, port, *, restarts=2, startup=120, shutdown=30,
-                 backoff=2, poll=1, log=print, gpu_free=lambda: True):
+                 backoff=2, poll=1, log=print, gpu_free=lambda: True,
+                 expected_profile=None):
         self.command, self.port = command, port
         self.limit, self.startup, self.shutdown = restarts, startup, shutdown
         self.backoff, self.poll, self.log = backoff, poll, log
         self.stop = threading.Event()
         self.child = None
         self.gpu_free = gpu_free
+        self.expected_profile = expected_profile
 
     def event(self, event, **details):
         self.log(json.dumps(dict(event=event, **details)), flush=True)
@@ -43,6 +45,11 @@ class Supervisor:
             if data.get('phase') == 'quarantined' and data.get('ready') is False:
                 return 'fault'
             if data.get('ready') is True and data.get('phase') == 'idle':
+                if self.expected_profile is not None and any(
+                        data.get(key) != value for key, value in self.expected_profile.items()):
+                    self.event('profile_mismatch', expected=self.expected_profile,
+                               actual={key: data.get(key) for key in self.expected_profile})
+                    return 'profile_mismatch'
                 return 'ready'
         except (OSError, ValueError, urllib.error.URLError):
             pass
@@ -89,6 +96,9 @@ class Supervisor:
                     if state == 'fault':
                         reason = 'quarantined'
                         break
+                    if state == 'profile_mismatch':
+                        reason = state
+                        break
                     if not ready and time.monotonic() - started >= self.startup:
                         reason = 'startup_timeout'
                         break
@@ -96,6 +106,8 @@ class Supervisor:
                 self.event('retiring', reason=reason)
                 if not self.retire():
                     return 1
+                if reason == 'profile_mismatch':
+                    return 1  # Relaunching the same wrong profile cannot repair it.
                 if self.stop.is_set():
                     return 0
                 if attempts >= self.limit:
@@ -124,6 +136,8 @@ def parse_args(argv=None):
     p.add_argument('--restarts', type=int, default=2)
     p.add_argument('--prefill-chunk', type=int, default=32)
     p.add_argument('--expert-lookahead', choices=('off', 'on'), default='off')
+    p.add_argument('--retain-experts', choices=('off', 'on'), default='off',
+                   help='retain healthy expert cache between requests; context is always reset')
     p.add_argument('--shutdown-timeout', type=float, default=30,
                    help='seconds to wait for an owned child to reach a safe boundary; no force kill')
     a = p.parse_args(argv)
@@ -140,9 +154,11 @@ def server_command(a):
     server = a.server.resolve(strict=True)
     command = [str(server), str(a.root.resolve(strict=True)), '--host', '127.0.0.1',
                '--port', str(a.port), '--slots', str(a.slots), '--context', str(a.context)]
-    # Preserve compatibility with frozen pre-option server binaries on defaults.
-    if a.prefill_chunk != 32 or a.expert_lookahead != 'off':
-        command += ['--prefill-chunk', str(a.prefill_chunk), '--expert-lookahead', a.expert_lookahead]
+    # Always transmit the resolved profile: worker defaults can change between
+    # builds. Older binaries that lack these options must refuse the launch,
+    # rather than silently run a different profile.
+    command += ['--prefill-chunk', str(a.prefill_chunk), '--expert-lookahead', a.expert_lookahead]
+    command += ['--retain-experts', a.retain_experts]
     return command
 
 
@@ -153,7 +169,11 @@ def main():
         check = subprocess.run(['fuser', '/dev/kfd'], capture_output=True)
         return check.returncode == 1 and not check.stdout.strip()
     supervisor = Supervisor(command, a.port, restarts=a.restarts,
-                            shutdown=a.shutdown_timeout, gpu_free=gpu_free)
+                            shutdown=a.shutdown_timeout, gpu_free=gpu_free,
+                            expected_profile=dict(expert_slots=a.slots, context=a.context,
+                                                  prefill_chunk=a.prefill_chunk,
+                                                  expert_lookahead=a.expert_lookahead == 'on',
+                                                  retain_experts=a.retain_experts == 'on'))
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: supervisor.stop.set())
     return supervisor.run()

@@ -23,6 +23,7 @@
 #include "mimo26_server_options.h"
 #include "mimo26_server_slot.h"
 #include "mimo26_tokenizer.h"
+#include <initializer_list>
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -366,13 +367,31 @@ typedef struct {
     const char        *model_root;
     size_t             context_capacity;
     uint16_t           prefill_chunk;
+    uint16_t           expert_slots_per_layer;
     bool               expert_lookahead;
+    bool               retain_experts;
     uint64_t           served;
     /* Consecutive supervised restarts that did not lead to a clean request.
      * Bounded so a persistently broken worker stops thrashing and stays
      * degraded for an operator to look at, rather than resetting forever. */
     unsigned           recovery_attempts;
 } server_runtime;
+
+/* Healthy request boundaries only. Never fall back to cold reset after a
+ * retention refusal: pending I/O or a sticky execution fault requires a new
+ * worker, even if the serving slot had appeared idle. */
+static bool reset_request_worker(server_runtime *runtime, char *error, size_t size)
+{
+    if (!runtime->retain_experts) {
+        mimo26_gpu_worker_reset(runtime->worker);
+        return true;
+    }
+    if (mimo26_gpu_worker_reset_context(runtime->worker, error, size) != MIMO26_GPU_WORKER_OK) {
+        mimo26_slot_fault(&runtime->slot);
+        return false;
+    }
+    return true;
+}
 
 #define MAX_RECOVERY_ATTEMPTS 3u
 
@@ -427,8 +446,9 @@ static void send_health(int fd, server_runtime *runtime)
     const int size = snprintf(
         body, sizeof body,
         "{\"status\":\"%s\",\"ready\":%s,\"model\":\"%s\","
-        "\"phase\":\"%s\",\"context\":%zu,\"prefill_chunk\":%u,\"expert_lookahead\":%s,"
-        "\"served\":%llu,\"tokens\":%llu,"
+        "\"phase\":\"%s\",\"context\":%zu,\"prefill_chunk\":%u,\"expert_lookahead\":%s,\"expert_slots\":%u,"
+        "\"retain_experts\":%s,\"served\":%llu,\"tokens\":%llu,"
+        "\"expert_accesses\":%llu,\"expert_hits\":%llu,\"expert_uploads\":%llu,"
         "\"expert_hit_rate\":%.4f,\"resident_gib\":%.2f,"
         "\"admitted\":%llu,\"rejected_busy\":%llu,"
         "\"rejected_quarantined\":%llu,\"cancelled\":%llu,"
@@ -437,8 +457,13 @@ static void send_health(int fd, server_runtime *runtime)
         mimo26_slot_ready(slot) ? "true" : "false", MODEL_ID,
         mimo26_slot_phase_name(slot->phase), runtime->context_capacity,
         (unsigned)runtime->prefill_chunk, runtime->expert_lookahead ? "true" : "false",
+        (unsigned)runtime->expert_slots_per_layer,
+        runtime->retain_experts ? "true" : "false",
         (unsigned long long)runtime->served,
         (unsigned long long)stats.tokens,
+        (unsigned long long)stats.expert_accesses,
+        (unsigned long long)stats.expert_hits,
+        (unsigned long long)stats.expert_uploads,
         stats.expert_accesses
             ? (double)stats.expert_hits / (double)stats.expert_accesses
             : 0.0,
@@ -1036,7 +1061,14 @@ static void handle_chat(server_runtime *runtime, int fd,
         return;
     }
 
-    mimo26_gpu_worker_reset(runtime->worker);
+    if (!reset_request_worker(runtime, error, sizeof error)) {
+        fprintf(stderr, "mimo26: request reset refused: %s\n", error);
+        send_error(fd, 500, "Internal Server Error", "decode_failed",
+                   "the worker refused context reset and is quarantined");
+        mimo26_token_buffer_free(&prompt);
+        chat_request_free(&request);
+        return;
+    }
     response_state state;
     memset(&state, 0, sizeof state);
     state.fd = fd;
@@ -1392,7 +1424,7 @@ int main(int argc, char **argv)
         fprintf(stderr,
                 "usage: %s ROOT [--port N] [--host H] [--slots N] "
                 "[--context N] [--prefill-chunk 0..128] "
-                "[--expert-lookahead on|off]\n", argv[0]);
+                "[--expert-lookahead on|off] [--retain-experts on|off]\n", argv[0]);
         return argc < 2 ? 2 : 0;
     }
     /* Local-only by default. Remote exposure needs an authentication and
@@ -1418,7 +1450,9 @@ int main(int argc, char **argv)
     runtime.model_root = root;
     runtime.context_capacity = config.global_kv_capacity;
     runtime.prefill_chunk = config.prefill_chunk;
+    runtime.expert_slots_per_layer = config.expert_slots_per_layer;
     runtime.expert_lookahead = config.expert_lookahead;
+    runtime.retain_experts = options.retain_experts;
     mimo26_slot_init(&runtime.slot);
 
     char error[512];

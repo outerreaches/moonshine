@@ -9,9 +9,11 @@ from run_mimo26_transient_recovery import BASE
 def validate(path, build):
     r = json.loads((path/'report.json').read_text())
     candidate = json.loads((build/'report.json').read_text())
+    reference = Path(r.get('reference_build', str(BASE)))
+    chunk = r.get('profile', {}).get('chunk', 64)
     assert r['complete'] and r['passed'] and candidate['complete'] and candidate['passed']
     assert r['source_build_sha256'] == sha(build/'report.json')
-    assert r['reference_sha256'] == sha(BASE/'report.json')
+    assert r['reference_sha256'] == sha(reference/'report.json')
     for name, digest in r['inputs'].items(): assert sha(path/name) == digest
     for name in ('server-clean','server-observed'):
         assert sha(path/name) == candidate['binaries'][name]
@@ -30,12 +32,12 @@ def validate(path, build):
             if not name.endswith('-tokens.bin'):
                 assert (part/name).stat().st_size == 152576*4; vectors += 1
         if variant.startswith('deadline-'):
-            assert row['stop_position'] == (33 if variant=='deadline-json' else 64)
+            assert row['stop_position'] == (33 if variant=='deadline-json' else chunk)
             assert row['prompt_tokens'] == (33 if variant=='deadline-json' else 380)
             assert set(row['outputs']) == {'1-tokens.bin','2-tokens.bin','2-prefill.bin',
                                            '2-decode0.bin','2-decode1.bin','2-decode2.bin'}
             for name in row['outputs']:
-                if name.startswith('2-'): assert sha(part/name) == sha(BASE/'recreated'/('1'+name[1:]))
+                if name.startswith('2-'): assert sha(part/name) == sha(reference/'recreated'/('1'+name[1:]))
             h = row['final_health']
             assert h['ready'] and h['served']==2 and h['deadline_stops']==1 and h['cancelled']==h['faults']==0
             assert log.count('finish=deadline') == 1 and 'finish=cancelled' not in log
@@ -46,10 +48,10 @@ def validate(path, build):
             timings[variant] = row['shutdown_seconds']
             if variant == 'shutdown-decode':
                 assert set(row['outputs']) == {'1-tokens.bin','1-prefill.bin','1-decode0.bin'}
-                for name in row['outputs']: assert sha(part/name)==sha(BASE/'on'/('2'+name[1:]))
+                for name in row['outputs']: assert sha(part/name)==sha(reference/'on'/('2'+name[1:]))
             elif variant == 'clean-prefill': assert not row['outputs']
             else:
-                assert row['stop_position']==64 and row['prompt_tokens']==380
+                assert row['stop_position']==chunk and row['prompt_tokens']==380
                 assert set(row['outputs'])=={'1-tokens.bin'}
             if variant == 'supervised-prefill':
                 starts = [x for x in row['events'] if x['event']=='started']

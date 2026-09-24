@@ -31,21 +31,48 @@ class Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             server=Path(directory)/'server';server.touch()
             defaults=m.parse_args([str(server),directory])
-            self.assertNotIn('--prefill-chunk',m.server_command(defaults))
+            self.assertEqual(m.server_command(defaults)[-6:],
+                             ['--prefill-chunk','32','--expert-lookahead','off','--retain-experts','off'])
             a=m.parse_args([str(server),directory,'--prefill-chunk','64','--expert-lookahead','on'])
             command=m.server_command(a)
-            self.assertEqual(command[-4:],['--prefill-chunk','64','--expert-lookahead','on'])
+            self.assertEqual(command[-6:],['--prefill-chunk','64','--expert-lookahead','on','--retain-experts','off'])
             self.assertEqual(command[2:4],['--host','127.0.0.1'])
+            for slots,chunk,lookahead in ((128,32,'off'),(128,128,'on'),(16,0,'off')):
+                explicit=m.parse_args([str(server),directory,'--slots',str(slots),
+                    '--prefill-chunk',str(chunk),'--expert-lookahead',lookahead])
+                emitted=m.server_command(explicit)
+                self.assertEqual(emitted[emitted.index('--slots')+1],str(slots))
+                self.assertEqual(emitted[-6:],['--prefill-chunk',str(chunk),'--expert-lookahead',lookahead,'--retain-experts','off'])
+            a=m.parse_args([str(server),directory,'--retain-experts','on'])
+            self.assertEqual(m.server_command(a)[-2:],['--retain-experts','on'])
     def test_invalid_profiles_before_process_launch(self):
         import contextlib
         import io
         for args in (['--context','4294967296'],['--prefill-chunk','129'],
                      ['--prefill-chunk','-1'],['--prefill-chunk','0','--expert-lookahead','on'],
-                     ['--expert-lookahead','true'],['--shutdown-timeout','nan'],
+                     ['--expert-lookahead','true'],['--retain-experts','true'],['--shutdown-timeout','nan'],
                      ['--shutdown-timeout','inf'],['--shutdown-timeout','0'],
                      ['--shutdown-timeout','-1'],['--shutdown-timeout','3601']):
             with contextlib.redirect_stderr(io.StringIO()),self.assertRaises(SystemExit):
                 m.parse_args(['server','root']+args)
+    def test_health_requires_exact_profile(self):
+        import io
+        profile=dict(expert_slots=128,context=2048,prefill_chunk=32,expert_lookahead=False,retain_experts=False)
+        s=self.supervisor(expected_profile=profile)
+        def health_response(**override):
+            data=dict(ready=True,phase='idle',**profile);data.update(override)
+            return io.BytesIO(json.dumps(data).encode())
+        with patch.object(m.urllib.request,'urlopen',return_value=health_response()):
+            self.assertEqual(s.health(),'ready')
+        for override in (dict(prefill_chunk=128),dict(expert_slots=16),dict(context=1024),
+                         dict(expert_lookahead=True),dict(expert_slots=None),dict(retain_experts=True)):
+            with patch.object(m.urllib.request,'urlopen',return_value=health_response(**override)):
+                self.assertEqual(s.health(),'profile_mismatch')
+    def test_profile_mismatch_retires_without_restart(self):
+        s=self.supervisor();s.health=lambda:'profile_mismatch';c=Child()
+        with patch.object(m.subprocess,'Popen',return_value=c) as spawn:
+            self.assertEqual(s.run(),1);spawn.assert_called_once()
+        self.assertTrue(c.terminated);self.assertIsNone(s.child)
     def supervisor(self,**kw):
         s=m.Supervisor(['test'],9000,backoff=0,poll=0,log=lambda *a,**k:None,**kw)
         s.port_free=lambda:True

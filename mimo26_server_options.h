@@ -12,6 +12,7 @@ typedef struct {
     const char *root;
     const char *host;
     uint16_t port;
+    bool retain_experts;
     mimo26_gpu_worker_config worker;
 } mimo26_server_options;
 
@@ -39,6 +40,7 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
     }
     mimo26_server_options parsed = *options;
     parsed.root = argv[1]; parsed.host = "127.0.0.1"; parsed.port = 8640;
+    parsed.retain_experts = false;
     unsigned seen = 0;
     for (int i = 2; i < argc; i += 2) {
         const char *key = argv[i];
@@ -49,6 +51,7 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
         else if (!strcmp(key,"--context")) bit=8;
         else if (!strcmp(key,"--prefill-chunk")) bit=16;
         else if (!strcmp(key,"--expert-lookahead")) bit=32;
+        else if (!strcmp(key,"--retain-experts")) bit=64;
         if (!bit || (seen & bit) || i + 1 >= argc) {
             snprintf(error,error_size,"unknown, duplicate or missing-value option: %s",key); return false;
         }
@@ -60,11 +63,12 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
                 snprintf(error,error_size,"--host requires an IPv4 address"); return false;
             }
             parsed.host=value;
-        } else if (bit == 32) {
+        } else if (bit == 32 || bit == 64) {
             if (strcmp(value,"on") && strcmp(value,"off")) {
-                snprintf(error,error_size,"--expert-lookahead requires on or off"); return false;
+                snprintf(error,error_size,"%s requires on or off",key); return false;
             }
-            parsed.worker.expert_lookahead=!strcmp(value,"on");
+            if (bit == 32) parsed.worker.expert_lookahead=!strcmp(value,"on");
+            else parsed.retain_experts=!strcmp(value,"on");
         } else {
             uint64_t low=1,high=UINT32_MAX;
             if (bit == 2) high=65535;

@@ -218,11 +218,11 @@ void mimo26_gpu_worker_config_defaults(mimo26_gpu_worker_config *config)
     }
     config->global_kv_capacity = 2048u;
     /*
-     * The hit rate has now been measured on a real workload, which is what
-     * the old default of 16 was waiting for. Decode here is purely
-     * SSD-bandwidth-bound -- 5.44 GB/s sustained from the 990 PRO, and
-     * tok/s is that divided by 48 layers x 8 experts x 12.75 MiB x miss rate
-     * -- so the hit rate is the only lever that does not need new hardware.
+     * The September 24 short-request sweep motivated a larger pooled cache.
+     * The rates below divide generated tokens by WHOLE request time, including
+     * prefill; they are not pure decode throughput or a hardware ceiling.
+     * Admission and GPU compute both matter. Explicit-profile, full-vector
+     * and host-memory qualification is recorded separately in the vault.
      *
      *   slots  cached   hit    tok/s  resident
      *      16    6.2%  0.471    1.34   20.5 GiB   (the old default)
@@ -236,10 +236,10 @@ void mimo26_gpu_worker_config_defaults(mimo26_gpu_worker_config *config)
      * leaves only ~16 GB of host memory, which a prefill spike or a
      * cohabiting process would eat. 128 keeps ~35 GB of headroom.
      *
-     * Returns diminish because the read pattern degrades as the cache grows
-     * (5.56 -> 3.69 GB/s from 16 to 160 slots), so halving the miss rate does
-     * not halve the time. Raising this further needs the read amplification
-     * dealt with, not more slots.
+     * Lower whole-request GB/s at higher hit rates does not establish worse
+     * SSD efficiency or read amplification: prefill, compute and copying are
+     * included in that denominator. Retention, overlap and compute reuse are
+     * additional levers. Zero worker swap also does not imply zero host reclaim.
      */
     config->expert_slots_per_layer = 128u;
     config->memory_limit_bytes = 0u;
@@ -936,11 +936,11 @@ mimo26_gpu_worker_status mimo26_gpu_worker_create(
      * hidden holds the whole prefill chunk, not one token. It was sized for
      * one, and prefill's embedding gather has been writing chunk * HIDDEN
      * into it ever since -- 512 KiB into an 8 KiB allocation at chunk 64.
-     * The overflow was masked because it runs into normed and device_logits,
-     * which are both fully rewritten before they are next read, so nothing
-     * downstream ever observed the corruption; it only surfaced as a
-     * "embedding gather failed" once chunk 128 pushed it past a boundary
-     * hipMemcpy refuses. Size it correctly instead of relying on that.
+     * Chunk 128 exposed an "embedding gather failed" error. Successful older
+     * requests do not prove that an out-of-bounds write was harmless: allocator
+     * layout and overwritten neighbors were not guaranteed. Corrected-worker
+     * decode/chunk full-vector and allocation-guard tests cover bounded cases;
+     * never rely on adjacent buffers being overwritten later.
      */
     const size_t hidden_tokens =
         config->prefill_chunk > 0u ? (size_t)config->prefill_chunk : 1u;

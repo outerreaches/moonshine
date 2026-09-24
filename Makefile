@@ -749,6 +749,16 @@ tests/mimo26_server_controls_gate: tests/mimo26_server_controls_gate.cu mimo26_s
 test-mimo26-server-controls: tests/mimo26_server_controls_gate
 	./tests/mimo26_server_controls_gate
 
+tests/mimo26_server_retention_gate: tests/mimo26_server_retention_gate.cu mimo26_server.cu \
+	mimo26_server_options.h mimo26_server_slot.h mimo26_gpu_worker.h mimo26_tokenizer.h k3_json.h \
+	mimo26_server_slot.c
+	$(CXX) -O1 -g -ffunction-sections -fdata-sections -I. -x c++ $< \
+		mimo26_server_slot.c -Wl,--gc-sections -o $@
+
+.PHONY: test-mimo26-server-retention
+test-mimo26-server-retention: tests/mimo26_server_retention_gate
+	./tests/mimo26_server_retention_gate
+
 tests/test_k3_json: tests/test_k3_json.o k3_json.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 

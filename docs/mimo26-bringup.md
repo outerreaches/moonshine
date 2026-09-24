@@ -567,9 +567,8 @@ default sampler, since it falls back to the GGUF's `temp 1.0 / top_p 0.95`
 unless pinned. See the vault note
 `MiMo V2.6 Flash RL Two-Node GGUF Bring-up 2026-09-23`.
 
-**Open, found by this comparison:** the server accepts
-`chat_template_kwargs: {"enable_thinking": false}` with a 200 and does not
-honour it — the rendered prompt is unchanged and the model still emits
-reasoning. That is inconsistent with the server's own stance on `temperature`,
-which it refuses outright with `option_unsupported` rather than accept and
-ignore. Either honour it or refuse it.
+**Resolved in76f376e:** this comparison exposed ignored
+`chat_template_kwargs: {"enable_thinking": false}`. The server now honours
+the nested boolean, rejects conflicting top-level/nested choices, and refuses
+unknown nested keys. `make test-mimo26-chat-options` covers these semantics.
+Final-candidate live tool/reasoning qualification remains a separate gate.

@@ -16,6 +16,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from build_mimo26_candidate import build_fresh
 
 REPO = Path(__file__).resolve().parents[1]
 MODEL = '/srv/modelstore/models/XiaomiMiMo__MiMo-V2.6-Flash-RL'
@@ -91,17 +92,19 @@ def run_variant(out, report, variant, save):
     fault = variant == 'fault'
     assert not subprocess.run(['fuser', '/dev/kfd'], capture_output=True).stdout.strip(), 'GPU occupied'
     available = int(next(x.split()[1] for x in Path('/proc/meminfo').read_text().splitlines() if x.startswith('MemAvailable:')))
-    assert available > 70 * 1024 * 1024
+    assert available > (100 if report['slots'] == 128 else 70) * 1024 * 1024
     with socket.socket() as sock:
         sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
     path = out / variant; path.mkdir()
     row = dict(variant=variant, port=port, memory=[], responses=[], monitor_errors=[])
     report['runs'].append(row)
     cmd = [str(out / ('server-clean' if clean else 'server-observed')), MODEL,
-           '--host', '127.0.0.1', '--port', str(port), '--slots', str(report['slots']), '--context', '1024',
-           '--prefill-chunk', '64', '--expert-lookahead', 'on' if enabled else 'off']
+           '--host', '127.0.0.1', '--port', str(port), '--slots', str(report['slots']), '--context', str(report['context']),
+           '--prefill-chunk', str(report['chunk']), '--expert-lookahead', 'on' if enabled else 'off']
+    if report.get('retain_experts') is not None:
+        cmd += ['--retain-experts', report['retain_experts']]
     report['commands'].append(cmd)
-    env = os.environ.copy(); env.pop('MIMO26_TEST_HTTP_SUBMIT_FAILURE', None)
+    env = {k: v for k, v in os.environ.items() if not k.startswith('MIMO26_')}
     env['MIMO26_TEST_CAPTURE'] = str(path)
     if fault:
         env['MIMO26_TEST_HTTP_SUBMIT_FAILURE'] = '1'
@@ -113,14 +116,22 @@ def run_variant(out, report, variant, save):
                 try:
                     lines = Path(f'/proc/{proc.pid}/status').read_text().splitlines()
                     mem = {x.split(':')[0]: int(x.split()[1]) for x in lines if x.startswith(('VmRSS:', 'VmSwap:'))}
+                    if not mem:
+                        continue
+                    mem['MemAvailable'] = int(next(x.split()[1] for x in Path('/proc/meminfo').read_text().splitlines()
+                                                  if x.startswith('MemAvailable:')))
                     row['memory'].append(dict(seconds=time.monotonic()-start, **mem))
-                    if mem.get('VmSwap', 0) or time.monotonic()-start > 420:
-                        row['monitor_errors'].append('worker swap or timeout'); proc.terminate(); return
+                    if mem.get('VmSwap', 0) or mem['MemAvailable'] < 8 * 1048576 or time.monotonic()-start > 600:
+                        row['monitor_errors'].append('worker swap, host memory floor or timeout'); proc.terminate(); return
                 except FileNotFoundError:
                     pass
                 stop.wait(1)
         thread = threading.Thread(target=monitor); thread.start()
         def request(endpoint, body=None):
+            def read_bytes():
+                return int(next(x.split()[1] for x in Path(f'/proc/{proc.pid}/io').read_text().splitlines()
+                                if x.startswith('read_bytes:')))
+            began = time.monotonic(); before_reads = read_bytes()
             req = urllib.request.Request(f'http://127.0.0.1:{port}'+endpoint,
                 data=None if body is None else json.dumps(body).encode(), headers={'Content-Type': 'application/json'})
             try:
@@ -135,7 +146,8 @@ def run_variant(out, report, variant, save):
                     parsed = [json.loads(x) for x in data[:-1]]
                 else:
                     parsed = json.loads(raw)
-                result = dict(path=endpoint, status=response.code, body=parsed)
+                result = dict(path=endpoint, status=response.code, body=parsed,
+                              seconds=time.monotonic()-began, process_read_bytes=read_bytes()-before_reads)
             row['responses'].append(result); return result
         def chat(body):
             result = request('/v1/chat/completions', body)
@@ -154,7 +166,12 @@ def run_variant(out, report, variant, save):
                 time.sleep(0.25)
         try:
             health = wait_ready()
-            assert health['expert_lookahead'] == enabled and health['prefill_chunk'] == 64
+            assert health['expert_lookahead'] == enabled and health['prefill_chunk'] == report['chunk']
+            assert health['context'] == report['context']
+            if report.get('build_kind'):
+                assert health['expert_slots'] == report['slots']
+            if report.get('retain_experts') is not None:
+                assert health['retain_experts'] == (report['retain_experts'] == 'on')
             print('READY '+variant, flush=True)
             if fault:
                 first = request('/v1/chat/completions', A)
@@ -209,7 +226,7 @@ def run_variant(out, report, variant, save):
                 assert health['cancelled'] == 1 and health['faults'] == 0
                 match = re.search(r'TEST_PREFILL_END request=4 status=0 position=(\d+) count=(\d+) stopped=1', (path / 'stderr.log').read_text())
                 assert match and 0 < int(match[1]) < int(match[2])
-                assert int(match[1]) <= 128, 'disconnect did not stop by next committed chunk'
+                assert int(match[1]) <= 2 * report['chunk'], 'disconnect did not stop by next committed chunk'
                 row['cancel_position'] = int(match[1]); row['cancel_prompt_tokens'] = int(match[2])
                 assert not (path / '4-prefill.bin').exists()
                 after = chat(A)
@@ -240,7 +257,12 @@ def main():
     p.add_argument('--worker-build', type=Path, default=DEFAULT_BUILD)
     p.add_argument('--build-only', action='store_true')
     p.add_argument('--run-only', action='store_true')
-    p.add_argument('--slots', type=int, choices=(16, 48), default=16)
+    p.add_argument('--slots', type=int, choices=(16, 48, 128), default=16)
+    p.add_argument('--chunk', type=int, choices=(32, 64, 128), default=64)
+    p.add_argument('--context', type=int, default=1024)
+    p.add_argument('--fresh-build', action='store_true')
+    p.add_argument('--baseline', type=Path, help='completed same-workload report for full-vector regression')
+    p.add_argument('--retain-experts', choices=('off', 'on'), help='explicit opt-in on compatible new binaries')
     p.add_argument('--transport-probes', action='store_true')
     a = p.parse_args(); assert not (a.build_only and a.run_only)
     out = a.output.resolve()
@@ -252,14 +274,24 @@ def main():
     else:
         out.mkdir(); report = dict(complete=False, passed=False, built=False, commands=[], inputs={}, runs=[])
     report['slots'] = a.slots
+    report['chunk'] = a.chunk
+    report['context'] = a.context
+    report['retain_experts'] = a.retain_experts
+    assert a.context >= 512
     report['transport_probes'] = a.transport_probes
     report['execution_driver_sha256'] = sha(Path(__file__))
+    report['model_metadata'] = {name: sha(Path(MODEL) / name) for name in
+                                ('config.json', 'model.safetensors.index.json', 'tokenizer.json', 'tokenizer_config.json')}
     shutil.copy2(Path(__file__), out / 'execution_driver.py')
     def save():
         (out / 'report.json').write_text(json.dumps(report, indent=2)+'\n')
     try:
         if not a.run_only:
-            build(out, report, a.worker_build); report['built'] = True; save()
+            if a.fresh_build:
+                build_fresh(REPO, out, report)
+            else:
+                build(out, report, a.worker_build)
+            report['built'] = True; save()
         if a.build_only:
             return
         for variant in ('off', 'on', 'fault', 'recreated', 'clean'):
@@ -273,8 +305,15 @@ def main():
             assert row['answer_a']['choices'] == on['answer_a']['choices']
             assert row['answer_a']['usage'] == on['answer_a']['usage']
         assert recreated['outputs'] == {name: digest for name, digest in on['outputs'].items() if name.startswith('1-')}
+        if a.baseline:
+            baseline = json.loads(a.baseline.read_text())
+            assert baseline['complete'] and baseline['passed']
+            for row in (off, on, recreated):
+                reference = next(r for r in baseline['runs'] if r['variant'] == row['variant'])
+                assert row['outputs'] == reference['outputs'], 'full vectors/token IDs differ from baseline'
+            report['baseline_report_sha256'] = sha(a.baseline)
         report.update(complete=True, passed=True,
-            scope=f'chunk64/cache{a.slots}/context1024; mixed requests, real prefill disconnect, busy refusal, injected I/O quarantine, explicit fresh-process recovery and clean-binary smoke; no service deployment, automatic recovery or broad quality claim')
+            scope=f'chunk{a.chunk}/cache{a.slots}/context{a.context}/retention={a.retain_experts}; mixed requests, real prefill disconnect, busy refusal, injected I/O quarantine, explicit fresh-process recovery and clean-binary smoke; no service deployment, automatic recovery or broad quality claim')
         print('PASS complete opt-in server gate', flush=True)
     except Exception as error:
         report['error'] = repr(error); raise

@@ -20,11 +20,11 @@ from run_mimo26_server_lookahead_gate import A, B, CANCEL, MODEL, sha
 from run_mimo26_transient_recovery import BASE
 
 
-def run(out, build, variant):
+def run(out, build, variant, profile, reference):
     assert subprocess.run(['fuser', '/dev/kfd'], capture_output=True).returncode == 1
     available = int(next(x.split()[1] for x in Path('/proc/meminfo').read_text().splitlines()
                          if x.startswith('MemAvailable:')))
-    assert available > 70 * 1048576
+    assert available > (100 if profile['slots'] == 128 else 70) * 1048576
     path = out / variant; path.mkdir()
     with socket.socket() as s:
         s.bind(('127.0.0.1', 0)); port = s.getsockname()[1]
@@ -32,12 +32,18 @@ def run(out, build, variant):
     clean = variant == 'clean-prefill'
     deadline_case = variant.startswith('deadline-')
     cmd = [str(out / ('server-clean' if clean else 'server-observed')), MODEL, '--host', '127.0.0.1', '--port', str(port),
-           '--slots', '16', '--context', '1024', '--prefill-chunk', '64', '--expert-lookahead', 'on']
+           '--slots', str(profile['slots']), '--context', str(profile['context']),
+           '--prefill-chunk', str(profile['chunk']), '--expert-lookahead', 'on']
+    if profile.get('retain_experts') is not None:
+        cmd += ['--retain-experts', profile['retain_experts']]
     if supervised:
         cmd = [sys.executable, str(out / 'mimo26_supervise.py'), str(out / 'server-observed'), MODEL,
-               '--port', str(port), '--slots', '16', '--context', '1024', '--prefill-chunk', '64',
+               '--port', str(port), '--slots', str(profile['slots']), '--context', str(profile['context']),
+               '--prefill-chunk', str(profile['chunk']),
                '--expert-lookahead', 'on', '--shutdown-timeout', '120', '--restarts', '1']
-    env = {k: v for k, v in os.environ.items() if not k.startswith('MIMO26_TEST_')}
+        if profile.get('retain_experts') is not None:
+            cmd += ['--retain-experts', profile['retain_experts']]
+    env = {k: v for k, v in os.environ.items() if not k.startswith('MIMO26_')}
     env.update(MIMO26_TEST_CAPTURE=str(path), MIMO26_TEST_CONTROL_TRACE='1')
     if deadline_case: env['MIMO26_TEST_FIRST_DEADLINE_SECONDS'] = '1'
     r = dict(complete=False, passed=False, variant=variant, command=cmd, memory=[], responses=[],
@@ -102,6 +108,10 @@ def run(out, build, variant):
                 wait_for(lambda: 'listening on http://' in (path / 'stdout.log').read_text())
             code, health = request()
             assert code == 200 and health['ready'] and health['faults'] == 0
+            assert health['prefill_chunk'] == profile['chunk'] and health['context'] == profile['context']
+            assert health['expert_slots'] == profile['slots'] and health['expert_lookahead'] is True
+            if profile.get('retain_experts') is not None:
+                assert health['retain_experts'] == (profile['retain_experts'] == 'on')
             if deadline_case:
                 began = time.monotonic()
                 code, answer = request(dict(A if variant=='deadline-json' else CANCEL,
@@ -119,14 +129,14 @@ def run(out, build, variant):
                 assert health['ready'] and health['deadline_stops'] == 1 and health['cancelled'] == health['faults'] == 0
                 assert {x.name for x in path.glob('*.bin')} == {'1-tokens.bin'}
                 match = re.search(r'TEST_PREFILL_END request=1 status=0 position=(\d+) count=(\d+) stopped=1', log())
-                assert match and int(match[1]) == min(64, int(match[2]))
+                assert match and int(match[1]) == min(profile['chunk'], int(match[2]))
                 assert (int(match[1]) == int(match[2])) == (variant == 'deadline-json')
                 r['stop_position'] = int(match[1]); r['prompt_tokens'] = int(match[2])
                 code, answer = request(A); assert code == 200
-                reference = json.loads((BASE / 'report.json').read_text())['runs'][1]['answer_a']
-                assert answer['choices'] == reference['choices'] and answer['usage'] == reference['usage']
+                expected_answer = json.loads((reference / 'report.json').read_text())['runs'][1]['answer_a']
+                assert answer['choices'] == expected_answer['choices'] and answer['usage'] == expected_answer['usage']
                 actual = {x.name[2:]: sha(x) for x in path.glob('2-*.bin')}
-                expected = {x.name[2:]: sha(x) for x in (BASE / 'recreated').glob('1-*.bin')}
+                expected = {x.name[2:]: sha(x) for x in (reference / 'recreated').glob('1-*.bin')}
                 assert actual == expected
                 r['reuse_outputs'] = actual
                 _, r['final_health'] = request()
@@ -164,11 +174,11 @@ def run(out, build, variant):
                 elif variant == 'shutdown-decode':
                     assert {x.name for x in path.glob('*.bin')} == {'1-tokens.bin', '1-prefill.bin', '1-decode0.bin'}
                     for suffix in ('tokens', 'prefill', 'decode0'):
-                        assert sha(path/f'1-{suffix}.bin') == sha(BASE/'on'/f'2-{suffix}.bin')
+                        assert sha(path/f'1-{suffix}.bin') == sha(reference/'on'/f'2-{suffix}.bin')
                     assert 'completion=1 ' in log()
                 else:
                     match = re.search(r'TEST_PREFILL_END request=1 status=0 position=(\d+) count=(\d+) stopped=1', log())
-                    assert match and int(match[1]) == 64 < int(match[2])
+                    assert match and int(match[1]) == profile['chunk'] < int(match[2])
                     r['stop_position'] = int(match[1]); r['prompt_tokens'] = int(match[2])
                     assert {x.name for x in path.glob('*.bin')} == {'1-tokens.bin'}
                     assert 'completion=0 ' in log()
@@ -198,20 +208,28 @@ def run(out, build, variant):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--server-build', type=Path, required=True)
+    p.add_argument('--reference', type=Path, default=BASE)
     p.add_argument('--output', type=Path, required=True); a = p.parse_args()
     build = a.server_build.resolve(); out = a.output.resolve(); out.mkdir()
     candidate = json.loads((build / 'report.json').read_text())
     assert candidate['complete'] and candidate['passed']
+    reference = a.reference.resolve()
+    prior = json.loads((reference/'report.json').read_text())
+    assert prior['complete'] and prior['passed']
+    profile = dict(slots=candidate.get('slots',16), chunk=candidate.get('chunk',64),
+                   context=candidate.get('context',1024), retain_experts=candidate.get('retain_experts'))
+    assert profile['chunk'] in (64,128) and profile['slots'] in (16,128)
     for name in ('server-observed','server-clean'):
         assert sha(build/name) == candidate['binaries'][name]
         shutil.copy2(build/name,out/name)
     shutil.copy2(Path(__file__).resolve().parents[1]/'tools/mimo26_supervise.py',out/'mimo26_supervise.py')
     shutil.copy2(__file__,out/Path(__file__).name)
     r = dict(complete=False, passed=False, source_build_sha256=sha(build/'report.json'),
-             reference_sha256=sha(BASE/'report.json'), inputs={x.name:sha(x) for x in out.iterdir()}, runs=[])
+             reference_sha256=sha(reference/'report.json'), reference_build=str(reference), profile=profile,
+             inputs={x.name:sha(x) for x in out.iterdir()}, runs=[])
     try:
         for variant in ('deadline-json', 'deadline-sse', 'shutdown-prefill', 'shutdown-decode', 'supervised-prefill', 'clean-prefill'):
-            r['runs'].append(run(out,build,variant))
+            r['runs'].append(run(out,build,variant,profile,reference))
         r.update(complete=True,passed=True)
     finally:
         (out/'report.json').write_text(json.dumps(r,indent=2)+'\n')

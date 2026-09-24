@@ -38,3 +38,4 @@ moonshine-pre-public-history-*.bundle
 .*.swp
 tests/mimo26_transport_gate
 tests/mimo26_server_controls_gate
+tests/mimo26_server_retention_gate

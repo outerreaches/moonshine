@@ -23,11 +23,17 @@ int main(void) {
     CHECK(true,"root");
     assert(!strcmp(parsed.host,"127.0.0.1")&&parsed.port==8640);
     assert(!parsed.worker.expert_lookahead&&parsed.worker.prefill_chunk==32);
+    assert(!parsed.retain_experts);
     assert(parsed.worker.expert_slots_per_layer==16&&parsed.worker.global_kv_capacity==2048);
     CHECK(true,"root","--expert-lookahead","on","--prefill-chunk","64","--slots","48","--context","1024","--port","8765","--host","127.0.0.1");
     assert(parsed.worker.expert_lookahead&&parsed.worker.prefill_chunk==64&&parsed.worker.expert_slots_per_layer==48);
     assert(parsed.worker.global_kv_capacity==1024&&parsed.port==8765);
     CHECK(true,"root","--expert-lookahead","off","--prefill-chunk","0");
+    CHECK(true,"root","--retain-experts","on"); assert(parsed.retain_experts);
+    CHECK(true,"root","--retain-experts","off"); assert(!parsed.retain_experts);
+    CHECK(false,"root","--retain-experts","true");
+    CHECK(false,"root","--retain-experts");
+    CHECK(false,"root","--retain-experts","on","--retain-experts","off");
     CHECK(false,"root","--expert-lookahead","on","--prefill-chunk","0");
     CHECK(false,"root","--expert-lookahead","true");
     CHECK(false,"root","--expert-lookahead");

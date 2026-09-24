@@ -154,8 +154,9 @@ void mimo26_gpu_worker_reset(mimo26_gpu_worker *worker);
 /* Single-owner, between requests only. Clears logical KV/position/resolved
  * pointers, preserving expert payloads, mappings and cumulative counters.
  * Refuses during execution or after any execution fault; cold reset does not
- * requalify a faulted worker for retention. Recreate it instead. No server
- * caller uses this opt-in API until separate serving qualification passes. */
+ * requalify a faulted worker for retention. Recreate it instead. The server
+ * uses this only with explicit --retain-experts on; serving qualification
+ * is profile-specific, and cold reset remains the server default. */
 mimo26_gpu_worker_status mimo26_gpu_worker_reset_context(
     mimo26_gpu_worker *worker, char *error, size_t error_size);
 void mimo26_gpu_worker_get_stats(const mimo26_gpu_worker *worker,

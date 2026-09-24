@@ -8,6 +8,7 @@
 #include <string>
 static unsigned request_id=0,decode_id=0;
 static bool usable_logits=false;
+extern "C" void mimo26_test_allocation_guards() __attribute__((weak));
 extern "C" mimo26_slot_admission __real_mimo26_slot_admit(mimo26_slot*,double,double,uint32_t);
 extern "C" mimo26_slot_admission __wrap_mimo26_slot_admit(mimo26_slot*s,double now,double duration,uint32_t max_tokens) {
     static bool first=true;
@@ -41,6 +42,7 @@ extern "C" mimo26_gpu_worker_status __wrap_mimo26_gpu_worker_prefill(
     fprintf(stderr,"TEST_PREFILL_BEGIN request=%u count=%zu\n",request_id,n);
     Progress p{cb,c,false};
     auto status=__real_mimo26_gpu_worker_prefill(w,t,n,l,progress,&p,e,z);
+    if(mimo26_test_allocation_guards)mimo26_test_allocation_guards();
     usable_logits=status==MIMO26_GPU_WORKER_OK&&!p.stopped;
     if(usable_logits)capture("prefill",l,152576*sizeof(float));
     fprintf(stderr,"TEST_PREFILL_END request=%u status=%u position=%llu count=%zu stopped=%u\n",

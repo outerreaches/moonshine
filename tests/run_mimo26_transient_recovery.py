@@ -19,24 +19,31 @@ BASE=Path('/home/alex/Obsidian/beelink-knowledge/Projects/Moonshine/Evidence/mim
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--output',type=Path,required=True)
-    p.add_argument('--server-build',type=Path,default=BASE);a=p.parse_args()
+    p.add_argument('--server-build',type=Path,default=BASE)
+    p.add_argument('--reference',type=Path,default=BASE);a=p.parse_args()
     out=a.output.resolve();out.mkdir()
-    prior=json.loads((BASE/'report.json').read_text());assert prior['complete'] and prior['passed']
+    reference_build=a.reference.resolve()
+    prior=json.loads((reference_build/'report.json').read_text());assert prior['complete'] and prior['passed']
     candidate=json.loads((a.server_build/'report.json').read_text())
     assert candidate['complete'] and candidate['passed']
+    profile=dict(slots=candidate.get('slots',16),chunk=candidate.get('chunk',64),
+                 context=candidate.get('context',1024),retain_experts=candidate.get('retain_experts','off'))
     assert sha(a.server_build/'server-observed')==candidate['binaries']['server-observed']
     assert subprocess.run(['fuser','/dev/kfd'],capture_output=True).returncode==1
-    assert int(next(x.split()[1] for x in Path('/proc/meminfo').read_text().splitlines() if x.startswith('MemAvailable:')))>70*1048576
+    assert int(next(x.split()[1] for x in Path('/proc/meminfo').read_text().splitlines() if x.startswith('MemAvailable:')))>(100 if profile['slots']==128 else 70)*1048576
     for name in ('tools/mimo26_supervise.py','tests/mimo26_once_fault_launcher.py','tests/run_mimo26_transient_recovery.py'):
         shutil.copy2(REPO/name,out/Path(name).name)
     (out/'mimo26_once_fault_launcher.py').chmod(0o700)
     shutil.copy2(a.server_build/'server-observed',out/'server-observed')
     with socket.socket() as s:s.bind(('127.0.0.1',0));port=s.getsockname()[1]
     cmd=[sys.executable,str(out/'mimo26_supervise.py'),str(out/'mimo26_once_fault_launcher.py'),MODEL,
-         '--port',str(port),'--slots','16','--context','1024','--prefill-chunk','64','--expert-lookahead','on','--restarts','1']
-    env=os.environ.copy();env['MIMO26_ONCE_TEST_DIRECTORY']=str(out);env['MIMO26_ONCE_TEST_BINARY']=str(out/'server-observed')
+         '--port',str(port),'--slots',str(profile['slots']),'--context',str(profile['context']),
+         '--prefill-chunk',str(profile['chunk']),'--expert-lookahead','on','--restarts','1','--shutdown-timeout','120',
+         '--retain-experts',profile['retain_experts'] or 'off']
+    env={k:v for k,v in os.environ.items() if not k.startswith('MIMO26_')}
+    env['MIMO26_ONCE_TEST_DIRECTORY']=str(out);env['MIMO26_ONCE_TEST_BINARY']=str(out/'server-observed')
     r=dict(complete=False,passed=False,command=cmd,responses=[],memory=[],guard_errors=[],
-           hashes={x.name:sha(x) for x in out.iterdir() if x.is_file()},reference_sha256=sha(BASE/'report.json'),
+           profile=profile,hashes={x.name:sha(x) for x in out.iterdir() if x.is_file()},reference_sha256=sha(reference_build/'report.json'),
            source_build=str(a.server_build.resolve()),source_build_sha256=sha(a.server_build/'report.json'))
     def save():(out/'report.json').write_text(json.dumps(r,indent=2)+'\n')
     def events():
@@ -76,7 +83,9 @@ def main():
                     if len(ready)>=number:return ready[number-1]['pid']
                     time.sleep(.25)
             first=wait_ready(1)
-            health=request('/health')['body'];assert health['expert_lookahead'] and health['prefill_chunk']==64
+            health=request('/health')['body'];assert health['expert_lookahead'] and health['prefill_chunk']==profile['chunk']
+            assert health['expert_slots']==profile['slots'] and health['context']==profile['context']
+            assert health['retain_experts']==(profile['retain_experts']=='on')
             failed=request('/v1/chat/completions',A)
             assert failed['status']==500 and failed['body']['error']['code']=='decode_failed'
             print('PASS injected first-child failure',flush=True)
@@ -86,7 +95,7 @@ def main():
             reference=next(x for x in prior['runs'] if x['variant']=='on')['answer_a']
             assert answer['body']['choices']==reference['choices'] and answer['body']['usage']==reference['usage']
             outputs={x.name:sha(x) for x in (out/'replacement').glob('*.bin')}
-            expected={x.name:sha(x) for x in (BASE/'recreated').glob('*.bin')}
+            expected={x.name:sha(x) for x in (reference_build/'recreated').glob('*.bin')}
             assert outputs==expected and len(outputs)>2
             assert not (out/'first'/'1-prefill.bin').exists()
             health=request('/health')['body'];assert health['ready'] and health['served']==1 and health['faults']==0
