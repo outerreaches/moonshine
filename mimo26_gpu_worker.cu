@@ -132,7 +132,17 @@ struct mimo26_gpu_worker {
     mimo26_rocm_layer_weights layers[LAYERS];
 
     k3_expert_cache *cache;            /* residency policy, shared with CPU */
-    expert_slot     *slots;            /* slot_count blocks, global indices */
+    expert_slot     *slots;            /* slot_count views, global indices */
+    /*
+     * One allocation backing every slot, rather than one per slot. At 96
+     * slots per layer that was 4,512 separate 12.75 MiB hipMallocs and the
+     * host began swapping partway through, even though the steady-state
+     * footprint fits with roughly 55 GiB to spare -- the cost was in the
+     * number of buffer objects, not the bytes. PACKED_EXPERT_BYTES is 3,264
+     * pages exactly, so every slot's offset stays 4096-aligned for DMA.
+     */
+    void            *slot_pool;
+    uint64_t         slot_pool_bytes;
     uint32_t         slot_count;
 
     mimo26_rocm_layer_scratch scratch;
@@ -208,12 +218,30 @@ void mimo26_gpu_worker_config_defaults(mimo26_gpu_worker_config *config)
     }
     config->global_kv_capacity = 2048u;
     /*
-     * 16 packed slots per routed layer is 9.4 GiB, which leaves room beside
-     * the 8.28 GiB of static text on a 124 GiB part without assuming the
-     * whole device is free. Raise it once the hit rate is measured on a real
-     * workload; the plan asks for exactly that order.
+     * The hit rate has now been measured on a real workload, which is what
+     * the old default of 16 was waiting for. Decode here is purely
+     * SSD-bandwidth-bound -- 5.44 GB/s sustained from the 990 PRO, and
+     * tok/s is that divided by 48 layers x 8 experts x 12.75 MiB x miss rate
+     * -- so the hit rate is the only lever that does not need new hardware.
+     *
+     *   slots  cached   hit    tok/s  resident
+     *      16    6.2%  0.471    1.34   20.5 GiB   (the old default)
+     *      64   25.0%  0.721    2.24   48.6 GiB
+     *      96   37.5%  0.795    2.71   67.3 GiB
+     *     128   50.0%  0.833    3.12   86.1 GiB
+     *     160   62.5%  0.849    3.30  104.8 GiB
+     *     176   68.8%     --      --   host swaps during load
+     *
+     * 128 rather than 160: the last step buys 5.8% for another 19 GiB and
+     * leaves only ~16 GB of host memory, which a prefill spike or a
+     * cohabiting process would eat. 128 keeps ~35 GB of headroom.
+     *
+     * Returns diminish because the read pattern degrades as the cache grows
+     * (5.56 -> 3.69 GB/s from 16 to 160 slots), so halving the miss rate does
+     * not halve the time. Raising this further needs the read amplification
+     * dealt with, not more slots.
      */
-    config->expert_slots_per_layer = 16u;
+    config->expert_slots_per_layer = 128u;
     config->memory_limit_bytes = 0u;
     /* 32 tokens per chunk: enough to amortize the 10.72 GB of BF16
      * projections roughly 32-fold while keeping the batch scratch modest. */
@@ -629,10 +657,10 @@ void mimo26_gpu_worker_destroy(mimo26_gpu_worker *worker)
         hipFree((void *)w->dense_up);
         hipFree((void *)w->dense_down);
     }
-    for (uint32_t s = 0; s < worker->slot_count; s++) {
-        if (worker->slots != NULL && worker->slots[s].block != NULL) {
-            hipFree(worker->slots[s].block);
-        }
+    /* Slot blocks are offsets into slot_pool, not separate allocations. */
+    if (worker->slot_pool != NULL) {
+        hipFree(worker->slot_pool);
+        worker->slot_pool = NULL;
     }
     free(worker->slots);
     if (worker->cache != NULL) {
@@ -845,13 +873,24 @@ mimo26_gpu_worker_status mimo26_gpu_worker_create(
      * ids aligned with layer ids is still worth it; only the storage is
      * skipped.
      */
-    for (uint32_t s = config->expert_slots_per_layer;
-         s < worker->slot_count; s++) {
-        REQUIRE(hipMalloc(&worker->slots[s].block, PACKED_EXPERT_BYTES) ==
+    const uint32_t backed_slots =
+        worker->slot_count > config->expert_slots_per_layer
+            ? worker->slot_count - config->expert_slots_per_layer
+            : 0u;
+    if (backed_slots > 0u) {
+        worker->slot_pool_bytes =
+            (uint64_t)backed_slots * PACKED_EXPERT_BYTES;
+        REQUIRE(hipMalloc(&worker->slot_pool, worker->slot_pool_bytes) ==
                     hipSuccess,
-                "expert slot allocation failed");
-        worker->resident_bytes += PACKED_EXPERT_BYTES;
-        slot_views(&worker->slots[s]);
+                "expert slot pool allocation failed");
+        worker->resident_bytes += worker->slot_pool_bytes;
+        for (uint32_t s = config->expert_slots_per_layer;
+             s < worker->slot_count; s++) {
+            const uint64_t index = s - config->expert_slots_per_layer;
+            worker->slots[s].block = (uint8_t *)worker->slot_pool +
+                                     index * PACKED_EXPERT_BYTES;
+            slot_views(&worker->slots[s]);
+        }
     }
 
     /* Scratch and per-step buffers. */
