@@ -118,6 +118,25 @@ typedef struct {
 static double g_upload_seconds = 0.0;
 static double g_read_seconds = 0.0;   /* disk/page-cache portion */
 static double g_copy_seconds = 0.0;   /* host-to-device portion */
+/*
+ * Everything runs on the null stream, so the synchronous hipMemcpy below
+ * first drains whatever kernels are still enqueued and only then moves bytes.
+ * Timing the call as a whole charges GPU compute to "copy", which makes the
+ * staging copy look more removable than it is -- the reason the zero-copy
+ * lead is gated on this measurement. Under profiling we drain explicitly and
+ * bill that separately; hipMemcpy would have waited anyway, so this changes
+ * attribution rather than behaviour.
+ */
+static double g_queue_wait_seconds = 0.0;
+
+static bool admission_profile_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        cached = getenv("MIMO26_GPU_PROFILE") != NULL ? 1 : 0;
+    }
+    return cached == 1;
+}
 
 struct mimo26_gpu_worker {
     mimo26_gpu_worker_config config;
@@ -476,6 +495,8 @@ static bool prepare_batch_impl(void *context, uint32_t layer,
      * volume.
      */
     double copy_seconds = 0.0;
+    double queue_wait_seconds = 0.0;
+    const bool profile_admission = admission_profile_enabled();
     size_t done = 0u;
     while (done < pending_count) {
         const size_t batch =
@@ -523,14 +544,20 @@ static bool prepare_batch_impl(void *context, uint32_t layer,
                 const uint8_t *source =
                     (const uint8_t *)worker->staging_host[index] +
                     entry->offset_in_buffer;
-                struct timespec c0, c1;
+                struct timespec c0, cs, c1;
                 clock_gettime(CLOCK_MONOTONIC, &c0);
+                if (profile_admission) {
+                    hipDeviceSynchronize();
+                }
+                clock_gettime(CLOCK_MONOTONIC, &cs);
                 const hipError_t copied =
                     hipMemcpy(worker->slots[entry->slot].block, source,
                               PACKED_EXPERT_BYTES, hipMemcpyHostToDevice);
                 clock_gettime(CLOCK_MONOTONIC, &c1);
-                copy_seconds += (double)(c1.tv_sec - c0.tv_sec) +
-                                (double)(c1.tv_nsec - c0.tv_nsec) / 1e9;
+                queue_wait_seconds += (double)(cs.tv_sec - c0.tv_sec) +
+                                      (double)(cs.tv_nsec - c0.tv_nsec) / 1e9;
+                copy_seconds += (double)(c1.tv_sec - cs.tv_sec) +
+                                (double)(c1.tv_nsec - cs.tv_nsec) / 1e9;
                 if (copied != hipSuccess) {
                     fprintf(stderr, "mimo26 layer %u: staging copy failed "
                             "for expert %u\n", layer, entry->expert);
@@ -546,8 +573,9 @@ static bool prepare_batch_impl(void *context, uint32_t layer,
     clock_gettime(CLOCK_MONOTONIC, &t1);
     const double elapsed = (double)(t1.tv_sec - t0.tv_sec) +
                            (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
-    g_read_seconds += elapsed - copy_seconds;
+    g_read_seconds += elapsed - copy_seconds - queue_wait_seconds;
     g_copy_seconds += copy_seconds;
+    g_queue_wait_seconds += queue_wait_seconds;
     g_upload_seconds += elapsed;
 
     /* Every admission has landed, so hits and admissions can be published
@@ -1079,6 +1107,7 @@ mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
     g_upload_seconds = 0.0;
     g_read_seconds = 0.0;
     g_copy_seconds = 0.0;
+    g_queue_wait_seconds = 0.0;
     struct timespec mark, mark2;
     #define TICK() do { if (profile) { hipDeviceSynchronize(); \
         clock_gettime(CLOCK_MONOTONIC, &mark); } } while (0)
@@ -1268,11 +1297,12 @@ mimo26_gpu_worker_status mimo26_gpu_worker_decode(mimo26_gpu_worker *worker,
     }
     if (profile) {
         fprintf(stderr, "    profile pos %llu: layers %.3f s (of which "
-                        "expert admission %.3f s [read %.3f, copy %.3f], "
-                        "compute %.3f s), "
+                        "expert admission %.3f s [read %.3f, gpu-wait %.3f, "
+                        "copy %.3f], compute %.3f s), "
                         "kv-up %.3f s, kv-down %.3f s, head %.3f s\n",
                 (unsigned long long)position, layer_seconds,
-                g_upload_seconds, g_read_seconds, g_copy_seconds,
+                g_upload_seconds, g_read_seconds, g_queue_wait_seconds,
+                g_copy_seconds,
                 layer_seconds - g_upload_seconds,
                 kv_seconds, stage_seconds, head_seconds);
     }
@@ -1342,6 +1372,7 @@ mimo26_gpu_worker_status mimo26_gpu_worker_prefill(
     g_upload_seconds = 0.0;
     g_read_seconds = 0.0;
     g_copy_seconds = 0.0;
+    g_queue_wait_seconds = 0.0;
     struct timespec mark, mark2;
     #define PTICK() do { if (profile) { hipDeviceSynchronize(); \
         clock_gettime(CLOCK_MONOTONIC, &mark); } } while (0)
@@ -1515,10 +1546,12 @@ mimo26_gpu_worker_status mimo26_gpu_worker_prefill(
     }
     if (profile) {
         fprintf(stderr, "    prefill %zu tokens: layers %.2f s (admission "
-                        "%.2f [read %.2f, copy %.2f], compute %.2f), "
-                        "kv-up %.2f, rope %.2f, readback %.2f, commit %.2f\n",
+                        "%.2f [read %.2f, gpu-wait %.2f, copy %.2f], "
+                        "compute %.2f), kv-up %.2f, rope %.2f, readback %.2f, "
+                        "commit %.2f\n",
                 count, layer_seconds, g_upload_seconds, g_read_seconds,
-                g_copy_seconds, layer_seconds - g_upload_seconds, kv_seconds,
+                g_queue_wait_seconds, g_copy_seconds,
+                layer_seconds - g_upload_seconds, kv_seconds,
                 rope_seconds, readback_seconds, commit_seconds);
     }
     #undef PTICK
