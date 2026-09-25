@@ -1465,6 +1465,20 @@ int main(int argc, char **argv)
         fprintf(stderr, "configuration: %s\n", option_error);
         return 2;
     }
+    /*
+     * Resolve the environment override before anything reports or admits the
+     * profile, so the startup line, the memory guard, /health and execution
+     * all describe one configuration.
+     */
+    {
+        char resolve_error[256];
+        if (mimo26_gpu_worker_resolve_overrides(&options.worker, resolve_error,
+                                                sizeof resolve_error) !=
+            MIMO26_GPU_WORKER_OK) {
+            fprintf(stderr, "configuration: %s\n", resolve_error);
+            return 2;
+        }
+    }
     const char *root = options.root;
     const char *host = options.host;
     const int port = options.port;
@@ -1493,10 +1507,12 @@ int main(int argc, char **argv)
         return 1;
     }
     printf("loading the worker (%u expert slots per layer, context %zu, "
-           "prefill chunk %u, expert lookahead %s, request deadline %us)\n",
+           "prefill chunk %u, expert lookahead %s, expert-major %s, "
+           "request deadline %us)\n",
            (unsigned)config.expert_slots_per_layer,
            config.global_kv_capacity, (unsigned)config.prefill_chunk,
            config.expert_lookahead ? "on" : "off",
+           config.expert_major ? "on" : "off",
            (unsigned)options.request_deadline_seconds);
     /*
      * Profile-aware memory guard, before anything is allocated.
@@ -1514,8 +1530,23 @@ int main(int argc, char **argv)
         printf("profile needs ~%.1f GiB, host has %.1f GiB available, "
                "floor %u GiB\n", (double)planned / 1073741824.0,
                (double)available / 1073741824.0, options.min_headroom_gib);
-        if (floor_bytes > 0u && available > 0u &&
-            (planned + floor_bytes) > available) {
+        /*
+         * An unreadable MemAvailable used to skip the check entirely, so the
+         * one case where the host's state is unknown was the one case that
+         * loaded unconditionally. Refuse instead: the operator can disable the
+         * guard deliberately with --min-headroom-gib 0.
+         */
+        if (floor_bytes > 0u && available == 0u) {
+            fprintf(stderr,
+                    "configuration: cannot read MemAvailable, so the %u GiB "
+                    "headroom floor cannot be checked against a profile "
+                    "needing about %.1f GiB. Pass --min-headroom-gib 0 to load "
+                    "without the check.\n",
+                    options.min_headroom_gib,
+                    (double)planned / 1073741824.0);
+            return 1;
+        }
+        if (floor_bytes > 0u && (planned + floor_bytes) > available) {
             fprintf(stderr,
                     "configuration: this profile needs about %.1f GiB and "
                     "would leave less than the %u GiB floor of the %.1f GiB "
@@ -1531,12 +1562,26 @@ int main(int argc, char **argv)
         fprintf(stderr, "worker: %s\n", error);
         return 1;
     }
+    /*
+     * Read the mode back rather than trusting the request. The worker resolves
+     * the MIMO26_EXPERT_MAJOR override, so this is the only value that matches
+     * execution -- and it is what /health will report.
+     */
+    {
+        const bool effective = mimo26_gpu_worker_expert_major(runtime.worker);
+        if (effective != runtime.expert_major) {
+            printf("expert-major overridden by environment: %s -> %s\n",
+                   runtime.expert_major ? "on" : "off",
+                   effective ? "on" : "off");
+        }
+        runtime.expert_major = effective;
+    }
     mimo26_gpu_worker_stats stats;
     mimo26_gpu_worker_get_stats(runtime.worker, &stats);
-    printf("resident %.2f GiB after %.1f s\n",
+    printf("resident %.2f GiB after %.1f s, expert-major %s\n",
            (double)mimo26_gpu_worker_resident_bytes(runtime.worker) /
                1073741824.0,
-           stats.load_seconds);
+           stats.load_seconds, runtime.expert_major ? "on" : "off");
 
     const int listener = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     int reuse = 1;

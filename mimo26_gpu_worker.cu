@@ -430,6 +430,44 @@ uint64_t mimo26_gpu_worker_resident_bytes(const mimo26_gpu_worker *worker)
     return worker == NULL ? 0u : worker->resident_bytes;
 }
 
+bool mimo26_gpu_worker_expert_major(const mimo26_gpu_worker *worker)
+{
+    return worker == NULL ? false : worker->config.expert_major;
+}
+
+mimo26_gpu_worker_status mimo26_gpu_worker_resolve_overrides(
+    mimo26_gpu_worker_config *config, char *error, size_t error_size)
+{
+    if (config == NULL) {
+        return MIMO26_GPU_WORKER_INVALID_ARGUMENT;
+    }
+    /*
+     * The one environment override. Strict on purpose: this used to live in
+     * the layer and treat any value but "0" as true, so MIMO26_EXPERT_MAJOR=off
+     * silently enabled grouping and bypassed the CLI's coupling to lookahead,
+     * while /health went on reporting the configured mode.
+     */
+    const char *value = getenv("MIMO26_EXPERT_MAJOR");
+    if (value == NULL) {
+        return MIMO26_GPU_WORKER_OK;
+    }
+    const bool on = strcmp(value, "1") == 0 || strcmp(value, "on") == 0;
+    const bool off = strcmp(value, "0") == 0 || strcmp(value, "off") == 0;
+    if (!on && !off) {
+        return fail(error, error_size, MIMO26_GPU_WORKER_INVALID_ARGUMENT,
+                    "MIMO26_EXPERT_MAJOR must be 0, 1, on or off; got \"%s\". "
+                    "Refusing rather than guessing a mode.", value);
+    }
+    if (on && !config->expert_lookahead) {
+        return fail(error, error_size, MIMO26_GPU_WORKER_INVALID_ARGUMENT,
+                    "MIMO26_EXPERT_MAJOR=%s needs expert lookahead on; grouped "
+                    "prefill without the remaining-group schedule is slower",
+                    value);
+    }
+    config->expert_major = on;
+    return MIMO26_GPU_WORKER_OK;
+}
+
 /* ---- uploads ---- */
 
 static void *upload(mimo26_gpu_worker *worker, const void *host, size_t bytes)
@@ -928,6 +966,18 @@ mimo26_gpu_worker_status mimo26_gpu_worker_create(
     /* The same floor the CPU worker enforces, and for the same reason: one
      * token routes to MIMO26_ROUTER_TOP_K experts per layer and needs them
      * resident together. */
+    /*
+     * Resolved here as well as by the server, so that every caller -- the
+     * gate, the tests, a direct embedder -- gets the same strict handling and
+     * the same effective profile. The call is idempotent.
+     */
+    mimo26_gpu_worker_config effective = *config;
+    const mimo26_gpu_worker_status resolved =
+        mimo26_gpu_worker_resolve_overrides(&effective, error, error_size);
+    if (resolved != MIMO26_GPU_WORKER_OK) {
+        return resolved;
+    }
+    config = &effective;
     if (config->expert_slots_per_layer < MIMO26_ROUTER_TOP_K) {
         return fail(error, error_size, MIMO26_GPU_WORKER_INVALID_ARGUMENT,
                     "%u expert slots per layer cannot hold the %u experts one "

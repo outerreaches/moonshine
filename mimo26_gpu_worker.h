@@ -111,6 +111,22 @@ void mimo26_gpu_worker_config_defaults(mimo26_gpu_worker_config *config);
 uint64_t mimo26_gpu_worker_attention_scratch_floats(
     const mimo26_gpu_worker_config *config);
 
+/*
+ * Grouped prefill as the worker will actually run it, after the
+ * MIMO26_EXPERT_MAJOR override is resolved. Report this rather than the
+ * requested config, or /health can advertise a mode that is not executing.
+ */
+bool mimo26_gpu_worker_expert_major(const mimo26_gpu_worker *worker);
+
+/*
+ * Fold the MIMO26_EXPERT_MAJOR override into a config, strictly. Call before
+ * reporting or admitting a profile so that what is printed, what the guard
+ * checks and what executes are the same thing. Idempotent; worker creation
+ * calls it too, so direct embedders cannot skip it.
+ */
+mimo26_gpu_worker_status mimo26_gpu_worker_resolve_overrides(
+    mimo26_gpu_worker_config *config, char *error, size_t error_size);
+
 typedef struct {
     uint64_t tokens;
     uint64_t expert_accesses;

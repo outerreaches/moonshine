@@ -263,19 +263,13 @@ mimo26_rocm_layer_status mimo26_rocm_layer_decode(
  * order, preserving the F32 sum regardless of group execution order.
  */
 /*
- * Configured by the worker; the environment only overrides for A/B work.
- * Unset means "use the profile", which is what makes the default visible on
- * /health instead of hidden in a process environment.
+ * No environment read here. This used to resolve MIMO26_EXPERT_MAJOR itself,
+ * which meant the layer could run a mode the server had never agreed to and
+ * /health could not see. It also treated every value except a literal "0" as
+ * true, so MIMO26_EXPERT_MAJOR=off turned grouping ON. The override is now
+ * resolved once, strictly, before the worker exists, and arrives here as
+ * layer->expert_major like any other part of the profile.
  */
-static bool expert_major_enabled(bool configured)
-{
-    static int cached = -2;
-    if (cached == -2) {
-        const char *value = getenv("MIMO26_EXPERT_MAJOR");
-        cached = value == NULL ? -1 : (strcmp(value, "0") == 0 ? 0 : 1);
-    }
-    return cached < 0 ? configured : cached == 1;
-}
 
 static mimo26_rocm_layer_status run_mlp_moe_expert_major(
     const mimo26_rocm_layer *layer, mimo26_rocm_layer_scratch *scratch,
@@ -486,7 +480,7 @@ static mimo26_rocm_layer_status run_mlp_moe_batch(
      * is not belt-and-braces: a decode-only scratch has no stash to hold the
      * per-rank outputs, and silently falling back is better than overrunning.
      */
-    if (expert_major_enabled(layer->expert_major) && count > 1u &&
+    if (layer->expert_major && count > 1u &&
         scratch->expert_stash != NULL && scratch->expert_gathered != NULL &&
         scratch->expert_row_ids != NULL) {
         const mimo26_rocm_layer_status grouped =
