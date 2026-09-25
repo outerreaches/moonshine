@@ -430,27 +430,41 @@ int main(void)
      * Bit-exact, with no tolerance: both paths run the same kernel, so any
      * difference is a masking or indexing fault rather than arithmetic.
      */
-    for (size_t trial = 0; trial < 8u; trial++) {
-        const size_t shape = trial % 4u;
+    /*
+     * Geometry, and how much scratch the prefill is given.
+     *
+     * The widths matter as much as the geometries. A chunk of 24 splits evenly
+     * at 1, 12 and 24, so those alone would never exercise a partial final
+     * sub-batch -- and the tail is where an offset error lives, because it is
+     * the only sub-batch whose width differs and whose history is the deepest.
+     * 5, 7, 16 and 23 all leave a remainder (tails of 4, 3, 8 and 1).
+     *
+     * Priors 0 and 200 sit either side of the 128 window; 1000 is deep enough
+     * that a windowed layer has evicted many times over and first_position is
+     * far from zero.
+     */
+    static const size_t priors[] = {0u, 200u, 1000u};
+    static const size_t widths[] = {1u, 5u, 7u, 16u, 23u, 24u};
+    const size_t shape_count = 2u * (sizeof priors / sizeof priors[0]);
+    const size_t width_count = sizeof widths / sizeof widths[0];
+
+    for (size_t trial = 0; trial < shape_count * width_count; trial++) {
+        const size_t shape = trial % shape_count;
         const bool is_swa = (shape & 1u) != 0u;
         const size_t kv_heads = is_swa ? 8u : 4u;
         const size_t kv_groups = QH / kv_heads;
         const size_t window = is_swa ? MIMO26_SLIDING_WINDOW : 0u;
-        const size_t prior = shape < 2u ? 0u : 200u;   /* cross the window */
+        const size_t prior = priors[shape / 2u];
         const size_t chunk = 24u;
         const size_t total = prior + chunk;
         /*
-         * The second pass gives the prefill one query row of scratch, so it
-         * must split the chunk into 24 single-query sub-batches, each passing
-         * the shorter history its own query can see. Same data, same decode
-         * oracle: if splitting perturbed masking or the summation order, this
-         * is where it shows. The buffer is allocated at exactly the width
-         * passed, so an overrun faults rather than going unnoticed.
+         * The buffer is allocated at exactly the width passed, so an overrun
+         * faults rather than going unnoticed, and every case is compared
+         * against the same single-token decode oracle.
          */
-        const bool narrow = trial >= 4u;
+        const size_t width = widths[trial / shape_count];
         const size_t scratch_floats =
-            (narrow ? 1u : chunk) *
-            mimo26_rocm_attention_scratch_floats(total);
+            width * mimo26_rocm_attention_scratch_floats(total);
 
         rng_state = 0xC0FFEEu + (uint32_t)shape * 7919u;
         uint16_t *keys = (uint16_t *)malloc(total * kv_heads * QK *
@@ -531,9 +545,9 @@ int main(void)
         char label[96];
         char detail[96];
         snprintf(label, sizeof label,
-                 "prefill %zu == decode x%zu, %s, prior %zu, %s scratch",
-                 chunk, chunk, is_swa ? "swa" : "global", prior,
-                 narrow ? "1-row" : "full");
+                 "prefill %zu == decode, %s, prior %4zu, width %2zu (%zu+%zu)",
+                 chunk, is_swa ? "swa" : "global", prior, width,
+                 chunk / width, chunk % width);
         snprintf(detail, sizeof detail, "%zu of %zu differ", differing,
                  chunk * QH * VD);
         ok(label, launched && differing == 0, detail);
