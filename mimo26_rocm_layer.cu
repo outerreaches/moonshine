@@ -166,7 +166,9 @@ mimo26_rocm_layer_status mimo26_rocm_layer_decode(
     if (w->is_moe && layer->provider == NULL) {
         return MIMO26_ROCM_LAYER_INVALID_ARGUMENT;
     }
-    if (history > scratch->attention_capacity) {
+    if (history > scratch->attention_capacity ||
+        scratch->attention_scratch_floats <
+            mimo26_rocm_attention_scratch_floats(history)) {
         return MIMO26_ROCM_LAYER_INVALID_ARGUMENT;
     }
     hipStream_t stream = (hipStream_t)stream_handle;
@@ -588,9 +590,13 @@ mimo26_rocm_layer_status mimo26_rocm_layer_prefill(
         cos_tables == NULL || sin_tables == NULL || count == 0u) {
         return MIMO26_ROCM_LAYER_INVALID_ARGUMENT;
     }
-    /* Refuse rather than overrun scratch sized for a single token. */
+    /* Refuse rather than overrun scratch sized for a single token. The
+     * attention scratch is checked for one query's row only -- wider batches
+     * are split to fit rather than refused. */
     if (count > scratch->batch_capacity ||
-        history + count > scratch->attention_capacity) {
+        history + count > scratch->attention_capacity ||
+        scratch->attention_scratch_floats <
+            mimo26_rocm_attention_scratch_floats(history + count)) {
         return MIMO26_ROCM_LAYER_INVALID_ARGUMENT;
     }
     const mimo26_rocm_layer_weights *w = layer->weights;
@@ -637,6 +643,7 @@ mimo26_rocm_layer_status mimo26_rocm_layer_prefill(
     if (!mimo26_rocm_attention_prefill(
             scratch->attention, scratch->query, keys, values,
             w->is_swa ? w->sink_bias : NULL, scratch->attention_scratch,
+            scratch->attention_scratch_floats,
             w->kv_heads, w->kv_groups, w->window, history + count,
             first_position, first_token_position, count, attention_scale(),
             stream)) {

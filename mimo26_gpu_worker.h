@@ -82,9 +82,34 @@ typedef struct {
      * cache treats each group as a one-off access and the path is slower.
      */
     bool expert_major;
+    /*
+     * Ceiling on the attention score scratch, in bytes.
+     *
+     * The scratch a full chunk wants is chunk * 64 * (history + 2) floats,
+     * which scales with the context: 67 MiB at a 2048 context but 8 GiB at
+     * 262144 with a 128 chunk. Sized that way it does not fit beside the
+     * expert cache, which is what made a 262144 default fail to load with
+     * "prefill scratch allocation failed".
+     *
+     * Capping it instead makes the prefill path attend in sub-batches that
+     * fit, which is bit-exact -- a narrower batch sees the same visible slots
+     * in the same order. The cost is extra kernel launches at deep history
+     * only; short contexts still run a full chunk in one launch.
+     *
+     * Zero means no cap, i.e. the old full-width sizing.
+     */
+    uint64_t attention_scratch_bytes;
 } mimo26_gpu_worker_config;
 
 void mimo26_gpu_worker_config_defaults(mimo26_gpu_worker_config *config);
+
+/*
+ * Floats the attention scratch will actually be allocated for under this
+ * config. Exposed so the startup guard predicts the same number the loader
+ * allocates rather than a second estimate of it.
+ */
+uint64_t mimo26_gpu_worker_attention_scratch_floats(
+    const mimo26_gpu_worker_config *config);
 
 typedef struct {
     uint64_t tokens;

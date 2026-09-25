@@ -345,9 +345,10 @@ int main(int argc, char **argv)
                          MIMO26_ROUTER_TOP_K * sizeof(float)));
         HIP_OK(hipMalloc(&scratch.router_ids,
                          MIMO26_ROUTER_TOP_K * sizeof(uint32_t)));
+        scratch.attention_scratch_floats =
+            mimo26_rocm_attention_scratch_floats(scratch.attention_capacity);
         HIP_OK(hipMalloc(&scratch.attention_scratch,
-                         mimo26_rocm_attention_scratch_floats(
-                             scratch.attention_capacity) * sizeof(float)));
+                         scratch.attention_scratch_floats * sizeof(float)));
 
         /* CPU context. */
         expert_store cpu_store;
@@ -693,9 +694,10 @@ int main(int argc, char **argv)
                              (size_t)chunk * MIMO26_ROUTER_TOP_K *
                                  sizeof(uint32_t)));
             scratch.attention_capacity = 64;
+            scratch.attention_scratch_floats =
+                (uint64_t)chunk * mimo26_rocm_attention_scratch_floats(64);
             HIP_OK(hipMalloc(&scratch.attention_scratch,
-                             (size_t)chunk *
-                                 mimo26_rocm_attention_scratch_floats(64) *
+                             scratch.attention_scratch_floats *
                                  sizeof(float)));
 
             const mimo26_rocm_layer_status prefill_status =

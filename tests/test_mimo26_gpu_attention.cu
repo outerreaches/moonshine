@@ -430,16 +430,29 @@ int main(void)
      * Bit-exact, with no tolerance: both paths run the same kernel, so any
      * difference is a masking or indexing fault rather than arithmetic.
      */
-    for (size_t trial = 0; trial < 4u; trial++) {
-        const bool is_swa = (trial & 1u) != 0u;
+    for (size_t trial = 0; trial < 8u; trial++) {
+        const size_t shape = trial % 4u;
+        const bool is_swa = (shape & 1u) != 0u;
         const size_t kv_heads = is_swa ? 8u : 4u;
         const size_t kv_groups = QH / kv_heads;
         const size_t window = is_swa ? MIMO26_SLIDING_WINDOW : 0u;
-        const size_t prior = trial < 2u ? 0u : 200u;   /* cross the window */
+        const size_t prior = shape < 2u ? 0u : 200u;   /* cross the window */
         const size_t chunk = 24u;
         const size_t total = prior + chunk;
+        /*
+         * The second pass gives the prefill one query row of scratch, so it
+         * must split the chunk into 24 single-query sub-batches, each passing
+         * the shorter history its own query can see. Same data, same decode
+         * oracle: if splitting perturbed masking or the summation order, this
+         * is where it shows. The buffer is allocated at exactly the width
+         * passed, so an overrun faults rather than going unnoticed.
+         */
+        const bool narrow = trial >= 4u;
+        const size_t scratch_floats =
+            (narrow ? 1u : chunk) *
+            mimo26_rocm_attention_scratch_floats(total);
 
-        rng_state = 0xC0FFEEu + (uint32_t)trial * 7919u;
+        rng_state = 0xC0FFEEu + (uint32_t)shape * 7919u;
         uint16_t *keys = (uint16_t *)malloc(total * kv_heads * QK *
                                             sizeof *keys);
         uint16_t *values = (uint16_t *)malloc(total * kv_heads * VD *
@@ -470,9 +483,7 @@ int main(void)
         HIP_OK(hipMalloc(&d_sink, QH * sizeof *sink));
         HIP_OK(hipMalloc(&d_batched, chunk * QH * VD * sizeof *d_batched));
         HIP_OK(hipMalloc(&d_single, QH * VD * sizeof *d_single));
-        HIP_OK(hipMalloc(&d_scratch,
-                         chunk * mimo26_rocm_attention_scratch_floats(total) *
-                             sizeof(float)));
+        HIP_OK(hipMalloc(&d_scratch, scratch_floats * sizeof(float)));
         HIP_OK(hipMemcpy(d_keys, keys, total * kv_heads * QK * sizeof *keys,
                          hipMemcpyHostToDevice));
         HIP_OK(hipMemcpy(d_values, values,
@@ -486,9 +497,9 @@ int main(void)
 
         const bool launched = mimo26_rocm_attention_prefill(
             d_batched, d_queries, d_keys, d_values, is_swa ? d_sink : NULL,
-            d_scratch, (uint32_t)kv_heads, (uint32_t)kv_groups,
-            (uint32_t)window, total, 0u, prior, (uint32_t)chunk,
-            mimo26_attention_scale(), NULL);
+            d_scratch, scratch_floats, (uint32_t)kv_heads,
+            (uint32_t)kv_groups, (uint32_t)window, total, 0u, prior,
+            (uint32_t)chunk, mimo26_attention_scale(), NULL);
         HIP_OK(hipDeviceSynchronize());
 
         size_t differing = 0;
@@ -519,8 +530,10 @@ int main(void)
         }
         char label[96];
         char detail[96];
-        snprintf(label, sizeof label, "prefill %zu == decode x%zu, %s, prior %zu",
-                 chunk, chunk, is_swa ? "swa" : "global", prior);
+        snprintf(label, sizeof label,
+                 "prefill %zu == decode x%zu, %s, prior %zu, %s scratch",
+                 chunk, chunk, is_swa ? "swa" : "global", prior,
+                 narrow ? "1-row" : "full");
         snprintf(detail, sizeof detail, "%zu of %zu differ", differing,
                  chunk * QH * VD);
         ok(label, launched && differing == 0, detail);

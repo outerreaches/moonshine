@@ -168,11 +168,23 @@ bool mimo26_rocm_attention_decode(void *out, const void *query,
  * out of the same absolute-position predicate the decode path uses, so
  * prefilling N tokens is bit-identical to decoding them one at a time.
  *
- * scratch needs count * 64 * (history + 2) floats.
+ * scratch_floats says how large the scratch actually is. A full chunk wants
+ * count * 64 * (history + 2) floats, which grows with the context capacity
+ * and reaches 8 GiB at a 262144 context and a 128 chunk. When the buffer is
+ * smaller than that, the queries are attended in sub-batches narrow enough to
+ * fit, each passing the shorter history its own last query can see.
+ *
+ * That is arithmetically invisible: a sub-batch sees the same visible slots in
+ * the same order, and the slots it no longer iterates were masked out and
+ * contributed nothing. Splitting is therefore bit-exact, and the equality gate
+ * is what holds it to that.
+ *
+ * Fails if the scratch cannot hold even a single query's row.
  */
 bool mimo26_rocm_attention_prefill(void *out, const void *query,
                                    const void *keys, const void *values,
                                    const void *sink_bias, float *scratch,
+                                   uint64_t scratch_floats,
                                    uint32_t kv_heads, uint32_t kv_groups,
                                    uint32_t window, uint64_t history,
                                    uint64_t first_position,

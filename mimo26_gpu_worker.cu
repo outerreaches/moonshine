@@ -236,7 +236,22 @@ void mimo26_gpu_worker_config_defaults(mimo26_gpu_worker_config *config)
     if (config == NULL) {
         return;
     }
-    config->global_kv_capacity = 2048u;
+    /*
+     * 262,144 tokens, chosen 2026-09-24 as the largest context that fits
+     * safely beside the 160-slot expert cache: the profile predicts 110.4 GiB
+     * and the startup guard's 10 GiB floor refuses 294,912 (111.1 GiB).
+     *
+     * KV is the cheap part of this architecture -- 39 of 48 layers are SWA
+     * capped at a 128-token window, so only the 9 global layers grow, at
+     * 22.6 KiB/token. Going from 2,048 to 262,144 costs 5.6 GiB. What binds
+     * is the expert cache at 95.6 GiB, not context, so this is a slots-versus-
+     * context trade rather than a hardware limit.
+     *
+     * Note what this does NOT buy: prefill runs at ~16 tok/s, so a genuinely
+     * 262K-token prompt is hours of ingest. The capacity is for long agentic
+     * sessions that accumulate, not for single enormous prompts.
+     */
+    config->global_kv_capacity = 262144u;
     /*
      * The September 24 short-request sweep motivated a larger pooled cache.
      * The rates below divide generated tokens by WHOLE request time, including
@@ -295,6 +310,58 @@ void mimo26_gpu_worker_config_defaults(mimo26_gpu_worker_config *config)
     config->prefill_chunk = 128u;
     config->expert_lookahead = true;
     config->expert_major = true;
+    /*
+     * 256 MiB. Full-width sizing would want 8 GiB at the 262144 context above,
+     * which is what made that context fail to allocate.
+     *
+     * Splitting is close to free, which is why the cap can be this small. The
+     * kernel grid is (head, query) either way, so the same blocks read the
+     * same history whatever the batch width -- narrowing it changes the number
+     * of launches, not the work. At 256 MiB the deepest prefill attends 4
+     * tokens at a time, about 3000 extra launches per chunk against attention
+     * that costs seconds at that depth. Below a ~16K history a full 128-token
+     * chunk still fits in one launch, so the cap is inert for short contexts.
+     */
+    config->attention_scratch_bytes = 256ull * 1024ull * 1024ull;
+}
+
+/*
+ * Entries (slots * heads) the per-layer key or value staging buffer needs. It
+ * holds one layer's view at a time, so the bound is the widest single layer:
+ * a global layer is 4 heads over the whole capacity, a windowed one 8 heads
+ * over the 128 ring plus the chunk appended on device.
+ */
+static size_t kv_view_entries(const mimo26_gpu_worker_config *config)
+{
+    const size_t chunk =
+        config->prefill_chunk > 0u ? (size_t)config->prefill_chunk : 1u;
+    const size_t global =
+        (size_t)config->global_kv_capacity * MIMO26_GLOBAL_KV_HEADS;
+    const size_t windowed =
+        ((size_t)MIMO26_SLIDING_WINDOW + chunk) * MIMO26_SWA_KV_HEADS;
+    return global > windowed ? global : windowed;
+}
+
+/*
+ * Floats to allocate for the attention scratch: a full chunk at the deepest
+ * history, clamped to the configured ceiling, but never below the single row
+ * the decode path needs.
+ */
+uint64_t mimo26_gpu_worker_attention_scratch_floats(
+    const mimo26_gpu_worker_config *config)
+{
+    const uint64_t chunk =
+        config->prefill_chunk > 0u ? (uint64_t)config->prefill_chunk : 1u;
+    const uint64_t row =
+        mimo26_rocm_attention_scratch_floats(config->global_kv_capacity);
+    uint64_t floats = chunk * row;
+    if (config->attention_scratch_bytes > 0u) {
+        const uint64_t cap = config->attention_scratch_bytes / sizeof(float);
+        if (floats > cap) {
+            floats = cap < row ? row : cap;
+        }
+    }
+    return floats;
 }
 
 uint64_t mimo26_gpu_worker_planned_bytes(
@@ -323,6 +390,38 @@ uint64_t mimo26_gpu_worker_planned_bytes(
     total += 39ull * MIMO26_SLIDING_WINDOW *
              (MIMO26_SWA_KV_HEADS * (QK + VD)) * sizeof(uint16_t);
     total += (uint64_t)VOCAB * sizeof(float);
+
+    /*
+     * Everything below scales with the context or the chunk, and none of it
+     * was counted until 2026-09-24. The omission was invisible at a 2048
+     * context -- a few hundred MiB -- and the agreement with the worker's own
+     * resident ledger was no check at all, because that ledger skips the same
+     * buffers. At 262144 it was 3.8 GiB, and the guard passed a profile that
+     * then failed to allocate.
+     */
+    /* Per-step device staging for one layer's key and value view. */
+    total += (uint64_t)kv_view_entries(config) * (QK + VD) * sizeof(uint16_t);
+    /* The attention score scratch, the largest of these by far. */
+    total += mimo26_gpu_worker_attention_scratch_floats(config) *
+             sizeof(float);
+    /* Prefill scratch, all of it linear in the chunk. The widths follow
+     * scratch_resize: QKV fused and split, attention out, the projections,
+     * the three 16384-wide MLP buffers, the expert-major gather/stash, the
+     * F32 accumulator and the router buffers. */
+    const uint64_t chunk =
+        config->prefill_chunk > 0u ? (uint64_t)config->prefill_chunk : 1u;
+    total += chunk * (2ull * HIDDEN + MIMO26_SWA_QKV_WIDTH +
+                      MIMO26_QUERY_HEADS * QK +
+                      MIMO26_SWA_KV_HEADS * (QK + VD) +
+                      MIMO26_QUERY_HEADS * VD +
+                      3ull * 16384ull +
+                      2ull * HIDDEN +
+                      MIMO26_ROUTER_TOP_K * HIDDEN) * sizeof(uint16_t);
+    total += chunk * (HIDDEN + MIMO26_ROUTER_EXPERTS + MIMO26_ROUTER_TOP_K) *
+             sizeof(float);
+    total += chunk * 2ull * MIMO26_ROUTER_TOP_K * sizeof(uint32_t);
+    /* Pinned staging ring for expert uploads. */
+    total += (uint64_t)MIMO26_STAGING_SLOTS * MIMO26_STAGING_BYTES;
     return total;
 }
 
@@ -710,7 +809,13 @@ static void scratch_resize(mimo26_gpu_worker *worker, size_t chunk,
     hipFree(s->router_logits);
     hipFree(s->router_weights);
     hipFree(s->router_ids);
-    hipFree(s->attention_scratch);
+    /*
+     * attention_scratch is deliberately NOT resized here. It is the largest
+     * buffer in the profile at a long context -- chunk * 64 * (capacity + 2)
+     * floats is 8 GiB at 262144 -- so it is allocated once at load, under the
+     * configured cap and inside the startup guard's accounting. Prefill splits
+     * its batch to fit whatever was allocated.
+     */
     if (hipMalloc(&s->accumulator, chunk * HIDDEN * sizeof(float)) !=
             hipSuccess ||
         hipMalloc(&s->router_logits,
@@ -721,10 +826,6 @@ static void scratch_resize(mimo26_gpu_worker *worker, size_t chunk,
             hipSuccess ||
         hipMalloc(&s->router_ids,
                   chunk * MIMO26_ROUTER_TOP_K * sizeof(uint32_t)) !=
-            hipSuccess ||
-        hipMalloc(&s->attention_scratch,
-                  chunk * mimo26_rocm_attention_scratch_floats(
-                              s->attention_capacity) * sizeof(float)) !=
             hipSuccess) {
         return;
     }
@@ -1011,10 +1112,17 @@ mimo26_gpu_worker_status mimo26_gpu_worker_create(
     DEVICE(hidden, hidden_tokens * HIDDEN * sizeof(uint16_t));
     DEVICE(normed, HIDDEN * sizeof(uint16_t));
     DEVICE(device_logits, (size_t)VOCAB * sizeof(float));
-    DEVICE(device_keys,
-           (size_t)capacity * MIMO26_SWA_KV_HEADS * QK * sizeof(uint16_t));
-    DEVICE(device_values,
-           (size_t)capacity * MIMO26_SWA_KV_HEADS * VD * sizeof(uint16_t));
+    /*
+     * Staging for the layer being processed, so it needs the widest single
+     * layer view, not capacity times the larger head count. A global layer is
+     * 4 heads over the whole capacity; a windowed one is 8 heads over a 128
+     * ring plus the chunk appended on device. Sizing it at capacity * 8 -- as
+     * it was until 2026-09-24 -- reserved exactly twice the worst case, 0.6 GiB
+     * of it at a 262144 context.
+     */
+    const size_t kv_view_slots = kv_view_entries(config);
+    DEVICE(device_keys, kv_view_slots * QK * sizeof(uint16_t));
+    DEVICE(device_values, kv_view_slots * VD * sizeof(uint16_t));
     DEVICE(cos_table, MIMO26_ROPE_DIM * sizeof(uint16_t));
     DEVICE(sin_table, MIMO26_ROPE_DIM * sizeof(uint16_t));
     #undef DEVICE
@@ -1036,8 +1144,16 @@ mimo26_gpu_worker_status mimo26_gpu_worker_create(
     SCRATCH(router_logits, MIMO26_ROUTER_EXPERTS * sizeof(float));
     SCRATCH(router_weights, MIMO26_ROUTER_TOP_K * sizeof(float));
     SCRATCH(router_ids, MIMO26_ROUTER_TOP_K * sizeof(uint32_t));
+    /*
+     * Sized once, here, for the widest prefill the cap allows -- not grown
+     * later by scratch_resize. Growing it on the first prefill would move the
+     * largest allocation in the profile past the startup guard, which is the
+     * one place that can still refuse cleanly.
+     */
+    worker->scratch.attention_scratch_floats =
+        mimo26_gpu_worker_attention_scratch_floats(config);
     SCRATCH(attention_scratch,
-            mimo26_rocm_attention_scratch_floats(capacity) * sizeof(float));
+            worker->scratch.attention_scratch_floats * sizeof(float));
     #undef SCRATCH
 
     /*

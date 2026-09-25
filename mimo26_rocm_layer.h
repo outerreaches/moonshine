@@ -149,7 +149,15 @@ typedef struct {
     float *router_weights;/* [8] f32 */
     uint32_t *router_ids; /* [8] u32 */
     float *attention_scratch;     /* mimo26_rocm_attention_scratch_floats() */
-    uint64_t attention_capacity;  /* history the scratch was sized for */
+    uint64_t attention_capacity;  /* deepest history the context allows */
+    /*
+     * Floats actually allocated. Kept apart from attention_capacity because a
+     * full-width chunk at the deepest history wants 8 GiB at a 262144 context,
+     * which does not fit beside the expert cache. The prefill path attends in
+     * sub-batches that fit this buffer instead, so the allocation is a tuning
+     * decision rather than a context limit.
+     */
+    uint64_t attention_scratch_floats;
     /*
      * Prefill widths. Zero means decode-only: the prefill entry point
      * refuses rather than overrunning buffers sized for one token, which is

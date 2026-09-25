@@ -43,7 +43,6 @@
 #define MAX_REQUEST_BYTES (1u << 20)      /* 1 MiB; a text turn is far less */
 #define MAX_MESSAGES 64u
 #define DEFAULT_MAX_TOKENS 512u
-#define DEFAULT_DEADLINE_SECONDS 600.0
 
 static volatile sig_atomic_t g_shutdown = 0;
 
@@ -395,6 +394,7 @@ typedef struct {
     bool               expert_lookahead;
     bool               expert_major;
     bool               retain_experts;
+    double             request_deadline_seconds;
     uint64_t           served;
     /* Consecutive supervised restarts that did not lead to a clean request.
      * Bounded so a persistently broken worker stops thrashing and stays
@@ -1042,7 +1042,8 @@ static void handle_chat(server_runtime *runtime, int fd,
     attempt_recovery(runtime);
     const double started = now_seconds();
     const mimo26_slot_admission admission =
-        mimo26_slot_admit(&runtime->slot, started, DEFAULT_DEADLINE_SECONDS,
+        mimo26_slot_admit(&runtime->slot, started,
+                          runtime->request_deadline_seconds,
                           request.max_tokens);
     if (admission != MIMO26_SLOT_ADMIT_OK) {
         const char *reason_code =
@@ -1482,6 +1483,7 @@ int main(int argc, char **argv)
     runtime.expert_major = config.expert_major;
     runtime.expert_lookahead = config.expert_lookahead;
     runtime.retain_experts = options.retain_experts;
+    runtime.request_deadline_seconds = (double)options.request_deadline_seconds;
     mimo26_slot_init(&runtime.slot);
 
     char error[512];
@@ -1491,10 +1493,11 @@ int main(int argc, char **argv)
         return 1;
     }
     printf("loading the worker (%u expert slots per layer, context %zu, "
-           "prefill chunk %u, expert lookahead %s)\n",
+           "prefill chunk %u, expert lookahead %s, request deadline %us)\n",
            (unsigned)config.expert_slots_per_layer,
            config.global_kv_capacity, (unsigned)config.prefill_chunk,
-           config.expert_lookahead ? "on" : "off");
+           config.expert_lookahead ? "on" : "off",
+           (unsigned)options.request_deadline_seconds);
     /*
      * Profile-aware memory guard, before anything is allocated.
      *

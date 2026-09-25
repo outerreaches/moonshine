@@ -9,7 +9,7 @@
  * mimo26_gpu_worker_config_defaults. */
 static void server_defaults(mimo26_server_options *o) {
     o->worker.expert_slots_per_layer = 160u;
-    o->worker.global_kv_capacity = 2048u;
+    o->worker.global_kv_capacity = 262144u;
     o->worker.prefill_chunk = 128u;
     o->worker.expert_lookahead = true;
     o->worker.expert_major = true;
@@ -83,10 +83,31 @@ int main(void) {
         server_defaults(&got);
         const char *argv[]={"x","root"};
         assert(mimo26_server_parse_options(2,(char**)argv,&got,error,sizeof error));
-        assert(got.min_headroom_gib==10u);
+        assert(got.min_headroom_gib==8u);
         const char *argv2[]={"x","root","--min-headroom-gib","12"};
         assert(mimo26_server_parse_options(4,(char**)argv2,&got,error,sizeof error));
         assert(got.min_headroom_gib==12u);
+    }
+    /*
+     * The request deadline is the real cap on prompt length, so it has to be
+     * reachable from the command line. It was a hardcoded 600 until 2026-09-24,
+     * which silently limited cold prompts to ~11K tokens.
+     */
+    {
+        mimo26_server_options got; char error[256];
+        memset(&got,0,sizeof got);
+        server_defaults(&got);
+        const char *argv[]={"x","root"};
+        assert(mimo26_server_parse_options(2,(char**)argv,&got,error,sizeof error));
+        assert(got.request_deadline_seconds==600u);
+        const char *argv2[]={"x","root","--request-deadline-seconds","5400"};
+        assert(mimo26_server_parse_options(4,(char**)argv2,&got,error,sizeof error));
+        assert(got.request_deadline_seconds==5400u);
+        /* Zero would mean a request that can never run; refuse it. */
+        const char *argv3[]={"x","root","--request-deadline-seconds","0"};
+        assert(!mimo26_server_parse_options(4,(char**)argv3,&got,error,sizeof error));
+        const char *argv4[]={"x","root","--request-deadline-seconds","86401"};
+        assert(!mimo26_server_parse_options(4,(char**)argv4,&got,error,sizeof error));
     }
     /* Grouped prefill follows lookahead by default, but the explicit
      * contradiction is refused rather than quietly downgraded. */
@@ -105,6 +126,7 @@ int main(void) {
         assert(mimo26_server_parse_options(2,(char**)d,&got,error,sizeof error));
         assert(got.worker.expert_major && got.worker.expert_lookahead);
         assert(got.worker.expert_slots_per_layer==160u);
+        assert(got.worker.global_kv_capacity==262144u);
         server_defaults(&got);
         const char *off[]={"x","root","--expert-lookahead","off"};
         assert(mimo26_server_parse_options(4,(char**)off,&got,error,sizeof error));

@@ -891,6 +891,7 @@ bool mimo26_rocm_attention_decode(void *out, const void *query,
 bool mimo26_rocm_attention_prefill(void *out, const void *query,
                                    const void *keys, const void *values,
                                    const void *sink_bias, float *scratch,
+                                   uint64_t scratch_floats,
                                    uint32_t kv_heads, uint32_t kv_groups,
                                    uint32_t window, uint64_t history,
                                    uint64_t first_position,
@@ -898,7 +899,7 @@ bool mimo26_rocm_attention_prefill(void *out, const void *query,
                                    uint32_t query_count, float scale,
                                    void *stream)
 {
-    if (query_count == 0u) {
+    if (query_count == 0u || scratch == NULL) {
         return false;
     }
     /*
@@ -907,10 +908,48 @@ bool mimo26_rocm_attention_prefill(void *out, const void *query,
      * inside the chunk then falls out of the absolute-position predicate --
      * token b sees history plus chunk entries 0..b and nothing after.
      */
-    return attention_launch(out, query, keys, values, NULL, NULL, sink_bias,
-                            scratch, kv_heads, kv_groups, window, history,
-                            first_position, first_query_position, scale,
-                            false, stream, query_count);
+    if (history < query_count) {
+        return false;
+    }
+    /* Keys for chunk token 0 sit at this slot, so a sub-batch ending at chunk
+     * offset e must be given prior + e slots. */
+    const uint64_t prior = history - query_count;
+
+    /*
+     * Widest sub-batch the buffer allows at the deepest history, which is what
+     * the last sub-batch asks for. Sizing off that worst case keeps every
+     * launch the same width and the bound honest.
+     */
+    const uint64_t row_floats = mimo26_rocm_attention_scratch_floats(history);
+    if (row_floats == 0u || scratch_floats < row_floats) {
+        return false;
+    }
+    uint64_t width = scratch_floats / row_floats;
+    if (width > query_count) {
+        width = query_count;
+    }
+
+    for (uint64_t offset = 0u; offset < query_count; offset += width) {
+        uint64_t n = query_count - offset;
+        if (n > width) {
+            n = width;
+        }
+        /* Exactly the slots this sub-batch's last query can see. Everything
+         * past it was masked out of the full-width call regardless. */
+        const uint64_t sub_history = prior + offset + n;
+        if (!attention_launch(
+                (uint16_t *)out +
+                    offset * MIMO26_ROCM_QUERY_HEADS * MIMO26_ROCM_V_DIM,
+                (const uint16_t *)query +
+                    offset * MIMO26_ROCM_QUERY_HEADS * MIMO26_ROCM_QK_DIM,
+                keys, values, NULL, NULL, sink_bias, scratch, kv_heads,
+                kv_groups, window, sub_history, first_position,
+                first_query_position + offset, scale, false, stream,
+                (uint32_t)n)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool mimo26_rocm_attention_scores(const void *query, const void *keys,

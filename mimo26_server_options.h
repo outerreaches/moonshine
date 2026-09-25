@@ -18,13 +18,32 @@ typedef struct {
      * profile's predicted resident footprint. 0 disables the check.
      *
      * A profile's memory cost is a property of the flags, not something to
-     * discover by swapping. 10 GiB as of 2026-09-24, matching the operator's
-     * stated tolerance on a host that runs nothing else: it admits the
-     * default 160-slot profile (104.9 GiB predicted, ~16 GiB left) and still
-     * refuses 176 slots (114.3 GiB, ~7 GiB left), which is the configuration
-     * measured to swap during allocation.
+     * discover by swapping. 8 GiB as of 2026-09-24, the operator's stated
+     * minimum for this host, which runs nothing else. It admits the 160-slot
+     * 262144-context profile (111.4 GiB predicted, ~8.3 GiB left) and still
+     * refuses 176 slots, the configuration measured to swap during allocation.
+     *
+     * 8 is deliberately close to the bone and is a decision about THIS box. A
+     * public default should be higher: the 160-slot profile clears it by only
+     * ~0.3 GiB, so a host with less free memory will be refused -- correctly,
+     * but the conservative 128-slot profile leaves ~27 GiB at the same context
+     * and is the one to ship where the host is unknown.
      */
     uint32_t min_headroom_gib;
+    /*
+     * Wall-clock budget for one request, in seconds. Checked between prefill
+     * chunks and decode steps, so it bounds a slow request rather than a hung
+     * one.
+     *
+     * It is the real ceiling on prompt length, and until 2026-09-24 it was a
+     * hardcoded 600 that no flag could reach. Cold prefill measured ~18 tok/s,
+     * so 600 s admits about 11K prompt tokens -- an 11,053-token probe spent
+     * its entire budget in prefill and returned zero completion tokens. A
+     * 262144 context is unreachable in one cold request at any deadline worth
+     * setting (~4 hours); it is for sessions that accumulate across turns with
+     * retained KV, not for single enormous prompts.
+     */
+    uint32_t request_deadline_seconds;
     mimo26_gpu_worker_config worker;
 } mimo26_server_options;
 
@@ -53,7 +72,8 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
     mimo26_server_options parsed = *options;
     parsed.root = argv[1]; parsed.host = "127.0.0.1"; parsed.port = 8640;
     parsed.retain_experts = false;
-    parsed.min_headroom_gib = 10u;
+    parsed.min_headroom_gib = 8u;
+    parsed.request_deadline_seconds = 600u;
     unsigned seen = 0;
     for (int i = 2; i < argc; i += 2) {
         const char *key = argv[i];
@@ -67,6 +87,7 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
         else if (!strcmp(key,"--retain-experts")) bit=64;
         else if (!strcmp(key,"--min-headroom-gib")) bit=128;
         else if (!strcmp(key,"--expert-major")) bit=256;
+        else if (!strcmp(key,"--request-deadline-seconds")) bit=512;
         if (!bit || (seen & bit) || i + 1 >= argc) {
             snprintf(error,error_size,"unknown, duplicate or missing-value option: %s",key); return false;
         }
@@ -91,6 +112,7 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
             if (bit == 4) {low=8;high=256;}
             if (bit == 16) {low=0;high=128;}
             if (bit == 128) {low=0;high=512;}
+            if (bit == 512) {low=1;high=86400;}
             if (!mimo26_server_decimal(value,low,high,&number)) {
                 snprintf(error,error_size,"invalid integer for %s",key); return false;
             }
@@ -99,6 +121,7 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
             if (bit == 8) parsed.worker.global_kv_capacity=(size_t)number;
             if (bit == 16) parsed.worker.prefill_chunk=(uint16_t)number;
             if (bit == 128) parsed.min_headroom_gib=(uint32_t)number;
+            if (bit == 512) parsed.request_deadline_seconds=(uint32_t)number;
         }
     }
     /*
