@@ -151,15 +151,36 @@ def build(a):
     out.mkdir(parents=True)
 
     shutil.copy2(binary, out / "mimo26_server")
+    binary_sha = sha256(out / "mimo26_server")
     qualification = None
     if a.qualification:
         source = Path(a.qualification).resolve()
-        shutil.copy2(source, out / "qualification.json")
         report = json.loads(source.read_text())
+        """
+        The link that makes a signature mean anything.
+
+        A report's `version` is a compile-time constant shared by every build,
+        so embedding a report proves nothing about the binary beside it. The
+        report now names the binary it drove, by hashing the running inode, and
+        a release whose evidence names a different one is refused here rather
+        than discovered later by whoever trusted the signature.
+        """
+        tested = (report.get("build") or {}).get("sha256")
+        if tested is None:
+            shutil.rmtree(out, ignore_errors=True)
+            sys.exit("qualification report does not identify the binary it "
+                     "tested; re-run qualify.py, which records it")
+        if tested != binary_sha:
+            shutil.rmtree(out, ignore_errors=True)
+            sys.exit(f"qualification tested {tested[:16]}… but this binary is "
+                     f"{binary_sha[:16]}…; the report does not cover it")
+        shutil.copy2(source, out / "qualification.json")
         qualification = {
             "source": str(source),
             "sha256": sha256(out / "qualification.json"),
             "label": report.get("label"),
+            "build_sha256": tested,
+            "stock_profile": report.get("stock_profile"),
             "profile": report.get("profile", {}),
             "checks_passed": sum(1 for c in report.get("checks", [])
                                  if c.get("pass")),
@@ -184,7 +205,7 @@ def build(a):
         "built_at_utc": stamp,
         "built_by": "tools/mimo26_package.py",
         "binary": {"name": "mimo26_server",
-                   "sha256": sha256(out / "mimo26_server"),
+                   "sha256": binary_sha,
                    "bytes": (out / "mimo26_server").stat().st_size},
         "sources": sources,
         "toolchain": toolchain(),
@@ -203,7 +224,12 @@ def build(a):
     print(f"  sources      {len(sources)} files pinned")
     if qualification:
         print(f"  qualified    {qualification['label']} "
-              f"{qualification['checks_passed']}/{qualification['checks_total']}")
+              f"{qualification['checks_passed']}/{qualification['checks_total']}"
+              f", binary matches")
+        if qualification.get("stock_profile") is not True:
+            print("               NOT the stock profile -- this release is "
+                  "qualified for the flags that run were given, not for "
+                  "no-flags defaults")
     else:
         print("  qualified    NONE -- activate will refuse this release")
     if manifest["model"]:
@@ -293,6 +319,9 @@ def verify_release(path, quiet=False):
         qp = path / "qualification.json"
         if not qp.exists() or sha256(qp) != q["sha256"]:
             return False, "qualification report missing or altered"
+        if q.get("build_sha256") != manifest["binary"]["sha256"]:
+            return False, ("qualification names a different binary than the "
+                           "one in this release")
     expected = {"manifest.json", "manifest.sha256", manifest["binary"]["name"]}
     if q:
         expected.add("qualification.json")

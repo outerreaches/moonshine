@@ -469,6 +469,15 @@ typedef struct {
      * than only transmitting it. */
     uint32_t           min_headroom_gib;
     bool               api_key_set;
+    /*
+     * Whether the resolved profile is this build's compiled-in default.
+     *
+     * A qualification run against a non-default profile says nothing about
+     * what an operator gets by passing no flags, and the packager has no way
+     * to learn a binary's defaults without loading a model. So the binary
+     * answers the question itself.
+     */
+    bool               stock_profile;
     uint32_t          *resident_ids;
     size_t             resident_count;
     size_t             resident_capacity;
@@ -837,6 +846,7 @@ static void send_health(int fd, server_runtime *runtime)
         body, sizeof body,
         "{\"status\":\"%s\",\"ready\":%s,\"model\":\"%s\","
         "\"version\":\"" MOONSHINE_VERSION "\",\"auth\":\"%s\","
+        "\"pid\":%d,\"stock_profile\":%s,"
         "\"phase\":\"%s\",\"context\":%zu,\"prefill_chunk\":%u,\"expert_lookahead\":%s,"
         "\"expert_major\":%s,\"expert_slots\":%u,"
         "\"kv_prefix_reuse\":%s,\"prefix_hits\":%llu,"
@@ -853,6 +863,7 @@ static void send_health(int fd, server_runtime *runtime)
         slot->phase == MIMO26_SLOT_QUARANTINED ? "degraded" : "ok",
         mimo26_slot_ready(slot) ? "true" : "false", MODEL_ID,
         runtime->api_key_set ? "on" : "off",
+        (int)getpid(), runtime->stock_profile ? "true" : "false",
         mimo26_slot_phase_name(slot->phase), runtime->context_capacity,
         (unsigned)runtime->prefill_chunk, runtime->expert_lookahead ? "true" : "false",
         runtime->expert_major ? "true" : "false",
@@ -1950,6 +1961,22 @@ int main(int argc, char **argv)
     runtime.min_headroom_gib = options.min_headroom_gib;
     g_max_output_tokens = options.max_output_tokens;
     runtime.api_key_set = options.api_key != NULL;
+    {
+        mimo26_gpu_worker_config stock;
+        mimo26_gpu_worker_config_defaults(&stock);
+        char ignored[256];
+        (void)mimo26_gpu_worker_resolve_overrides(&stock, ignored,
+                                                  sizeof ignored);
+        runtime.stock_profile =
+            config.expert_slots_per_layer == stock.expert_slots_per_layer &&
+            config.global_kv_capacity == stock.global_kv_capacity &&
+            config.prefill_chunk == stock.prefill_chunk &&
+            config.expert_lookahead == stock.expert_lookahead &&
+            config.expert_major == stock.expert_major &&
+            options.retain_experts == true &&
+            options.request_deadline_seconds == 600u &&
+            options.min_headroom_gib == 8u;
+    }
 
     mimo26_slot_init(&runtime.slot);
 
