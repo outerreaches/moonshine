@@ -40,10 +40,23 @@ typedef struct {
      * so 600 s admits about 11K prompt tokens -- an 11,053-token probe spent
      * its entire budget in prefill and returned zero completion tokens. A
      * 262144 context is unreachable in one cold request at any deadline worth
-     * setting (~4 hours); it is for sessions that accumulate across turns with
-     * retained KV, not for single enormous prompts.
+     * setting (~4 hours). It is only reachable by a session that accumulates
+     * across turns, which requires --kv-prefix-reuse below; without that every
+     * turn re-prefills the whole history and the ceiling is the deadline.
      */
     uint32_t request_deadline_seconds;
+    /*
+     * Continue from the KV already resident when the new prompt begins with
+     * exactly the token sequence it holds, prefilling only the remainder.
+     *
+     * This is a DIFFERENT feature from --retain-experts, which keeps expert
+     * payloads and still clears KV at every request boundary. Without this,
+     * a multi-turn client re-prefills its whole history every turn.
+     *
+     * Default off until reused continuations are shown to match fresh
+     * full-prefill results, per the 2026-09-25 review.
+     */
+    bool kv_prefix_reuse;
     mimo26_gpu_worker_config worker;
 } mimo26_server_options;
 
@@ -74,6 +87,7 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
     parsed.retain_experts = false;
     parsed.min_headroom_gib = 8u;
     parsed.request_deadline_seconds = 600u;
+    parsed.kv_prefix_reuse = false;
     unsigned seen = 0;
     for (int i = 2; i < argc; i += 2) {
         const char *key = argv[i];
@@ -88,6 +102,7 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
         else if (!strcmp(key,"--min-headroom-gib")) bit=128;
         else if (!strcmp(key,"--expert-major")) bit=256;
         else if (!strcmp(key,"--request-deadline-seconds")) bit=512;
+        else if (!strcmp(key,"--kv-prefix-reuse")) bit=1024;
         if (!bit || (seen & bit) || i + 1 >= argc) {
             snprintf(error,error_size,"unknown, duplicate or missing-value option: %s",key); return false;
         }
@@ -99,12 +114,13 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
                 snprintf(error,error_size,"--host requires an IPv4 address"); return false;
             }
             parsed.host=value;
-        } else if (bit == 32 || bit == 64 || bit == 256) {
+        } else if (bit == 32 || bit == 64 || bit == 256 || bit == 1024) {
             if (strcmp(value,"on") && strcmp(value,"off")) {
                 snprintf(error,error_size,"%s requires on or off",key); return false;
             }
             if (bit == 32) parsed.worker.expert_lookahead=!strcmp(value,"on");
             else if (bit == 256) parsed.worker.expert_major=!strcmp(value,"on");
+            else if (bit == 1024) parsed.kv_prefix_reuse=!strcmp(value,"on");
             else parsed.retain_experts=!strcmp(value,"on");
         } else {
             uint64_t low=1,high=UINT32_MAX;

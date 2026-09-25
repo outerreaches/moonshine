@@ -395,6 +395,23 @@ typedef struct {
     bool               expert_major;
     bool               retain_experts;
     double             request_deadline_seconds;
+    /*
+     * The exact token sequence believed to be committed to the worker's KV,
+     * so the next request can continue from it instead of re-prefilling.
+     *
+     * Published only after a request completes cleanly, and invalidated at the
+     * start of every request. Any path that leaves the handler without
+     * republishing therefore leaves the next request to reset and prefill in
+     * full -- the failure mode is lost work, never reuse of damaged history.
+     */
+    bool               kv_prefix_reuse;
+    uint32_t          *resident_ids;
+    size_t             resident_count;
+    size_t             resident_capacity;
+    bool               resident_valid;
+    uint64_t           prefix_hits;
+    uint64_t           prefix_misses;
+    uint64_t           prefix_tokens_saved;
     uint64_t           served;
     /* Consecutive supervised restarts that did not lead to a clean request.
      * Bounded so a persistently broken worker stops thrashing and stays
@@ -416,6 +433,111 @@ static bool reset_request_worker(server_runtime *runtime, char *error, size_t si
         return false;
     }
     return true;
+}
+
+/*
+ * The exact sequence committed to KV during one request: the prompt, then
+ * every token handed to decode, in order. Built alongside the request so the
+ * resident prefix published at the end is what the worker actually holds
+ * rather than a reconstruction of it.
+ *
+ * `ok` goes false on any allocation failure, which only costs the next request
+ * its reuse.
+ */
+typedef struct {
+    uint32_t *ids;
+    size_t    count;
+    size_t    capacity;
+    bool      ok;
+} token_trail;
+
+static void trail_push(token_trail *trail, uint32_t id)
+{
+    if (!trail->ok) {
+        return;
+    }
+    if (trail->count == trail->capacity) {
+        const size_t grown = trail->capacity ? trail->capacity * 2u : 256u;
+        uint32_t *ids = (uint32_t *)realloc(trail->ids, grown * sizeof *ids);
+        if (ids == NULL) {
+            trail->ok = false;
+            return;
+        }
+        trail->ids = ids;
+        trail->capacity = grown;
+    }
+    trail->ids[trail->count++] = id;
+}
+
+/* The resident prefix is a claim about worker state; drop it whenever that
+ * claim might no longer hold. */
+static void resident_invalidate(server_runtime *runtime)
+{
+    runtime->resident_valid = false;
+    runtime->resident_count = 0;
+}
+
+/*
+ * Record the sequence now committed to KV. Called only on a clean completion,
+ * with the prompt followed by every token actually generated.
+ */
+static void resident_publish(server_runtime *runtime, const uint32_t *ids,
+                             size_t count)
+{
+    if (!runtime->kv_prefix_reuse || count == 0) {
+        resident_invalidate(runtime);
+        return;
+    }
+    if (count > runtime->resident_capacity) {
+        uint32_t *grown = (uint32_t *)realloc(runtime->resident_ids,
+                                              count * sizeof *grown);
+        if (grown == NULL) {           /* keep going without reuse */
+            resident_invalidate(runtime);
+            return;
+        }
+        runtime->resident_ids = grown;
+        runtime->resident_capacity = count;
+    }
+    memcpy(runtime->resident_ids, ids, count * sizeof *ids);
+    runtime->resident_count = count;
+    runtime->resident_valid = true;
+}
+
+/*
+ * How many leading tokens of `ids` the worker can keep.
+ *
+ * Reuse requires the resident sequence to be a STRICT prefix of the new
+ * prompt. A partial match would mean rewinding the divergent tail, and the KV
+ * journals only 8 steps because windowed layers cannot otherwise restore what
+ * they evicted -- so anything else resets and prefills in full.
+ *
+ * The worker's own committed position is the authority. If the server's
+ * bookkeeping disagrees with it by even one token, the belief is wrong and
+ * reuse is refused.
+ */
+static size_t plan_prefix_reuse(server_runtime *runtime, const uint32_t *ids,
+                                size_t count)
+{
+    if (!runtime->kv_prefix_reuse || !runtime->resident_valid ||
+        runtime->resident_count == 0) {
+        return 0;
+    }
+    /* Needs at least one new token: the last one produces the logits this
+     * request answers from, so a prompt already fully resident cannot be
+     * continued without re-running its final position. */
+    if (runtime->resident_count >= count) {
+        return 0;
+    }
+    if (!mimo26_gpu_worker_idle(runtime->worker) ||
+        mimo26_gpu_worker_position(runtime->worker) !=
+            (uint64_t)runtime->resident_count) {
+        return 0;
+    }
+    if (memcmp(runtime->resident_ids, ids,
+               runtime->resident_count * sizeof *ids) != 0) {
+        return 0;
+    }
+    return runtime->resident_count;
 }
 
 #define MAX_RECOVERY_ATTEMPTS 3u
@@ -473,6 +595,8 @@ static void send_health(int fd, server_runtime *runtime)
         "{\"status\":\"%s\",\"ready\":%s,\"model\":\"%s\","
         "\"phase\":\"%s\",\"context\":%zu,\"prefill_chunk\":%u,\"expert_lookahead\":%s,"
         "\"expert_major\":%s,\"expert_slots\":%u,"
+        "\"kv_prefix_reuse\":%s,\"prefix_hits\":%llu,"
+        "\"prefix_misses\":%llu,\"prefix_tokens_saved\":%llu,"
         "\"retain_experts\":%s,\"served\":%llu,\"tokens\":%llu,"
         "\"expert_accesses\":%llu,\"expert_hits\":%llu,\"expert_uploads\":%llu,"
         "\"expert_hit_rate\":%.4f,\"resident_gib\":%.2f,"
@@ -485,6 +609,10 @@ static void send_health(int fd, server_runtime *runtime)
         (unsigned)runtime->prefill_chunk, runtime->expert_lookahead ? "true" : "false",
         runtime->expert_major ? "true" : "false",
         (unsigned)runtime->expert_slots_per_layer,
+        runtime->kv_prefix_reuse ? "true" : "false",
+        (unsigned long long)runtime->prefix_hits,
+        (unsigned long long)runtime->prefix_misses,
+        (unsigned long long)runtime->prefix_tokens_saved,
         runtime->retain_experts ? "true" : "false",
         (unsigned long long)runtime->served,
         (unsigned long long)stats.tokens,
@@ -1089,13 +1217,27 @@ static void handle_chat(server_runtime *runtime, int fd,
         return;
     }
 
-    if (!reset_request_worker(runtime, error, sizeof error)) {
-        fprintf(stderr, "mimo26: request reset refused: %s\n", error);
-        send_error(fd, 500, "Internal Server Error", "decode_failed",
-                   "the worker refused context reset and is quarantined");
-        mimo26_token_buffer_free(&prompt);
-        chat_request_free(&request);
-        return;
+    /*
+     * Decide reuse from the resident prefix, then drop the claim immediately.
+     * It is republished only where this handler completes cleanly, so every
+     * early return, fault and cancellation below leaves the next request to
+     * reset and prefill in full.
+     */
+    const size_t reuse = plan_prefix_reuse(runtime, prompt.ids, prompt.count);
+    resident_invalidate(runtime);
+    if (reuse > 0) {
+        runtime->prefix_hits++;
+        runtime->prefix_tokens_saved += (uint64_t)reuse;
+    } else {
+        runtime->prefix_misses++;
+        if (!reset_request_worker(runtime, error, sizeof error)) {
+            fprintf(stderr, "mimo26: request reset refused: %s\n", error);
+            send_error(fd, 500, "Internal Server Error", "decode_failed",
+                       "the worker refused context reset and is quarantined");
+            mimo26_token_buffer_free(&prompt);
+            chat_request_free(&request);
+            return;
+        }
     }
     response_state state;
     memset(&state, 0, sizeof state);
@@ -1134,7 +1276,8 @@ static void handle_chat(server_runtime *runtime, int fd,
     prefill_request_context progress_context = {runtime, fd, request_control(runtime, fd)};
     if (progress_context.stop != MIMO26_SLOT_CONTINUE) {
         /* No work or logits to consume when already stopped before prefill. */
-    } else if (mimo26_gpu_worker_prefill(runtime->worker, prompt.ids, prompt.count,
+    } else if (mimo26_gpu_worker_prefill(runtime->worker, prompt.ids + reuse,
+                                  prompt.count - reuse,
                                   logits, prefill_progress, &progress_context, error,
                                   sizeof error) != MIMO26_GPU_WORKER_OK) {
         failed = true;
@@ -1164,6 +1307,15 @@ static void handle_chat(server_runtime *runtime, int fd,
     mimo26_decode_stream_init(&decoder);
     const char *finish_reason = "stop";
     size_t produced_tokens = 0;
+    /*
+     * Seeded with the whole prompt -- including any part reused rather than
+     * prefilled, since the KV holds it either way -- then extended with every
+     * token decode commits.
+     */
+    token_trail trail = {NULL, 0, 0, true};
+    for (size_t i = 0; i < prompt.count; i++) {
+        trail_push(&trail, prompt.ids[i]);
+    }
     /*
      * Reasoning separation. The model opens its turn with <think>...</think>
      * and the tokens inside are not the answer. Routing them to a separate
@@ -1232,6 +1384,7 @@ static void handle_chat(server_runtime *runtime, int fd,
                 collected[collected_used] = '\0';
             }
             produced_tokens++;
+            trail_push(&trail, next);
             if (mimo26_gpu_worker_decode(runtime->worker, next, logits, error,
                                          sizeof error) !=
                 MIMO26_GPU_WORKER_OK) {
@@ -1245,6 +1398,7 @@ static void handle_chat(server_runtime *runtime, int fd,
             next == MIMO26_TOK_THINK_CLOSE) {
             /* The markers themselves belong in neither field. */
             produced_tokens++;
+            trail_push(&trail, next);
             if (mimo26_gpu_worker_decode(runtime->worker, next, logits, error,
                                          sizeof error) !=
                 MIMO26_GPU_WORKER_OK) {
@@ -1301,6 +1455,7 @@ static void handle_chat(server_runtime *runtime, int fd,
             }
         }
         produced_tokens++;
+        trail_push(&trail, next);
 
         if (mimo26_gpu_worker_decode(runtime->worker, next, logits, error,
                                      sizeof error) != MIMO26_GPU_WORKER_OK) {
@@ -1435,6 +1590,27 @@ static void handle_chat(server_runtime *runtime, int fd,
         runtime->recovery_attempts = 0u;
     }
 
+    /*
+     * Publish the resident prefix only for a generation that ran to its own
+     * end. A cancelled or deadlined request leaves KV consistent but short of
+     * this trail -- prefill may have stopped mid-prompt -- so claiming it
+     * would describe state the worker does not have. plan_prefix_reuse checks
+     * the worker's committed position against this count as well, so a wrong
+     * claim costs a reset rather than corrupt history.
+     */
+    const bool clean_end = !failed && trail.ok &&
+                           (!strcmp(finish_reason, "stop") ||
+                            !strcmp(finish_reason, "length") ||
+                            !strcmp(finish_reason, "tool_calls"));
+    if (clean_end && mimo26_gpu_worker_idle(runtime->worker) &&
+        mimo26_gpu_worker_position(runtime->worker) ==
+            (uint64_t)trail.count) {
+        resident_publish(runtime, trail.ids, trail.count);
+    } else {
+        resident_invalidate(runtime);
+    }
+    free(trail.ids);
+
     free(collected);
     free(reasoning);
     free(logits);
@@ -1453,7 +1629,9 @@ int main(int argc, char **argv)
                 "usage: %s ROOT [--port N] [--host H] [--slots N] "
                 "[--context N] [--prefill-chunk 0..128] "
                 "[--expert-lookahead on|off] [--retain-experts on|off] "
-                "[--min-headroom-gib N] [--expert-major on|off]\n", argv[0]);
+                "[--min-headroom-gib N] [--expert-major on|off] "
+                "[--request-deadline-seconds N] [--kv-prefix-reuse on|off]\n",
+                argv[0]);
         return argc < 2 ? 2 : 0;
     }
     /* Local-only by default. Remote exposure needs an authentication and
@@ -1498,6 +1676,7 @@ int main(int argc, char **argv)
     runtime.expert_lookahead = config.expert_lookahead;
     runtime.retain_experts = options.retain_experts;
     runtime.request_deadline_seconds = (double)options.request_deadline_seconds;
+    runtime.kv_prefix_reuse = options.kv_prefix_reuse;
     mimo26_slot_init(&runtime.slot);
 
     char error[512];

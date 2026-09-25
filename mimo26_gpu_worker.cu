@@ -1831,13 +1831,19 @@ mimo26_gpu_worker_status mimo26_gpu_worker_rollback(mimo26_gpu_worker *worker,
     return MIMO26_GPU_WORKER_OK;
 }
 
+bool mimo26_gpu_worker_idle(const mimo26_gpu_worker *worker)
+{
+    return worker != NULL && !worker->execution_active &&
+           !worker->retention_faulted &&
+           !mimo26_kv_in_transaction(worker->kv) &&
+           k3_io_uring_outstanding(worker->ring) == 0u;
+}
+
 mimo26_gpu_worker_status mimo26_gpu_worker_reset_context(
     mimo26_gpu_worker *worker, char *error, size_t error_size)
 {
     if (worker == NULL) return MIMO26_GPU_WORKER_INVALID_ARGUMENT;
-    if (worker->execution_active || worker->retention_faulted ||
-        mimo26_kv_in_transaction(worker->kv) ||
-        k3_io_uring_outstanding(worker->ring) != 0u) {
+    if (!mimo26_gpu_worker_idle(worker)) {
         return fail(error, error_size, MIMO26_GPU_WORKER_DECODE_FAILED,
                     "weight retention requires a healthy idle worker; recreate after faults");
     }

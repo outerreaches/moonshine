@@ -127,6 +127,13 @@ bool mimo26_gpu_worker_expert_major(const mimo26_gpu_worker *worker);
 mimo26_gpu_worker_status mimo26_gpu_worker_resolve_overrides(
     mimo26_gpu_worker_config *config, char *error, size_t error_size);
 
+/*
+ * Healthy and between requests: no execution in flight, no retention fault,
+ * no open KV transaction, no outstanding I/O. Continuing a context requires
+ * this exactly as resetting one does.
+ */
+bool mimo26_gpu_worker_idle(const mimo26_gpu_worker *worker);
+
 typedef struct {
     uint64_t tokens;
     uint64_t expert_accesses;
