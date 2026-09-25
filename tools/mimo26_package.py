@@ -15,6 +15,13 @@ atomic way to stop.
     list      show what is installed and which is live
     retire    unseal and delete a release that is neither current nor the
               rollback target
+    sign      attach a detached ssh signature over manifest.sha256
+
+Signing is deliberately a separate step: the key belongs to the operator, not
+to the build. `verify --allowed-signers FILE` then checks it, and
+`activate --require-signature` refuses anything unsigned. Trust lives in the
+verifier's allowed_signers file rather than in the artifact, which is the
+point -- a release cannot vouch for itself.
 
 A release carries the qualification report that justifies it. `activate`
 refuses a release without one, and refuses a build made from a dirty working
@@ -30,7 +37,7 @@ Layout:
     <root>/current  -> releases/<name>
     <root>/previous -> releases/<name>
 """
-import argparse, hashlib, json, os, shutil, stat, subprocess, sys, time
+import argparse, hashlib, json, os, shutil, subprocess, sys, time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -49,6 +56,64 @@ def git(*args):
     r = subprocess.run(["git", "-C", str(REPO), *args], capture_output=True,
                        text=True)
     return r.stdout.strip() if r.returncode == 0 else None
+
+
+def toolchain():
+    """What built this. Two builds from the same commit on different ROCm
+    versions differ in the binary and in nothing else recorded, so without
+    this the manifest cannot explain why."""
+    def first_line(*command):
+        try:
+            r = subprocess.run(command, capture_output=True, text=True,
+                               timeout=20)
+            return (r.stdout or r.stderr).strip().splitlines()[0]
+        except Exception:
+            return None
+    rocm = os.environ.get("ROCM_PATH", "/opt/rocm")
+    return {
+        "hipcc": first_line(f"{rocm}/bin/hipcc", "--version"),
+        "cc": first_line("cc", "--version"),
+        "rocm_path": rocm,
+        "rocm_version": (Path(rocm) / ".info" / "version").read_text().strip()
+        if (Path(rocm) / ".info" / "version").exists() else None,
+        "uname": first_line("uname", "-srm"),
+    }
+
+
+def model_fingerprint(root):
+    """Identify the checkpoint without reading 166 GiB of weights.
+
+    Hashes the small files that define the model -- config, tokenizer, chat
+    template, and the safetensors index that maps every tensor to its shard --
+    and records each shard's name and size. That detects a different
+    checkpoint, a missing shard or a truncated one. It does NOT detect an
+    edit inside a shard that preserves its length, and is named a fingerprint
+    rather than a hash for that reason.
+    """
+    root = Path(root)
+    if not root.is_dir():
+        return None
+    described = {}
+    for name in ("config.json", "generation_config.json",
+                 "tokenizer_config.json", "chat_template.jinja",
+                 "model.safetensors.index.json"):
+        item = root / name
+        if item.is_file():
+            described[name] = sha256(item)
+    shards = {}
+    for item in sorted(root.glob("*.safetensors")):
+        shards[item.name] = item.stat().st_size
+    digest = hashlib.sha256()
+    for name in sorted(described):
+        digest.update(name.encode()); digest.update(described[name].encode())
+    for name in sorted(shards):
+        digest.update(name.encode()); digest.update(str(shards[name]).encode())
+    return {"root": str(root), "describing_files": described,
+            "shard_count": len(shards),
+            "shard_bytes": sum(shards.values()),
+            "fingerprint": digest.hexdigest(),
+            "covers": "config, tokenizer, chat template and tensor index by "
+                      "content; shards by name and size only"}
 
 
 def seal(path):
@@ -122,8 +187,9 @@ def build(a):
                    "sha256": sha256(out / "mimo26_server"),
                    "bytes": (out / "mimo26_server").stat().st_size},
         "sources": sources,
+        "toolchain": toolchain(),
         "qualification": qualification,
-        "model_root": a.model,
+        "model": model_fingerprint(a.model) if a.model else None,
         "notes": a.note,
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=1) + "\n")
@@ -140,7 +206,70 @@ def build(a):
               f"{qualification['checks_passed']}/{qualification['checks_total']}")
     else:
         print("  qualified    NONE -- activate will refuse this release")
+    if manifest["model"]:
+        m = manifest["model"]
+        print(f"  model        {m['fingerprint'][:16]}… "
+              f"{m['shard_count']} shards, "
+              f"{m['shard_bytes'] / (1 << 30):.1f} GiB")
+    print("  signature    none -- sign it with `sign` before shipping")
     return 0
+
+
+SIGNATURE_NAMESPACE = "moonshine"
+
+
+def sign(a):
+    """Detached ssh signature over manifest.sha256, which transitively covers
+    the manifest and therefore the binary and every pinned source."""
+    release = Path(a.release).resolve()
+    ok, manifest = verify_release(release, quiet=True)
+    if not ok:
+        print(f"refusing to sign: {manifest}")
+        return 1
+    target = release / "manifest.sha256"
+    signature = release / "manifest.sha256.sig"
+    if signature.exists() and not a.force:
+        print("already signed; pass --force to replace")
+        return 1
+    unseal(release)
+    result = subprocess.run(
+        ["ssh-keygen", "-Y", "sign", "-f", str(Path(a.key).expanduser()),
+         "-n", SIGNATURE_NAMESPACE, str(target)],
+        capture_output=True, text=True)
+    if result.returncode != 0:
+        seal(release)
+        print(f"signing failed: {(result.stderr or result.stdout).strip()}")
+        return 1
+    seal(release)
+    print(f"signed {release.name} with {a.key}")
+    print(f"  {signature.name} covers manifest.sha256 -> manifest.json -> "
+          f"binary and sources")
+    return 0
+
+
+def check_signature(path, allowed_signers):
+    """Returns (state, detail). State is absent, unchecked, good or bad."""
+    signature = Path(path) / "manifest.sha256.sig"
+    if not signature.exists():
+        return "absent", "no signature"
+    if not allowed_signers:
+        return "unchecked", "signature present but no --allowed-signers given"
+    identity = None
+    for line in Path(allowed_signers).read_text().splitlines():
+        if line.strip() and not line.startswith("#"):
+            identity = line.split()[0]
+            break
+    if identity is None:
+        return "bad", "allowed_signers is empty"
+    with open(Path(path) / "manifest.sha256", "rb") as data:
+        result = subprocess.run(
+            ["ssh-keygen", "-Y", "verify", "-f", str(allowed_signers),
+             "-I", identity, "-n", SIGNATURE_NAMESPACE,
+             "-s", str(signature)],
+            stdin=data, capture_output=True, text=True)
+    if result.returncode == 0:
+        return "good", f"signed by {identity}"
+    return "bad", (result.stderr or result.stdout).strip()
 
 
 def verify_release(path, quiet=False):
@@ -167,6 +296,8 @@ def verify_release(path, quiet=False):
     expected = {"manifest.json", "manifest.sha256", manifest["binary"]["name"]}
     if q:
         expected.add("qualification.json")
+    if (path / "manifest.sha256.sig").exists():
+        expected.add("manifest.sha256.sig")
     actual = {p.name for p in path.iterdir()}
     if actual != expected:
         return False, f"unexpected contents: {sorted(actual ^ expected)}"
@@ -180,6 +311,13 @@ def verify(a):
     ok, detail = verify_release(a.release)
     if not ok:
         print(f"FAILED: {detail}")
+        return 1
+    state, note = check_signature(a.release, a.allowed_signers)
+    print(f"signature: {state} ({note})")
+    if state == "bad":
+        return 1
+    if a.require_signature and state != "good":
+        print("FAILED: a good signature was required")
         return 1
     return 0
 
@@ -206,6 +344,13 @@ def activate(a):
     if not manifest.get("qualification"):
         print("refusing to activate: no qualification report; package with "
               "--qualification RESULTS.json")
+        return 1
+    state, note = check_signature(release, a.allowed_signers)
+    if state == "bad":
+        print(f"refusing to activate: signature check failed: {note}")
+        return 1
+    if a.require_signature and state != "good":
+        print(f"refusing to activate: {note}")
         return 1
     root = Path(a.root).resolve()
     current = root / "current"
@@ -307,12 +452,19 @@ def main():
     b.add_argument("--note")
     v = sub.add_parser("verify"); v.set_defaults(fn=verify)
     v.add_argument("release")
+    v.add_argument("--allowed-signers")
+    v.add_argument("--require-signature", action="store_true")
     ac = sub.add_parser("activate"); ac.set_defaults(fn=activate)
     ac.add_argument("release"); ac.add_argument("--root", required=True)
+    ac.add_argument("--allowed-signers")
+    ac.add_argument("--require-signature", action="store_true")
     r = sub.add_parser("rollback"); r.set_defaults(fn=rollback)
     r.add_argument("--root", required=True)
     l = sub.add_parser("list"); l.set_defaults(fn=list_releases)
     l.add_argument("--root", required=True)
+    sg = sub.add_parser("sign"); sg.set_defaults(fn=sign)
+    sg.add_argument("release"); sg.add_argument("--key", required=True)
+    sg.add_argument("--force", action="store_true")
     rt = sub.add_parser("retire"); rt.set_defaults(fn=retire)
     rt.add_argument("release"); rt.add_argument("--root", required=True)
     rt.add_argument("--force", action="store_true")
