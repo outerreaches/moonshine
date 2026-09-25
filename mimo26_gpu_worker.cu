@@ -252,16 +252,26 @@ void mimo26_gpu_worker_config_defaults(mimo26_gpu_worker_config *config)
      *     160   62.5%  0.849    3.30  104.8 GiB
      *     176   68.8%     --      --   host swaps during load
      *
-     * 128 rather than 160: the last step buys 5.8% for another 19 GiB and
-     * leaves only ~16 GB of host memory, which a prefill spike or a
-     * cohabiting process would eat. 128 keeps ~35 GB of headroom.
+     * 160 rather than 128, decided 2026-09-24 on a matched ABBA over a mixed
+     * code/agentic corpus (tool-calling, code generation, code editing,
+     * structured extraction, prose), lookahead on in every arm, full-vector
+     * equality 30/30 throughout:
      *
-     * Lower whole-request GB/s at higher hit rates does not establish worse
-     * SSD efficiency or read amplification: prefill, compute and copying are
-     * included in that denominator. Retention, overlap and compute reuse are
-     * additional levers. Zero worker swap also does not imply zero host reclaim.
+     *   warm prefill total   128 slots 151.14 s   160 slots 128.23 s  -15.2%
+     *   per workload         -13.6% to -17.6%, consistent, not carried by one
+     *   throughput           13.72 -> 16.17 tok/s
+     *
+     * This replaces an earlier -17.8% from a single-prompt driver that was
+     * not an ABBA comparison. 160 is also the point where grouped prefill
+     * starts paying at all: a chunk touches ~135 distinct experts, so below
+     * that the working set cannot stay resident.
+     *
+     * Cost is +18.7 GiB resident, leaving ~16 GiB of host memory. That was
+     * previously treated as too thin; the operator's call is that it is not,
+     * on a host that runs nothing else. The startup guard's floor moved to
+     * 10 GiB to match, which still refuses 176 slots (7.4 GiB).
      */
-    config->expert_slots_per_layer = 128u;
+    config->expert_slots_per_layer = 160u;
     config->memory_limit_bytes = 0u;
     /*
      * 128 tokens per chunk, the maximum the CLI allows. The chunk is a
@@ -283,7 +293,8 @@ void mimo26_gpu_worker_config_defaults(mimo26_gpu_worker_config *config)
      * cost is trivial -- a few MiB -- now that the buffers are sized right.
      */
     config->prefill_chunk = 128u;
-    config->expert_lookahead = false;
+    config->expert_lookahead = true;
+    config->expert_major = true;
 }
 
 uint64_t mimo26_gpu_worker_planned_bytes(
@@ -1483,6 +1494,7 @@ mimo26_gpu_worker_status mimo26_gpu_worker_prefill(
                                          ? prepare_batch_future : NULL;
             context.prepare_group_future = w->is_moe && worker->config.expert_lookahead
                                          ? prepare_group_future : NULL;
+            context.expert_major = worker->config.expert_major;
 
             const mimo26_rocm_layer_status status = mimo26_rocm_layer_prefill(
                 &context, &worker->scratch, worker->hidden,

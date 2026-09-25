@@ -169,6 +169,13 @@ typedef struct {
     void                            *provider_context;
     mimo26_rocm_expert_prepare_future prepare_future; /* optional; zero-init */
     mimo26_rocm_expert_prepare_group_future prepare_group_future; /* optional; zero-init */
+    /*
+     * Group this chunk's tokens by selected expert. Set by the worker from
+     * its config, so the profile is explicit and visible on /health rather
+     * than depending on the environment. MIMO26_EXPERT_MAJOR=0 or =1 still
+     * overrides it for A/B work.
+     */
+    bool expert_major;
 } mimo26_rocm_layer;
 
 /*

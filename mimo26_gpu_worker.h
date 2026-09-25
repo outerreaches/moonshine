@@ -64,9 +64,24 @@ typedef struct {
      * that scales with the chunk.
      */
     uint16_t prefill_chunk;
-    /* Experimental prefill-only next-use eviction. Default false; arithmetic,
-     * decode scheduling and payload format are unchanged. */
+    /*
+     * Prefill-only next-use eviction. Default true as of 2026-09-24: it is
+     * what makes grouped prefill pay, and the grouped path is slower without
+     * it. Arithmetic, decode scheduling and payload format are unchanged.
+     */
     bool expert_lookahead;
+    /*
+     * Group a prefill chunk's tokens by selected expert. Default true as of
+     * 2026-09-24. Output is bit-identical to per-token execution -- verified
+     * on a mixed code/agentic corpus, 30/30 full vectors at both 128 and 160
+     * slots -- and it is worth -5.8% warm prefill at 160 slots, where the
+     * cache can hold a chunk's working set. At 128 slots it is neutral
+     * (-0.7%, inside noise), so enabling it by default costs nothing there.
+     *
+     * Requires expert_lookahead: without the remaining-group schedule the
+     * cache treats each group as a one-off access and the path is slower.
+     */
+    bool expert_major;
 } mimo26_gpu_worker_config;
 
 void mimo26_gpu_worker_config_defaults(mimo26_gpu_worker_config *config);

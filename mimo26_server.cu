@@ -393,6 +393,7 @@ typedef struct {
     uint16_t           prefill_chunk;
     uint16_t           expert_slots_per_layer;
     bool               expert_lookahead;
+    bool               expert_major;
     bool               retain_experts;
     uint64_t           served;
     /* Consecutive supervised restarts that did not lead to a clean request.
@@ -470,7 +471,8 @@ static void send_health(int fd, server_runtime *runtime)
     const int size = snprintf(
         body, sizeof body,
         "{\"status\":\"%s\",\"ready\":%s,\"model\":\"%s\","
-        "\"phase\":\"%s\",\"context\":%zu,\"prefill_chunk\":%u,\"expert_lookahead\":%s,\"expert_slots\":%u,"
+        "\"phase\":\"%s\",\"context\":%zu,\"prefill_chunk\":%u,\"expert_lookahead\":%s,"
+        "\"expert_major\":%s,\"expert_slots\":%u,"
         "\"retain_experts\":%s,\"served\":%llu,\"tokens\":%llu,"
         "\"expert_accesses\":%llu,\"expert_hits\":%llu,\"expert_uploads\":%llu,"
         "\"expert_hit_rate\":%.4f,\"resident_gib\":%.2f,"
@@ -481,6 +483,7 @@ static void send_health(int fd, server_runtime *runtime)
         mimo26_slot_ready(slot) ? "true" : "false", MODEL_ID,
         mimo26_slot_phase_name(slot->phase), runtime->context_capacity,
         (unsigned)runtime->prefill_chunk, runtime->expert_lookahead ? "true" : "false",
+        runtime->expert_major ? "true" : "false",
         (unsigned)runtime->expert_slots_per_layer,
         runtime->retain_experts ? "true" : "false",
         (unsigned long long)runtime->served,
@@ -1449,7 +1452,7 @@ int main(int argc, char **argv)
                 "usage: %s ROOT [--port N] [--host H] [--slots N] "
                 "[--context N] [--prefill-chunk 0..128] "
                 "[--expert-lookahead on|off] [--retain-experts on|off] "
-                "[--min-headroom-gib N]\n", argv[0]);
+                "[--min-headroom-gib N] [--expert-major on|off]\n", argv[0]);
         return argc < 2 ? 2 : 0;
     }
     /* Local-only by default. Remote exposure needs an authentication and
@@ -1476,6 +1479,7 @@ int main(int argc, char **argv)
     runtime.context_capacity = config.global_kv_capacity;
     runtime.prefill_chunk = config.prefill_chunk;
     runtime.expert_slots_per_layer = config.expert_slots_per_layer;
+    runtime.expert_major = config.expert_major;
     runtime.expert_lookahead = config.expert_lookahead;
     runtime.retain_experts = options.retain_experts;
     mimo26_slot_init(&runtime.slot);

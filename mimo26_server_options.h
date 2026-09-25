@@ -18,10 +18,11 @@ typedef struct {
      * profile's predicted resident footprint. 0 disables the check.
      *
      * A profile's memory cost is a property of the flags, not something to
-     * discover by swapping: 128 slots leaves ~35 GiB free on this part and
-     * 160 leaves ~16, and host page-outs have been observed even at 128.
-     * Refusing at startup makes the larger profile a deliberate choice --
-     * pass a lower floor explicitly -- rather than an accident found later.
+     * discover by swapping. 10 GiB as of 2026-09-24, matching the operator's
+     * stated tolerance on a host that runs nothing else: it admits the
+     * default 160-slot profile (104.9 GiB predicted, ~16 GiB left) and still
+     * refuses 176 slots (114.3 GiB, ~7 GiB left), which is the configuration
+     * measured to swap during allocation.
      */
     uint32_t min_headroom_gib;
     mimo26_gpu_worker_config worker;
@@ -52,7 +53,7 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
     mimo26_server_options parsed = *options;
     parsed.root = argv[1]; parsed.host = "127.0.0.1"; parsed.port = 8640;
     parsed.retain_experts = false;
-    parsed.min_headroom_gib = 20u;
+    parsed.min_headroom_gib = 10u;
     unsigned seen = 0;
     for (int i = 2; i < argc; i += 2) {
         const char *key = argv[i];
@@ -65,6 +66,7 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
         else if (!strcmp(key,"--expert-lookahead")) bit=32;
         else if (!strcmp(key,"--retain-experts")) bit=64;
         else if (!strcmp(key,"--min-headroom-gib")) bit=128;
+        else if (!strcmp(key,"--expert-major")) bit=256;
         if (!bit || (seen & bit) || i + 1 >= argc) {
             snprintf(error,error_size,"unknown, duplicate or missing-value option: %s",key); return false;
         }
@@ -76,11 +78,12 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
                 snprintf(error,error_size,"--host requires an IPv4 address"); return false;
             }
             parsed.host=value;
-        } else if (bit == 32 || bit == 64) {
+        } else if (bit == 32 || bit == 64 || bit == 256) {
             if (strcmp(value,"on") && strcmp(value,"off")) {
                 snprintf(error,error_size,"%s requires on or off",key); return false;
             }
             if (bit == 32) parsed.worker.expert_lookahead=!strcmp(value,"on");
+            else if (bit == 256) parsed.worker.expert_major=!strcmp(value,"on");
             else parsed.retain_experts=!strcmp(value,"on");
         } else {
             uint64_t low=1,high=UINT32_MAX;
@@ -97,6 +100,27 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
             if (bit == 16) parsed.worker.prefill_chunk=(uint16_t)number;
             if (bit == 128) parsed.min_headroom_gib=(uint32_t)number;
         }
+    }
+    /*
+     * Grouped prefill needs the remaining-group schedule; without lookahead it
+     * measured slower than per-token. So the default follows lookahead rather
+     * than fighting it -- turning lookahead off turns grouping off too -- but
+     * asking for both explicitly is a contradiction and is refused. The
+     * resolved profile is always printed and exposed on /health, so neither
+     * case is silent.
+     */
+    if (parsed.worker.expert_major && !parsed.worker.expert_lookahead) {
+        if (seen & 256u) {
+            snprintf(error,error_size,
+                     "--expert-major on needs --expert-lookahead on: grouped "
+                     "prefill without the remaining-group schedule is slower");
+            return false;
+        }
+        parsed.worker.expert_major = false;
+    }
+    if (parsed.worker.expert_major && !parsed.worker.prefill_chunk) {
+        snprintf(error,error_size,"--expert-major requires layer-major prefill (chunk > 0)");
+        return false;
     }
     if (parsed.worker.expert_lookahead && !parsed.worker.prefill_chunk) {
         snprintf(error,error_size,"expert lookahead requires layer-major prefill (chunk > 0)"); return false;

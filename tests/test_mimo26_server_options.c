@@ -1,6 +1,19 @@
 #include "../mimo26_server_options.h"
 #include <assert.h>
+#include <stdio.h>
 #include <stdlib.h>
+
+/* Mirrors what main() gets from mimo26_gpu_worker_config_defaults before it
+ * parses. Duplicated rather than called because this test is deliberately
+ * CPU-only and does not link the HIP worker; keep it in step with
+ * mimo26_gpu_worker_config_defaults. */
+static void server_defaults(mimo26_server_options *o) {
+    o->worker.expert_slots_per_layer = 160u;
+    o->worker.global_kv_capacity = 2048u;
+    o->worker.prefill_chunk = 128u;
+    o->worker.expert_lookahead = true;
+    o->worker.expert_major = true;
+}
 
 static mimo26_server_options parsed;
 static unsigned checks;
@@ -13,7 +26,13 @@ static void check(bool expected, int argc, char **argv) {
     mimo26_server_options before;
     memcpy(&before,&parsed,sizeof before);
     char error[256]={0};
-    assert(mimo26_server_parse_options(argc,argv,&parsed,error,sizeof error)==expected);
+    const bool got_it = mimo26_server_parse_options(argc,argv,&parsed,error,sizeof error);
+    if (got_it != expected) {
+        fprintf(stderr, "case %u expected %d got %d:", checks, (int)expected, (int)got_it);
+        for (int i = 1; i < argc; i++) fprintf(stderr, " %s", argv[i]);
+        fprintf(stderr, "  error=%s\n", error);
+    }
+    assert(got_it==expected);
     if (!expected) assert(error[0]&&!memcmp(&before,&parsed,sizeof before));
     else assert(parsed.worker.memory_limit_bytes==12345);
     ++checks;
@@ -60,12 +79,36 @@ int main(void) {
     CHECK(false,"root","--min-headroom-gib","");
     {
         mimo26_server_options got; char error[256];
+        memset(&got,0,sizeof got);
+        server_defaults(&got);
         const char *argv[]={"x","root"};
         assert(mimo26_server_parse_options(2,(char**)argv,&got,error,sizeof error));
-        assert(got.min_headroom_gib==20u);
+        assert(got.min_headroom_gib==10u);
         const char *argv2[]={"x","root","--min-headroom-gib","12"};
         assert(mimo26_server_parse_options(4,(char**)argv2,&got,error,sizeof error));
         assert(got.min_headroom_gib==12u);
+    }
+    /* Grouped prefill follows lookahead by default, but the explicit
+     * contradiction is refused rather than quietly downgraded. */
+    CHECK(true,"root","--expert-major","on","--expert-lookahead","on");
+    CHECK(true,"root","--expert-major","off");
+    CHECK(false,"root","--expert-major","yes");
+    CHECK(false,"root","--expert-major","");
+    CHECK(true,"root","--expert-lookahead","off");
+    CHECK(false,"root","--expert-major","on","--expert-lookahead","off");
+    CHECK(true,"root","--expert-major","off","--expert-lookahead","off");
+    {
+        mimo26_server_options got; char error[256];
+        memset(&got,0,sizeof got);
+        server_defaults(&got);
+        const char *d[]={"x","root"};
+        assert(mimo26_server_parse_options(2,(char**)d,&got,error,sizeof error));
+        assert(got.worker.expert_major && got.worker.expert_lookahead);
+        assert(got.worker.expert_slots_per_layer==160u);
+        server_defaults(&got);
+        const char *off[]={"x","root","--expert-lookahead","off"};
+        assert(mimo26_server_parse_options(4,(char**)off,&got,error,sizeof error));
+        assert(!got.worker.expert_major && !got.worker.expert_lookahead);
     }
     const char *bad[]={"-1","+1"," 16","16 ","16junk","","18446744073709551616","999999999999999999999999999"};
     for(unsigned i=0;i<sizeof bad/sizeof *bad;++i) { CHECK(false,"root","--slots",(char*)bad[i]); }

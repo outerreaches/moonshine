@@ -260,14 +260,19 @@ mimo26_rocm_layer_status mimo26_rocm_layer_decode(
  * Outputs are stashed by (token, rank), then accumulated in original rank
  * order, preserving the F32 sum regardless of group execution order.
  */
-static bool expert_major_enabled(void)
+/*
+ * Configured by the worker; the environment only overrides for A/B work.
+ * Unset means "use the profile", which is what makes the default visible on
+ * /health instead of hidden in a process environment.
+ */
+static bool expert_major_enabled(bool configured)
 {
-    static int cached = -1;
-    if (cached < 0) {
+    static int cached = -2;
+    if (cached == -2) {
         const char *value = getenv("MIMO26_EXPERT_MAJOR");
-        cached = value != NULL && strcmp(value, "1") == 0 ? 1 : 0;
+        cached = value == NULL ? -1 : (strcmp(value, "0") == 0 ? 0 : 1);
     }
-    return cached == 1;
+    return cached < 0 ? configured : cached == 1;
 }
 
 static mimo26_rocm_layer_status run_mlp_moe_expert_major(
@@ -479,7 +484,7 @@ static mimo26_rocm_layer_status run_mlp_moe_batch(
      * is not belt-and-braces: a decode-only scratch has no stash to hold the
      * per-rank outputs, and silently falling back is better than overrunning.
      */
-    if (expert_major_enabled() && count > 1u &&
+    if (expert_major_enabled(layer->expert_major) && count > 1u &&
         scratch->expert_stash != NULL && scratch->expert_gathered != NULL &&
         scratch->expert_row_ids != NULL) {
         const mimo26_rocm_layer_status grouped =

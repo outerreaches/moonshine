@@ -12,6 +12,13 @@
 // at chunk 128, which is the case per-token execution never exercises.
 //
 //   mimo26_expert_major_gate ROOT OUT_PREFIX SLOTS CHUNK CONTEXT DECODES [TOKENS [REPEATS [LOOKAHEAD]]]
+//
+// MIMO26_GATE_PROMPTS=<file> replaces the built-in text with a corpus: one or
+// more prompts separated by a line reading exactly %%PROMPT%%. REPEATS then
+// counts requests, cycling the corpus, so one worker load covers a mixed
+// session rather than one prompt repeated. Each prompt keeps its natural
+// length; TOKENS is ignored in that mode. Positional arguments are otherwise
+// unchanged, so the frozen single-prompt runner still behaves identically.
 #include "mimo26_gpu_worker.h"
 #include "mimo26_tokenizer.h"
 #include <cstdio>
@@ -64,7 +71,9 @@ int main(int argc, char **argv)
         ? (unsigned)std::strtoul(argv[8], nullptr, 10) : 1u;
     const bool lookahead = argc == 10 && std::strcmp(argv[9], "on") == 0;
     if (argc == 10 && !lookahead && std::strcmp(argv[9], "off") != 0) return 2;
-    if (repeats == 0 || repeats > 4 || chunk == 0 || chunk > 256 ||
+    const bool have_corpus = std::getenv("MIMO26_GATE_PROMPTS") != nullptr;
+    if (repeats == 0 || (repeats > 4 && !have_corpus) || repeats > 32 ||
+        chunk == 0 || chunk > 256 ||
         slots < 8 || slots > 160 || context == 0 || context > 4096 ||
         forced > context || decodes > context - forced) return 2;
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
@@ -74,6 +83,48 @@ int main(int argc, char **argv)
     if (!mimo26_tokenizer_create(&tokenizer, root, error, sizeof error)) {
         std::fprintf(stderr, "tokenizer: %s\n", error);
         return 1;
+    }
+    /* Optional corpus. Each entry is tokenized once; the request loop below
+     * cycles through them so a single worker load covers a mixed session. */
+    std::vector<mimo26_token_buffer> corpus;
+    std::vector<size_t> corpus_counts;
+    if (const char *path = std::getenv("MIMO26_GATE_PROMPTS")) {
+        FILE *pf = std::fopen(path, "re");
+        if (!pf) { std::fprintf(stderr, "prompts: cannot open %s\n", path); return 1; }
+        std::string all, line;
+        char buffer[4096];
+        while (std::fgets(buffer, sizeof buffer, pf)) all += buffer;
+        std::fclose(pf);
+        std::vector<std::string> parts;
+        size_t start = 0;
+        const std::string sep = "%%PROMPT%%";
+        for (;;) {
+            const size_t hit = all.find(sep, start);
+            parts.push_back(all.substr(start, hit == std::string::npos
+                                                  ? std::string::npos
+                                                  : hit - start));
+            if (hit == std::string::npos) break;
+            start = hit + sep.size();
+        }
+        for (std::string &part : parts) {
+            while (!part.empty() && (part.back() == '\n' || part.back() == ' '))
+                part.pop_back();
+            if (part.size() < 16) continue;
+            mimo26_token_buffer entry{};
+            if (!mimo26_tokenizer_encode(tokenizer, part.c_str(), false, &entry,
+                                         error, sizeof error)) {
+                std::fprintf(stderr, "encode corpus entry: %s\n", error);
+                return 1;
+            }
+            if (entry.count < 2u || entry.count + decodes > context) {
+                std::fprintf(stderr, "corpus entry %zu tokens does not fit\n",
+                             entry.count);
+                return 1;
+            }
+            corpus.push_back(entry);
+            corpus_counts.push_back(entry.count);
+        }
+        if (corpus.empty()) { std::fprintf(stderr, "prompts: empty corpus\n"); return 1; }
     }
     std::string text;
     for (int i = 0; i < 3; i++) {
@@ -85,7 +136,7 @@ int main(int argc, char **argv)
         std::fprintf(stderr, "encode: %s\n", error);
         return 1;
     }
-    while (forced && ids.count < forced) {
+    while (!have_corpus && forced && ids.count < forced) {
         mimo26_token_buffer_free(&ids);
         text += TEXT;
         if (!mimo26_tokenizer_encode(tokenizer, text.c_str(), false, &ids,
@@ -101,7 +152,7 @@ int main(int argc, char **argv)
     if (count > want) {
         count = want;
     }
-    if (count < 2u || (forced && count != forced)) {
+    if (!have_corpus && (count < 2u || (forced && count != forced))) {
         std::fprintf(stderr, "prompt too short: %zu (wanted %zu)\n", count, want);
         return 1;
     }
@@ -135,10 +186,19 @@ int main(int argc, char **argv)
             std::fprintf(stderr, "retained reset: %s\n", error);
             return 1;
         }
+        const uint32_t *request_ids = ids.ids;
+        size_t request_count = count;
+        size_t corpus_index = 0;
+        if (!corpus.empty()) {
+            corpus_index = repeat % corpus.size();
+            request_ids = corpus[corpus_index].ids;
+            request_count = corpus_counts[corpus_index];
+        }
         mimo26_gpu_worker_stats before{}, after{};
         mimo26_gpu_worker_get_stats(worker, &before);
         const auto began = std::chrono::steady_clock::now();
-        if (mimo26_gpu_worker_prefill(worker, ids.ids, count, logits.data(),
+        if (mimo26_gpu_worker_prefill(worker, request_ids, request_count,
+                                      logits.data(),
                                       nullptr, nullptr, error,
                                       sizeof error) != MIMO26_GPU_WORKER_OK) {
             std::fprintf(stderr, "prefill: %s\n", error);
@@ -153,8 +213,10 @@ int main(int argc, char **argv)
         }
         uint32_t next = mimo26_gpu_worker_argmax(logits.data());
         std::printf("{\"phase\":\"prefill\",\"tokens\":%zu,\"slots\":%u,"
-                    "\"chunk\":%u,\"argmax\":%u,\"repeat\":%u,\"seconds\":%.9f,\"uploads\":%llu}\n",
-                    count, slots, chunk, next, repeat, seconds,
+                    "\"chunk\":%u,\"argmax\":%u,\"repeat\":%u,\"prompt\":%zu,"
+                    "\"seconds\":%.9f,\"uploads\":%llu}\n",
+                    request_count, slots, chunk, next, repeat, corpus_index,
+                    seconds,
                     (unsigned long long)(after.expert_uploads - before.expert_uploads));
 
         for (unsigned d = 0; d < decodes; d++) {
