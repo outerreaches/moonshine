@@ -2,6 +2,7 @@
 
 #include "mimo26_architecture.h"
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -514,6 +515,11 @@ static double kv_now_seconds(void)
     return (double)now.tv_sec + (double)now.tv_nsec / 1e9;
 }
 
+uint64_t mimo26_kv_layout_crc64(const mimo26_kv_cache *cache)
+{
+    return cache == NULL ? 0u : kv_layout_crc(cache);
+}
+
 mimo26_kv_status mimo26_kv_export(const mimo26_kv_cache *cache,
                                   const char *path,
                                   mimo26_kv_state_info *info)
@@ -533,8 +539,21 @@ mimo26_kv_status mimo26_kv_export(const mimo26_kv_cache *cache,
     if (written <= 0 || (size_t)written >= sizeof temporary) {
         return MIMO26_KV_INVALID_ARGUMENT;
     }
-    FILE *file = fopen(temporary, "wb");
+    /*
+     * Created 0600 explicitly rather than through the umask. A checkpoint is
+     * verbatim conversation state, so it should not be world-readable, and the
+     * store that indexes these files refuses anything that is not a private
+     * regular file.
+     */
+    const int descriptor =
+        open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (descriptor < 0) {
+        return MIMO26_KV_INVALID_STATE;
+    }
+    FILE *file = fdopen(descriptor, "wb");
     if (file == NULL) {
+        (void)close(descriptor);
+        (void)remove(temporary);
         return MIMO26_KV_INVALID_STATE;
     }
 

@@ -21,6 +21,8 @@
  * hipMemGetInfo is consulted rather than a nominal device size.
  */
 
+#include "mimo26_kv.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -133,6 +135,27 @@ mimo26_gpu_worker_status mimo26_gpu_worker_resolve_overrides(
  * this exactly as resetting one does.
  */
 bool mimo26_gpu_worker_idle(const mimo26_gpu_worker *worker);
+
+/*
+ * Persist and restore a context prefix, so a prompt already evaluated once can
+ * be reloaded instead of re-prefilled. Both require an idle worker.
+ *
+ * Import replaces committed history and moves the position to match the file.
+ * Whatever the outcome, the worker's position is left equal to the KV's own
+ * length -- a rejected file leaves both untouched, and the one failure that
+ * can reset the KV resets the position with it -- so the two can never
+ * disagree about how much history exists.
+ */
+mimo26_gpu_worker_status mimo26_gpu_worker_export_state(
+    const mimo26_gpu_worker *worker, const char *path,
+    mimo26_kv_state_info *info, char *error, size_t error_size);
+
+mimo26_gpu_worker_status mimo26_gpu_worker_import_state(
+    mimo26_gpu_worker *worker, const char *path,
+    mimo26_kv_state_info *info, char *error, size_t error_size);
+
+/* Geometry identity of this worker's KV, for gating a store of checkpoints. */
+uint64_t mimo26_gpu_worker_layout_crc64(const mimo26_gpu_worker *worker);
 
 typedef struct {
     uint64_t tokens;

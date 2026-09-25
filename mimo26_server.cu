@@ -22,6 +22,9 @@
 #include "k3_json.h"
 #include "mimo26_gpu_worker.h"
 #include "mimo26_server_options.h"
+#include "k3_prefix_reuse.h"
+#include "k3_prefix_bundle.h"
+#include <sys/stat.h>
 #include "mimo26_server_slot.h"
 #include "mimo26_tokenizer.h"
 #include <initializer_list>
@@ -412,6 +415,15 @@ typedef struct {
     uint64_t           prefix_hits;
     uint64_t           prefix_misses;
     uint64_t           prefix_tokens_saved;
+    /*
+     * Second tier: prefixes persisted to disk, so a prompt survives the
+     * request that computed it. The in-memory tier above only continues a
+     * context that is still resident and extends exactly.
+     */
+    k3_prefix_bundle  *prefix_bundle;
+    uint64_t           prefix_disk_hits;
+    uint64_t           prefix_disk_publishes;
+    double             prefix_disk_seconds;
     uint64_t           served;
     /* Consecutive supervised restarts that did not lead to a clean request.
      * Bounded so a persistently broken worker stops thrashing and stays
@@ -533,11 +545,181 @@ static size_t plan_prefix_reuse(server_runtime *runtime, const uint32_t *ids,
             (uint64_t)runtime->resident_count) {
         return 0;
     }
-    if (memcmp(runtime->resident_ids, ids,
-               runtime->resident_count * sizeof *ids) != 0) {
+    /*
+     * K3's predicate rather than a second implementation of it. Its header
+     * spells out why this has to be conservative: a wrong admission does not
+     * fail loudly, it continues from causal state that does not correspond to
+     * the supplied history and returns a plausible completion computed against
+     * the wrong prefix.
+     *
+     * It insists on a two-token remainder where MiMo's prefill would accept
+     * one. That declines the rare prompt that grew by exactly one token, which
+     * is not worth forking a tested predicate to recover.
+     */
+    if (!k3_prefix_reuse_admits(runtime->resident_ids,
+                                runtime->resident_count, ids, count)) {
         return 0;
     }
     return runtime->resident_count;
+}
+
+/*
+ * Below this, a checkpoint is not worth its I/O: the windowed ring alone is a
+ * fixed ~24 MiB whatever the prompt length, while a few hundred tokens of
+ * prefill is seconds. 512 tokens is roughly 30 s of prefill against a ~35 MiB
+ * write.
+ */
+#define PREFIX_PUBLISH_MIN_TOKENS 512u
+
+/*
+ * K3's bundle stores its own engine's state descriptor. MiMo's checkpoint
+ * carries the same facts under different names, so the bundle can be reused
+ * unchanged rather than forked: capacity is the context, the committed length
+ * is the token position, and the KV's geometry identity stands in for the
+ * model layout.
+ */
+static void prefix_state_info(const mimo26_kv_state_info *from,
+                              k3_engine_state_file_info *to)
+{
+    memset(to, 0, sizeof *to);
+    to->format_version = from->format_version;
+    to->context = (uint32_t)from->global_capacity;
+    to->token_position = (uint32_t)from->length;
+    to->model_layout_crc64 = from->layout_crc64;
+    to->payload_bytes = from->payload_bytes;
+    to->file_bytes = from->file_bytes;
+    to->payload_crc64 = from->payload_crc64;
+    to->q8_projections = false;
+    to->wall_seconds = from->wall_seconds;
+}
+
+/*
+ * Longest stored prefix this prompt admits, restored into the worker.
+ *
+ * Returns the number of leading tokens now committed, or 0 if nothing was
+ * usable -- in which case the worker may have been left empty by a failed
+ * import, and the caller still performs its reset.
+ */
+static size_t restore_prefix_from_disk(server_runtime *runtime,
+                                       const uint32_t *ids, size_t count)
+{
+    if (runtime->prefix_bundle == NULL ||
+        !mimo26_gpu_worker_idle(runtime->worker)) {
+        return 0;
+    }
+    size_t best_index = SIZE_MAX;
+    size_t best_tokens = 0;
+    const size_t entries = k3_prefix_bundle_count(runtime->prefix_bundle);
+    for (size_t index = 0; index < entries; index++) {
+        k3_prefix_bundle_entry entry;
+        if (!k3_prefix_bundle_entry_at(runtime->prefix_bundle, index, &entry)) {
+            continue;
+        }
+        if (entry.token_count > best_tokens &&
+            k3_prefix_reuse_admits(entry.tokens, entry.token_count,
+                                   ids, count)) {
+            best_index = index;
+            best_tokens = entry.token_count;
+        }
+    }
+    if (best_index == SIZE_MAX) {
+        return 0;
+    }
+    k3_prefix_bundle_entry entry;
+    if (!k3_prefix_bundle_entry_at(runtime->prefix_bundle, best_index,
+                                   &entry)) {
+        return 0;
+    }
+    char error[512];
+    mimo26_kv_state_info info;
+    const double started = now_seconds();
+    if (mimo26_gpu_worker_import_state(runtime->worker, entry.state_path,
+                                       &info, error, sizeof error) !=
+        MIMO26_GPU_WORKER_OK) {
+        /* A checkpoint that will not load is worse than none: drop it so the
+         * next request does not pay for it again. */
+        fprintf(stderr, "mimo26: dropping unusable checkpoint %s: %s\n",
+                entry.state_path, error);
+        char remove_error[256];
+        (void)k3_prefix_bundle_remove(runtime->prefix_bundle, best_index,
+                                      remove_error, sizeof remove_error);
+        return 0;
+    }
+    /* The file decides how much history exists; believe it over the index. */
+    if (info.length != (uint64_t)entry.token_count) {
+        fprintf(stderr,
+                "mimo26: checkpoint %s holds %llu positions but its index "
+                "claims %zu; dropping\n", entry.state_path,
+                (unsigned long long)info.length, entry.token_count);
+        char remove_error[256];
+        (void)k3_prefix_bundle_remove(runtime->prefix_bundle, best_index,
+                                      remove_error, sizeof remove_error);
+        return 0;
+    }
+    runtime->prefix_disk_hits++;
+    runtime->prefix_disk_seconds += now_seconds() - started;
+    return entry.token_count;
+}
+
+/*
+ * Store the state produced by evaluating exactly `count` prompt tokens.
+ *
+ * Published after prefill and before any generation, which is the point that
+ * matters: chat templates are append-only, so a prompt is a prefix of every
+ * later prompt in the same conversation. A checkpoint taken after generation
+ * would be keyed by tokens the client never echoes back when the model's
+ * reasoning is separated from its visible content, and would never match.
+ */
+static void publish_prefix_checkpoint(server_runtime *runtime,
+                                      const uint32_t *ids, size_t count)
+{
+    if (runtime->prefix_bundle == NULL || count < PREFIX_PUBLISH_MIN_TOKENS ||
+        !mimo26_gpu_worker_idle(runtime->worker)) {
+        return;
+    }
+    if (mimo26_gpu_worker_position(runtime->worker) != (uint64_t)count) {
+        return;   /* prefill stopped early; this is not that prompt's state */
+    }
+    size_t existing = SIZE_MAX;
+    if (k3_prefix_bundle_find_exact(runtime->prefix_bundle, ids, count,
+                                    &existing)) {
+        return;   /* already stored */
+    }
+    char id[33];
+    char state_path[PATH_MAX];
+    char error[512];
+    if (!k3_prefix_bundle_allocate_state_path(runtime->prefix_bundle, id,
+                                              sizeof id, state_path,
+                                              sizeof state_path, error,
+                                              sizeof error)) {
+        fprintf(stderr, "mimo26: checkpoint path refused: %s\n", error);
+        return;
+    }
+    mimo26_kv_state_info info;
+    if (mimo26_gpu_worker_export_state(runtime->worker, state_path, &info,
+                                       error, sizeof error) !=
+        MIMO26_GPU_WORKER_OK) {
+        fprintf(stderr, "mimo26: checkpoint export failed: %s\n", error);
+        (void)remove(state_path);
+        return;
+    }
+    k3_engine_state_file_info state_info;
+    prefix_state_info(&info, &state_info);
+    k3_prefix_bundle_snapshot snapshot;
+    memset(&snapshot, 0, sizeof snapshot);
+    snapshot.tokens = ids;
+    snapshot.token_count = count;
+    if (!k3_prefix_bundle_publish(runtime->prefix_bundle, id, state_path,
+                                  &snapshot, &state_info, error,
+                                  sizeof error)) {
+        fprintf(stderr, "mimo26: checkpoint publish failed: %s\n", error);
+        (void)remove(state_path);
+        return;
+    }
+    runtime->prefix_disk_publishes++;
+    fprintf(stderr, "mimo26: checkpoint published, %zu tokens, %.1f MiB, "
+            "%.3f s\n", count,
+            (double)info.file_bytes / (1024.0 * 1024.0), info.wall_seconds);
 }
 
 #define MAX_RECOVERY_ATTEMPTS 3u
@@ -597,6 +779,8 @@ static void send_health(int fd, server_runtime *runtime)
         "\"expert_major\":%s,\"expert_slots\":%u,"
         "\"kv_prefix_reuse\":%s,\"prefix_hits\":%llu,"
         "\"prefix_misses\":%llu,\"prefix_tokens_saved\":%llu,"
+        "\"prefix_disk_hits\":%llu,\"prefix_disk_publishes\":%llu,"
+        "\"prefix_disk_entries\":%zu,"
         "\"retain_experts\":%s,\"served\":%llu,\"tokens\":%llu,"
         "\"expert_accesses\":%llu,\"expert_hits\":%llu,\"expert_uploads\":%llu,"
         "\"expert_hit_rate\":%.4f,\"resident_gib\":%.2f,"
@@ -613,6 +797,10 @@ static void send_health(int fd, server_runtime *runtime)
         (unsigned long long)runtime->prefix_hits,
         (unsigned long long)runtime->prefix_misses,
         (unsigned long long)runtime->prefix_tokens_saved,
+        (unsigned long long)runtime->prefix_disk_hits,
+        (unsigned long long)runtime->prefix_disk_publishes,
+        runtime->prefix_bundle != NULL
+            ? k3_prefix_bundle_count(runtime->prefix_bundle) : (size_t)0,
         runtime->retain_experts ? "true" : "false",
         (unsigned long long)runtime->served,
         (unsigned long long)stats.tokens,
@@ -1223,8 +1411,12 @@ static void handle_chat(server_runtime *runtime, int fd,
      * early return, fault and cancellation below leaves the next request to
      * reset and prefill in full.
      */
-    const size_t reuse = plan_prefix_reuse(runtime, prompt.ids, prompt.count);
+    size_t reuse = plan_prefix_reuse(runtime, prompt.ids, prompt.count);
     resident_invalidate(runtime);
+    if (reuse == 0) {
+        /* Nothing resident extends this prompt; try the stored prefixes. */
+        reuse = restore_prefix_from_disk(runtime, prompt.ids, prompt.count);
+    }
     if (reuse > 0) {
         runtime->prefix_hits++;
         runtime->prefix_tokens_saved += (uint64_t)reuse;
@@ -1284,6 +1476,9 @@ static void handle_chat(server_runtime *runtime, int fd,
     } else if (progress_context.stop == MIMO26_SLOT_CONTINUE) {
         /* A stopped prefill returns OK without producing final logits. */
         next = mimo26_gpu_worker_argmax(logits);
+        /* The prompt is now evaluated and nothing has been generated on top,
+         * which is exactly the state a later turn can continue from. */
+        publish_prefix_checkpoint(runtime, prompt.ids, prompt.count);
     }
     if (failed) {
         /* A decode failure means the worker's state is not trusted. */
@@ -1677,6 +1872,7 @@ int main(int argc, char **argv)
     runtime.retain_experts = options.retain_experts;
     runtime.request_deadline_seconds = (double)options.request_deadline_seconds;
     runtime.kv_prefix_reuse = options.kv_prefix_reuse;
+
     mimo26_slot_init(&runtime.slot);
 
     char error[512];
@@ -1755,6 +1951,33 @@ int main(int argc, char **argv)
         }
         runtime.expert_major = effective;
     }
+    /*
+     * Opened after the worker, because the bundle's identity is this KV's
+     * geometry -- layer count, per-layer heads, window and capacity. Gating on
+     * it means a checkpoint written under a different profile is never even
+     * offered, before the file's own identity check gets a chance to refuse it.
+     */
+    if (options.prefix_cache_dir != NULL) {
+        (void)mkdir(options.prefix_cache_dir, 0700);
+        const k3_prefix_bundle_identity identity = {
+            1u, (uint32_t)config.global_kv_capacity,
+            mimo26_gpu_worker_layout_crc64(runtime.worker), false};
+        char bundle_error[512];
+        if (!k3_prefix_bundle_open(&runtime.prefix_bundle,
+                                   options.prefix_cache_dir, &identity,
+                                   options.prefix_cache_entries,
+                                   (uint64_t)options.prefix_cache_gib *
+                                       1073741824ull,
+                                   bundle_error, sizeof bundle_error)) {
+            fprintf(stderr, "prefix cache: %s\n", bundle_error);
+            return 1;
+        }
+        printf("prefix cache at %s: %zu stored, %u entries and %u GiB at "
+               "most\n", options.prefix_cache_dir,
+               k3_prefix_bundle_count(runtime.prefix_bundle),
+               options.prefix_cache_entries, options.prefix_cache_gib);
+    }
+
     mimo26_gpu_worker_stats stats;
     mimo26_gpu_worker_get_stats(runtime.worker, &stats);
     printf("resident %.2f GiB after %.1f s, expert-major %s\n",

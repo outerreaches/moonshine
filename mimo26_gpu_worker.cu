@@ -1839,6 +1839,56 @@ bool mimo26_gpu_worker_idle(const mimo26_gpu_worker *worker)
            k3_io_uring_outstanding(worker->ring) == 0u;
 }
 
+uint64_t mimo26_gpu_worker_layout_crc64(const mimo26_gpu_worker *worker)
+{
+    return worker == NULL ? 0u : mimo26_kv_layout_crc64(worker->kv);
+}
+
+mimo26_gpu_worker_status mimo26_gpu_worker_export_state(
+    const mimo26_gpu_worker *worker, const char *path,
+    mimo26_kv_state_info *info, char *error, size_t error_size)
+{
+    if (worker == NULL || path == NULL) {
+        return MIMO26_GPU_WORKER_INVALID_ARGUMENT;
+    }
+    if (!mimo26_gpu_worker_idle(worker)) {
+        return fail(error, error_size, MIMO26_GPU_WORKER_DECODE_FAILED,
+                    "a checkpoint needs a healthy idle worker");
+    }
+    if (mimo26_kv_export(worker->kv, path, info) != MIMO26_KV_OK) {
+        return fail(error, error_size, MIMO26_GPU_WORKER_DECODE_FAILED,
+                    "could not write context state to %s", path);
+    }
+    return MIMO26_GPU_WORKER_OK;
+}
+
+mimo26_gpu_worker_status mimo26_gpu_worker_import_state(
+    mimo26_gpu_worker *worker, const char *path,
+    mimo26_kv_state_info *info, char *error, size_t error_size)
+{
+    if (worker == NULL || path == NULL) {
+        return MIMO26_GPU_WORKER_INVALID_ARGUMENT;
+    }
+    if (!mimo26_gpu_worker_idle(worker)) {
+        return fail(error, error_size, MIMO26_GPU_WORKER_DECODE_FAILED,
+                    "restoring a checkpoint needs a healthy idle worker");
+    }
+    const mimo26_kv_status status = mimo26_kv_import(worker->kv, path, info);
+    /*
+     * Take the position from the KV either way. A rejected file leaves the KV
+     * as it was; the one failure that can mutate it resets it to empty.
+     * Reading the length back rather than assuming a value is what keeps
+     * position and history agreeing even on the paths that failed.
+     */
+    worker->position = mimo26_kv_length(worker->kv);
+    worker->resolved_count = 0u;
+    if (status != MIMO26_KV_OK) {
+        return fail(error, error_size, MIMO26_GPU_WORKER_DECODE_FAILED,
+                    "could not restore context state from %s", path);
+    }
+    return MIMO26_GPU_WORKER_OK;
+}
+
 mimo26_gpu_worker_status mimo26_gpu_worker_reset_context(
     mimo26_gpu_worker *worker, char *error, size_t error_size)
 {

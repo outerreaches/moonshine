@@ -159,6 +159,15 @@ mimo26_kv_status mimo26_kv_inspect(const mimo26_kv_cache *cache,
 mimo26_kv_status mimo26_kv_import(mimo26_kv_cache *cache, const char *path,
                                   mimo26_kv_state_info *info);
 
+/*
+ * Identity of the geometry this cache was built with -- layer count, and each
+ * layer's head count, window and capacity. A checkpoint written under a
+ * different identity must never be loaded, because its payload would be read
+ * with the wrong strides. Exposed so a store of checkpoints can refuse
+ * incompatible entries before any of them is opened.
+ */
+uint64_t mimo26_kv_layout_crc64(const mimo26_kv_cache *cache);
+
 #ifdef __cplusplus
 }
 #endif

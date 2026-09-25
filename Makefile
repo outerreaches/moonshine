@@ -1091,7 +1091,8 @@ tools/mimo26_server: mimo26_server.o mimo26_server_slot.o \
 		mimo26_rocm_ops.o k3_rocm_ops.o mimo26_weights.o mimo26_kv.o \
 		mimo26_manifest.o mimo26_architecture.o mimo26_attention.o \
 		mimo26_ops.o mimo26_router.o glm53_fp8_oracle.o \
-		k3_safetensors.o k3_json.o k3_io_uring.o k3_expert_cache.o
+		k3_safetensors.o k3_json.o k3_io_uring.o k3_expert_cache.o \
+		k3_prefix_reuse.o k3_prefix_bundle.o
 	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS) $(ICU_LDLIBS)
 
 # Sustained mixed-request soak against a running server. Start the server

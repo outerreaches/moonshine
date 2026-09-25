@@ -57,6 +57,19 @@ typedef struct {
      * full-prefill results, per the 2026-09-25 review.
      */
     bool kv_prefix_reuse;
+    /*
+     * Directory holding persisted prefix checkpoints, and the budget they may
+     * occupy. NULL disables the on-disk tier, leaving only the in-memory one
+     * that continues an exactly-matching resident context.
+     *
+     * The budget must be set deliberately. The drive that makes sense for this
+     * also holds the model weights and another lane's working set, and a
+     * checkpoint is not small: about 24 MiB of fixed windowed ring plus
+     * 22.5 KiB per token, so roughly 244 MiB at 10K tokens.
+     */
+    const char *prefix_cache_dir;
+    uint32_t prefix_cache_gib;
+    uint32_t prefix_cache_entries;
     mimo26_gpu_worker_config worker;
 } mimo26_server_options;
 
@@ -88,6 +101,9 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
     parsed.min_headroom_gib = 8u;
     parsed.request_deadline_seconds = 600u;
     parsed.kv_prefix_reuse = false;
+    parsed.prefix_cache_dir = NULL;
+    parsed.prefix_cache_gib = 16u;
+    parsed.prefix_cache_entries = 32u;
     unsigned seen = 0;
     for (int i = 2; i < argc; i += 2) {
         const char *key = argv[i];
@@ -103,6 +119,9 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
         else if (!strcmp(key,"--expert-major")) bit=256;
         else if (!strcmp(key,"--request-deadline-seconds")) bit=512;
         else if (!strcmp(key,"--kv-prefix-reuse")) bit=1024;
+        else if (!strcmp(key,"--prefix-cache-dir")) bit=2048;
+        else if (!strcmp(key,"--prefix-cache-gib")) bit=4096;
+        else if (!strcmp(key,"--prefix-cache-entries")) bit=8192;
         if (!bit || (seen & bit) || i + 1 >= argc) {
             snprintf(error,error_size,"unknown, duplicate or missing-value option: %s",key); return false;
         }
@@ -114,6 +133,13 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
                 snprintf(error,error_size,"--host requires an IPv4 address"); return false;
             }
             parsed.host=value;
+        } else if (bit == 2048) {
+            if (value[0] != '/') {
+                snprintf(error,error_size,
+                         "--prefix-cache-dir requires an absolute path");
+                return false;
+            }
+            parsed.prefix_cache_dir=value;
         } else if (bit == 32 || bit == 64 || bit == 256 || bit == 1024) {
             if (strcmp(value,"on") && strcmp(value,"off")) {
                 snprintf(error,error_size,"%s requires on or off",key); return false;
@@ -129,6 +155,8 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
             if (bit == 16) {low=0;high=128;}
             if (bit == 128) {low=0;high=512;}
             if (bit == 512) {low=1;high=86400;}
+            if (bit == 4096) {low=1;high=4096;}
+            if (bit == 8192) {low=1;high=64;}   /* the bundle's own ceiling */
             if (!mimo26_server_decimal(value,low,high,&number)) {
                 snprintf(error,error_size,"invalid integer for %s",key); return false;
             }
@@ -138,6 +166,8 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
             if (bit == 16) parsed.worker.prefill_chunk=(uint16_t)number;
             if (bit == 128) parsed.min_headroom_gib=(uint32_t)number;
             if (bit == 512) parsed.request_deadline_seconds=(uint32_t)number;
+            if (bit == 4096) parsed.prefix_cache_gib=(uint32_t)number;
+            if (bit == 8192) parsed.prefix_cache_entries=(uint32_t)number;
         }
     }
     /*
@@ -156,6 +186,12 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
             return false;
         }
         parsed.worker.expert_major = false;
+    }
+    /* A checkpoint directory without reuse would write files nothing reads. */
+    if (parsed.prefix_cache_dir != NULL && !parsed.kv_prefix_reuse) {
+        snprintf(error,error_size,
+                 "--prefix-cache-dir needs --kv-prefix-reuse on");
+        return false;
     }
     if (parsed.worker.expert_major && !parsed.worker.prefill_chunk) {
         snprintf(error,error_size,"--expert-major requires layer-major prefill (chunk > 0)");
