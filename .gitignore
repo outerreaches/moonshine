@@ -39,3 +39,6 @@ moonshine-pre-public-history-*.bundle
 tests/mimo26_transport_gate
 tests/mimo26_server_controls_gate
 tests/mimo26_server_retention_gate
+tests/mimo26_chat_options_gate
+tests/mimo26_server_recovery_gate
+tests/mimo26_prefix_reuse_gate
