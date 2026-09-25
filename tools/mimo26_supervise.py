@@ -131,13 +131,29 @@ def parse_args(argv=None):
     p.add_argument('server', type=Path)
     p.add_argument('root', type=Path)
     p.add_argument('--port', type=int, default=8640)
-    p.add_argument('--slots', type=int, default=16)
-    p.add_argument('--context', type=int, default=2048)
+    # These mirror the server's own defaults deliberately. The supervisor pins
+    # a profile rather than inheriting one, so an older or newer server binary
+    # cannot quietly serve something else -- but that means the two sets can
+    # drift, which is exactly what happened: these sat at 16/2048/32 with
+    # lookahead off long after the server had moved to the qualified
+    # 160/262144/128 with it on. The expected_profile check below is what
+    # catches the next drift, so every pinned value must also be on /health.
+    p.add_argument('--slots', type=int, default=160)
+    p.add_argument('--context', type=int, default=262144)
     p.add_argument('--restarts', type=int, default=2)
-    p.add_argument('--prefill-chunk', type=int, default=32)
-    p.add_argument('--expert-lookahead', choices=('off', 'on'), default='off')
+    p.add_argument('--prefill-chunk', type=int, default=128)
+    p.add_argument('--expert-lookahead', choices=('off', 'on'), default='on')
+    p.add_argument('--expert-major', choices=('off', 'on'), default='on')
     p.add_argument('--retain-experts', choices=('off', 'on'), default='off',
                    help='retain healthy expert cache between requests; context is always reset')
+    p.add_argument('--kv-prefix-reuse', choices=('off', 'on'), default='off',
+                   help='continue from a matching prefix instead of re-prefilling it')
+    p.add_argument('--prefix-cache-dir', type=Path, default=None,
+                   help='directory of persisted prefix checkpoints; needs --kv-prefix-reuse on')
+    p.add_argument('--prefix-cache-gib', type=int, default=16)
+    p.add_argument('--prefix-cache-entries', type=int, default=8)
+    p.add_argument('--request-deadline-seconds', type=int, default=600)
+    p.add_argument('--min-headroom-gib', type=int, default=8)
     p.add_argument('--shutdown-timeout', type=float, default=30,
                    help='seconds to wait for an owned child to reach a safe boundary; no force kill')
     a = p.parse_args(argv)
@@ -145,6 +161,18 @@ def parse_args(argv=None):
         p.error('invalid port, slots, context or restart budget')
     if not 0 <= a.prefill_chunk <= 128 or (a.expert_lookahead == 'on' and a.prefill_chunk == 0):
         p.error('invalid chunk or lookahead with chunk zero')
+    # The same couplings the server enforces, refused here too so a bad profile
+    # never reaches a launch.
+    if a.expert_major == 'on' and a.expert_lookahead == 'off':
+        p.error('--expert-major on needs --expert-lookahead on')
+    if a.prefix_cache_dir is not None and a.kv_prefix_reuse == 'off':
+        p.error('--prefix-cache-dir needs --kv-prefix-reuse on')
+    if not 1 <= a.request_deadline_seconds <= 86400:
+        p.error('request deadline must be in [1, 86400] seconds')
+    if not 0 <= a.min_headroom_gib <= 512:
+        p.error('headroom floor must be in [0, 512] GiB')
+    if not (1 <= a.prefix_cache_gib <= 4096 and 1 <= a.prefix_cache_entries <= 64):
+        p.error('invalid prefix cache budget or entry limit')
     if not math.isfinite(a.shutdown_timeout) or not 0 < a.shutdown_timeout <= 3600:
         p.error('shutdown timeout must be finite and in (0, 3600] seconds')
     return a
@@ -159,6 +187,14 @@ def server_command(a):
     # rather than silently run a different profile.
     command += ['--prefill-chunk', str(a.prefill_chunk), '--expert-lookahead', a.expert_lookahead]
     command += ['--retain-experts', a.retain_experts]
+    command += ['--expert-major', a.expert_major]
+    command += ['--request-deadline-seconds', str(a.request_deadline_seconds)]
+    command += ['--min-headroom-gib', str(a.min_headroom_gib)]
+    command += ['--kv-prefix-reuse', a.kv_prefix_reuse]
+    if a.prefix_cache_dir is not None:
+        command += ['--prefix-cache-dir', str(a.prefix_cache_dir.resolve()),
+                    '--prefix-cache-gib', str(a.prefix_cache_gib),
+                    '--prefix-cache-entries', str(a.prefix_cache_entries)]
     return command
 
 
@@ -173,7 +209,11 @@ def main():
                             expected_profile=dict(expert_slots=a.slots, context=a.context,
                                                   prefill_chunk=a.prefill_chunk,
                                                   expert_lookahead=a.expert_lookahead == 'on',
-                                                  retain_experts=a.retain_experts == 'on'))
+                                                  expert_major=a.expert_major == 'on',
+                                                  retain_experts=a.retain_experts == 'on',
+                                                  kv_prefix_reuse=a.kv_prefix_reuse == 'on',
+                                                  request_deadline_seconds=a.request_deadline_seconds,
+                                                  min_headroom_gib=a.min_headroom_gib))
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: supervisor.stop.set())
     return supervisor.run()

@@ -408,6 +408,9 @@ typedef struct {
      * full -- the failure mode is lost work, never reuse of damaged history.
      */
     bool               kv_prefix_reuse;
+    /* Reported so a supervisor can verify the profile it transmitted rather
+     * than only transmitting it. */
+    uint32_t           min_headroom_gib;
     uint32_t          *resident_ids;
     size_t             resident_count;
     size_t             resident_capacity;
@@ -781,6 +784,7 @@ static void send_health(int fd, server_runtime *runtime)
         "\"prefix_misses\":%llu,\"prefix_tokens_saved\":%llu,"
         "\"prefix_disk_hits\":%llu,\"prefix_disk_publishes\":%llu,"
         "\"prefix_disk_entries\":%zu,"
+        "\"request_deadline_seconds\":%u,\"min_headroom_gib\":%u,"
         "\"retain_experts\":%s,\"served\":%llu,\"tokens\":%llu,"
         "\"expert_accesses\":%llu,\"expert_hits\":%llu,\"expert_uploads\":%llu,"
         "\"expert_hit_rate\":%.4f,\"resident_gib\":%.2f,"
@@ -801,6 +805,8 @@ static void send_health(int fd, server_runtime *runtime)
         (unsigned long long)runtime->prefix_disk_publishes,
         runtime->prefix_bundle != NULL
             ? k3_prefix_bundle_count(runtime->prefix_bundle) : (size_t)0,
+        (unsigned)runtime->request_deadline_seconds,
+        runtime->min_headroom_gib,
         runtime->retain_experts ? "true" : "false",
         (unsigned long long)runtime->served,
         (unsigned long long)stats.tokens,
@@ -1872,6 +1878,7 @@ int main(int argc, char **argv)
     runtime.retain_experts = options.retain_experts;
     runtime.request_deadline_seconds = (double)options.request_deadline_seconds;
     runtime.kv_prefix_reuse = options.kv_prefix_reuse;
+    runtime.min_headroom_gib = options.min_headroom_gib;
 
     mimo26_slot_init(&runtime.slot);
 
