@@ -25,6 +25,7 @@
 #include "moonshine_version.h"
 #include "k3_prefix_reuse.h"
 #include "k3_prefix_bundle.h"
+#include <limits.h>
 #include <sys/stat.h>
 #include "mimo26_server_slot.h"
 #include "mimo26_tokenizer.h"
@@ -494,6 +495,13 @@ typedef struct {
     uint64_t           prefix_disk_hits;
     uint64_t           prefix_disk_publishes;
     double             prefix_disk_seconds;
+    /*
+     * Cached rather than asked for. /health used to call
+     * k3_prefix_bundle_count(), which walks the index on every health poll and
+     * dragged the bundle into the link of two gates that deliberately link
+     * almost nothing. Refreshed wherever the count can change.
+     */
+    size_t             prefix_entries;
     uint64_t           served;
     /* Consecutive supervised restarts that did not lead to a clean request.
      * Bounded so a persistently broken worker stops thrashing and stays
@@ -713,6 +721,8 @@ static size_t restore_prefix_from_disk(server_runtime *runtime,
         char remove_error[256];
         (void)k3_prefix_bundle_remove(runtime->prefix_bundle, best_index,
                                       remove_error, sizeof remove_error);
+        runtime->prefix_entries =
+            k3_prefix_bundle_count(runtime->prefix_bundle);
         return 0;
     }
     /* The file decides how much history exists; believe it over the index. */
@@ -724,6 +734,8 @@ static size_t restore_prefix_from_disk(server_runtime *runtime,
         char remove_error[256];
         (void)k3_prefix_bundle_remove(runtime->prefix_bundle, best_index,
                                       remove_error, sizeof remove_error);
+        runtime->prefix_entries =
+            k3_prefix_bundle_count(runtime->prefix_bundle);
         return 0;
     }
     runtime->prefix_disk_hits++;
@@ -787,6 +799,7 @@ static void publish_prefix_checkpoint(server_runtime *runtime,
         return;
     }
     runtime->prefix_disk_publishes++;
+    runtime->prefix_entries = k3_prefix_bundle_count(runtime->prefix_bundle);
     fprintf(stderr, "mimo26: checkpoint published, %zu tokens, %.1f MiB, "
             "%.3f s\n", count,
             (double)info.file_bytes / (1024.0 * 1024.0), info.wall_seconds);
@@ -874,8 +887,7 @@ static void send_health(int fd, server_runtime *runtime)
         (unsigned long long)runtime->prefix_tokens_saved,
         (unsigned long long)runtime->prefix_disk_hits,
         (unsigned long long)runtime->prefix_disk_publishes,
-        runtime->prefix_bundle != NULL
-            ? k3_prefix_bundle_count(runtime->prefix_bundle) : (size_t)0,
+        runtime->prefix_entries,
         (unsigned)runtime->request_deadline_seconds,
         runtime->min_headroom_gib,
         runtime->retain_experts ? "true" : "false",
@@ -2077,9 +2089,9 @@ int main(int argc, char **argv)
             fprintf(stderr, "prefix cache: %s\n", bundle_error);
             return 1;
         }
+        runtime.prefix_entries = k3_prefix_bundle_count(runtime.prefix_bundle);
         printf("prefix cache at %s: %zu stored, %u entries and %u GiB at "
-               "most\n", options.prefix_cache_dir,
-               k3_prefix_bundle_count(runtime.prefix_bundle),
+               "most\n", options.prefix_cache_dir, runtime.prefix_entries,
                options.prefix_cache_entries, options.prefix_cache_gib);
     }
 
