@@ -6,6 +6,7 @@
 #include "mimo26_gpu_worker.h"
 #include <arpa/inet.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct {
@@ -82,6 +83,19 @@ typedef struct {
      * checkpoint is not small: about 24 MiB of fixed windowed ring plus
      * 22.5 KiB per token, so roughly 244 MiB at 10K tokens.
      */
+    /*
+     * Bearer credential. NULL disables the check, which is only tolerable on
+     * loopback -- a non-loopback bind without one is refused at startup, the
+     * policy K3's server already enforces. MIMO26_API_KEY is consulted when
+     * the flag is absent, so the key need not appear in a process listing.
+     */
+    const char *api_key;
+    /*
+     * Per-request output ceiling, independent of context. Without it a client
+     * can ask for as many tokens as the context allows and occupy the single
+     * slot for hours; only the request deadline bounded it.
+     */
+    uint32_t max_output_tokens;
     const char *prefix_cache_dir;
     uint32_t prefix_cache_gib;
     uint32_t prefix_cache_entries;
@@ -116,6 +130,8 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
     parsed.min_headroom_gib = 8u;
     parsed.request_deadline_seconds = 600u;
     parsed.kv_prefix_reuse = false;
+    parsed.api_key = getenv("MIMO26_API_KEY");
+    parsed.max_output_tokens = 8192u;
     parsed.prefix_cache_dir = NULL;
     parsed.prefix_cache_gib = 16u;
     parsed.prefix_cache_entries = 32u;
@@ -137,6 +153,8 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
         else if (!strcmp(key,"--prefix-cache-dir")) bit=2048;
         else if (!strcmp(key,"--prefix-cache-gib")) bit=4096;
         else if (!strcmp(key,"--prefix-cache-entries")) bit=8192;
+        else if (!strcmp(key,"--api-key")) bit=16384;
+        else if (!strcmp(key,"--max-output-tokens")) bit=32768;
         if (!bit || (seen & bit) || i + 1 >= argc) {
             snprintf(error,error_size,"unknown, duplicate or missing-value option: %s",key); return false;
         }
@@ -155,6 +173,10 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
                 return false;
             }
             parsed.prefix_cache_dir=value;
+        } else if (bit == 16384) {
+            /* An empty key means no key, matching K3, rather than a
+             * credential every caller can guess. */
+            parsed.api_key = value[0] ? value : NULL;
         } else if (bit == 32 || bit == 64 || bit == 256 || bit == 1024) {
             if (strcmp(value,"on") && strcmp(value,"off")) {
                 snprintf(error,error_size,"%s requires on or off",key); return false;
@@ -172,6 +194,7 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
             if (bit == 512) {low=1;high=86400;}
             if (bit == 4096) {low=1;high=4096;}
             if (bit == 8192) {low=1;high=64;}   /* the bundle's own ceiling */
+            if (bit == 32768) {low=1;high=65536;}
             if (!mimo26_server_decimal(value,low,high,&number)) {
                 snprintf(error,error_size,"invalid integer for %s",key); return false;
             }
@@ -183,6 +206,7 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
             if (bit == 512) parsed.request_deadline_seconds=(uint32_t)number;
             if (bit == 4096) parsed.prefix_cache_gib=(uint32_t)number;
             if (bit == 8192) parsed.prefix_cache_entries=(uint32_t)number;
+            if (bit == 32768) parsed.max_output_tokens=(uint32_t)number;
         }
     }
     /*
@@ -201,6 +225,20 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
             return false;
         }
         parsed.worker.expert_major = false;
+    }
+    /* Refuse a reachable bind with no credential, rather than warning.
+     *
+     * The whole 127/8 block is loopback, not just 127.0.0.1 -- the first
+     * version of this check compared strings and refused a legitimate
+     * 127.0.0.5 bind. --host has already validated the address as IPv4, so
+     * parsing it again here cannot fail. */
+    struct in_addr bound;
+    const bool loopback = inet_pton(AF_INET, parsed.host, &bound) == 1 &&
+                          (ntohl(bound.s_addr) >> 24) == 127u;
+    if (!loopback && parsed.api_key == NULL) {
+        snprintf(error,error_size,
+                 "a non-loopback bind requires --api-key or MIMO26_API_KEY");
+        return false;
     }
     /* A checkpoint directory without reuse would write files nothing reads. */
     if (parsed.prefix_cache_dir != NULL && !parsed.kv_prefix_reuse) {

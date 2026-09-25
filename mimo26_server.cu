@@ -22,6 +22,7 @@
 #include "k3_json.h"
 #include "mimo26_gpu_worker.h"
 #include "mimo26_server_options.h"
+#include "moonshine_version.h"
 #include "k3_prefix_reuse.h"
 #include "k3_prefix_bundle.h"
 #include <sys/stat.h>
@@ -46,6 +47,9 @@
 #define MAX_REQUEST_BYTES (1u << 20)      /* 1 MiB; a text turn is far less */
 #define MAX_MESSAGES 64u
 #define DEFAULT_MAX_TOKENS 512u
+/* Read by parse_chat, which has no runtime handle. Set once before the
+ * accept loop and never written again. */
+static uint32_t g_max_output_tokens = 8192u;
 
 static volatile sig_atomic_t g_shutdown = 0;
 
@@ -124,11 +128,14 @@ static bool send_response(int fd, int status, const char *reason,
                           size_t body_size)
 {
     char header[512];
+    /* RFC 7235 requires a challenge on 401; without it a conforming client
+     * cannot know which scheme to retry with. */
     const int header_size = snprintf(
         header, sizeof header,
         "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
-        "Cache-Control: no-store\r\nConnection: close\r\n\r\n",
-        status, reason, content_type, body_size);
+        "%sCache-Control: no-store\r\nConnection: close\r\n\r\n",
+        status, reason, content_type, body_size,
+        status == 401 ? "WWW-Authenticate: Bearer\r\n" : "");
     return header_size > 0 &&
            send_all(fd, header, (size_t)header_size) &&
            (body_size == 0 || send_all(fd, body, body_size));
@@ -202,12 +209,51 @@ static bool peer_disconnected(int fd)
     return (probe.revents & (POLLRDHUP | POLLERR | POLLHUP)) != 0;
 }
 
+/*
+ * Both ported from k3_server.c rather than rewritten, because both are easy to
+ * get subtly wrong: the comparison must not return early on the first
+ * differing byte, and the loopback test must accept the whole 127/8 block, not
+ * just 127.0.0.1.
+ */
+static bool loopback_host(const char *host)
+{
+    if (strcmp(host, "localhost") == 0 || strcmp(host, "::1") == 0) {
+        return true;
+    }
+    struct in_addr address;
+    return inet_pton(AF_INET, host, &address) == 1 &&
+           (ntohl(address.s_addr) >> 24) == 127u;
+}
+
+/* Constant time in the compared prefix; the length difference is folded into
+ * the accumulator rather than short-circuiting on it. */
+static bool authorized(const char *authorization, const char *api_key)
+{
+    if (api_key == NULL) {
+        return true;
+    }
+    if (authorization == NULL || strncmp(authorization, "Bearer ", 7u) != 0) {
+        return false;
+    }
+    const char *provided = authorization + 7u;
+    const size_t expected_size = strlen(api_key);
+    const size_t provided_size = strlen(provided);
+    size_t difference = expected_size ^ provided_size;
+    const size_t compared =
+        expected_size < provided_size ? expected_size : provided_size;
+    for (size_t i = 0u; i < compared; i++) {
+        difference |= (unsigned char)(api_key[i] ^ provided[i]);
+    }
+    return difference == 0u;
+}
+
 /* ---- request ---- */
 
 typedef struct {
     char   *method;
     char   *path;
     char   *body;
+    char   *authorization;
     size_t  body_size;
 } http_request;
 
@@ -216,6 +262,7 @@ static void request_free(http_request *request)
     free(request->method);
     free(request->path);
     free(request->body);
+    free(request->authorization);
     memset(request, 0, sizeof *request);
 }
 
@@ -311,6 +358,16 @@ static bool read_request(int fd, http_request *request, char *error,
         size_t name=colon-line;
         if ((name==17 && !strncasecmp(line,"Transfer-Encoding",name)) ||
             (name==6 && !strncasecmp(line,"Expect",name))) return reject("unsupported transfer coding or expectation");
+        if (name==13 && !strncasecmp(line,"Authorization",name)) {
+            if (request->authorization) return reject("duplicate Authorization");
+            const char *p=colon+1,*last=end;
+            while(p<last && (*p==' '||*p=='\t'))++p;
+            while(last>p && (last[-1]==' '||last[-1]=='\t'))--last;
+            request->authorization=(char*)malloc((size_t)(last-p)+1u);
+            if (!request->authorization) return reject("out of memory");
+            memcpy(request->authorization,p,(size_t)(last-p));
+            request->authorization[last-p]='\0';
+        }
         if (name==14 && !strncasecmp(line,"Content-Length",name)) {
             if (has_length) return reject("duplicate Content-Length");
             has_length=true;
@@ -411,6 +468,7 @@ typedef struct {
     /* Reported so a supervisor can verify the profile it transmitted rather
      * than only transmitting it. */
     uint32_t           min_headroom_gib;
+    bool               api_key_set;
     uint32_t          *resident_ids;
     size_t             resident_count;
     size_t             resident_capacity;
@@ -778,6 +836,7 @@ static void send_health(int fd, server_runtime *runtime)
     const int size = snprintf(
         body, sizeof body,
         "{\"status\":\"%s\",\"ready\":%s,\"model\":\"%s\","
+        "\"version\":\"" MOONSHINE_VERSION "\",\"auth\":\"%s\","
         "\"phase\":\"%s\",\"context\":%zu,\"prefill_chunk\":%u,\"expert_lookahead\":%s,"
         "\"expert_major\":%s,\"expert_slots\":%u,"
         "\"kv_prefix_reuse\":%s,\"prefix_hits\":%llu,"
@@ -793,6 +852,7 @@ static void send_health(int fd, server_runtime *runtime)
         "\"deadline_stops\":%llu,\"faults\":%llu,\"recoveries\":%llu}",
         slot->phase == MIMO26_SLOT_QUARANTINED ? "degraded" : "ok",
         mimo26_slot_ready(slot) ? "true" : "false", MODEL_ID,
+        runtime->api_key_set ? "on" : "off",
         mimo26_slot_phase_name(slot->phase), runtime->context_capacity,
         (unsigned)runtime->prefill_chunk, runtime->expert_lookahead ? "true" : "false",
         runtime->expert_major ? "true" : "false",
@@ -1093,6 +1153,9 @@ static bool parse_chat(const char *body, size_t body_size,
             REFUSE("invalid_request", "max_tokens must be a positive integer");
         }
         request->max_tokens = value;
+    }
+    if (request->max_tokens > g_max_output_tokens) {
+        request->max_tokens = g_max_output_tokens;
     }
 
     const int32_t messages = k3_json_object_get(&document, root, "messages");
@@ -1825,13 +1888,19 @@ int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
     setvbuf(stderr, NULL, _IOLBF, 0);
+    if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+        printf("%s %s (MiMo V2.6 Flash serving lane)\n", MOONSHINE_NAME,
+               MOONSHINE_VERSION);
+        return 0;
+    }
     if (argc < 2 || (argc == 2 && strcmp(argv[1], "--help") == 0)) {
         fprintf(stderr,
                 "usage: %s ROOT [--port N] [--host H] [--slots N] "
                 "[--context N] [--prefill-chunk 0..128] "
                 "[--expert-lookahead on|off] [--retain-experts on|off] "
                 "[--min-headroom-gib N] [--expert-major on|off] "
-                "[--request-deadline-seconds N] [--kv-prefix-reuse on|off]\n",
+                "[--request-deadline-seconds N] [--kv-prefix-reuse on|off] "
+                "[--api-key KEY] [--max-output-tokens N] [--version]\n",
                 argv[0]);
         return argc < 2 ? 2 : 0;
     }
@@ -1879,6 +1948,8 @@ int main(int argc, char **argv)
     runtime.request_deadline_seconds = (double)options.request_deadline_seconds;
     runtime.kv_prefix_reuse = options.kv_prefix_reuse;
     runtime.min_headroom_gib = options.min_headroom_gib;
+    g_max_output_tokens = options.max_output_tokens;
+    runtime.api_key_set = options.api_key != NULL;
 
     mimo26_slot_init(&runtime.slot);
 
@@ -2025,6 +2096,13 @@ int main(int argc, char **argv)
         if (!read_request(client, &http, error, sizeof error)) {
             send_error(client, 400, "Bad Request", "malformed_request",
                        error);
+            close(client);
+            continue;
+        }
+        if (!authorized(http.authorization, options.api_key)) {
+            send_error(client, 401, "Unauthorized", "unauthorized",
+                       "this server requires Authorization: Bearer <key>");
+            request_free(&http);
             close(client);
             continue;
         }

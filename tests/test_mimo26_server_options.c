@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* Mirrors what main() gets from mimo26_gpu_worker_config_defaults before it
  * parses. Duplicated rather than called because this test is deliberately
@@ -131,6 +132,46 @@ int main(void) {
         const char *off[]={"x","root","--expert-lookahead","off"};
         assert(mimo26_server_parse_options(4,(char**)off,&got,error,sizeof error));
         assert(!got.worker.expert_major && !got.worker.expert_lookahead);
+    }
+    /*
+     * Bearer credential and the bind policy around it, ported from K3's
+     * server. The policy is the load-bearing part: a reachable bind with no
+     * credential must be refused, not warned about.
+     */
+    CHECK(true,"root","--api-key","secret");
+    assert(parsed.api_key && !strcmp(parsed.api_key,"secret"));
+    CHECK(true,"root","--api-key","");          /* empty means no key */
+    assert(parsed.api_key == NULL);
+    CHECK(false,"root","--api-key");            /* value required */
+    CHECK(false,"root","--api-key","a","--api-key","b");
+    /* Loopback may run open; anything reachable may not. */
+    CHECK(true,"root","--host","127.0.0.1");
+    CHECK(true,"root","--host","127.0.0.5");
+    CHECK(false,"root","--host","10.42.0.1");
+    CHECK(true,"root","--host","10.42.0.1","--api-key","secret");
+    CHECK(false,"root","--host","10.42.0.1","--api-key","");
+    /* Per-request output ceiling. */
+    CHECK(true,"root","--max-output-tokens","1");
+    CHECK(true,"root","--max-output-tokens","65536");
+    CHECK(false,"root","--max-output-tokens","0");
+    CHECK(false,"root","--max-output-tokens","65537");
+    CHECK(false,"root","--max-output-tokens","junk");
+    {
+        mimo26_server_options got; char error[256];
+        memset(&got,0,sizeof got);
+        server_defaults(&got);
+        const char *d[]={"x","root"};
+        assert(mimo26_server_parse_options(2,(char**)d,&got,error,sizeof error));
+        assert(got.max_output_tokens==8192u);
+        /* With no flag the environment supplies the key, so it need not
+         * appear in a process listing. */
+        setenv("MIMO26_API_KEY","fromenv",1);
+        memset(&got,0,sizeof got);
+        server_defaults(&got);
+        const char *e[]={"x","root","--host","10.42.0.1"};
+        assert(mimo26_server_parse_options(4,(char**)e,&got,error,sizeof error));
+        assert(got.api_key && !strcmp(got.api_key,"fromenv"));
+        unsetenv("MIMO26_API_KEY");
     }
     const char *bad[]={"-1","+1"," 16","16 ","16junk","","18446744073709551616","999999999999999999999999999"};
     for(unsigned i=0;i<sizeof bad/sizeof *bad;++i) { CHECK(false,"root","--slots",(char*)bad[i]); }
