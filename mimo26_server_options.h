@@ -12,6 +12,21 @@ typedef struct {
     const char *root;
     const char *host;
     uint16_t port;
+    /*
+     * Keep expert payloads and cache mappings across request boundaries.
+     * Context is reset regardless -- this is NOT KV reuse, which is
+     * kv_prefix_reuse below.
+     *
+     * On by default as of 2026-09-25, from the serving qualification rather
+     * than the warm benchmark: it costs nothing measurable in memory (GTT max
+     * and swap identical to the retention-off run, to the MiB) and took the
+     * 20-request soak median from 22.4 s to 13.4 s. All seven functional
+     * checks pass identically either way.
+     *
+     * It does change the failure path: a retention refusal quarantines the
+     * slot rather than falling back to a cold reset, because pending I/O or a
+     * sticky execution fault needs a new worker.
+     */
     bool retain_experts;
     /*
      * Minimum host memory, in GiB, that must remain available after the
@@ -97,7 +112,7 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
     }
     mimo26_server_options parsed = *options;
     parsed.root = argv[1]; parsed.host = "127.0.0.1"; parsed.port = 8640;
-    parsed.retain_experts = false;
+    parsed.retain_experts = true;
     parsed.min_headroom_gib = 8u;
     parsed.request_deadline_seconds = 600u;
     parsed.kv_prefix_reuse = false;

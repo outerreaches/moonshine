@@ -136,15 +136,15 @@ def parse_args(argv=None):
     # cannot quietly serve something else -- but that means the two sets can
     # drift, which is exactly what happened: these sat at 16/2048/32 with
     # lookahead off long after the server had moved to the qualified
-    # 160/262144/128 with it on. The expected_profile check below is what
+    # 160/131072/128 with it on. The expected_profile check below is what
     # catches the next drift, so every pinned value must also be on /health.
     p.add_argument('--slots', type=int, default=160)
-    p.add_argument('--context', type=int, default=262144)
+    p.add_argument('--context', type=int, default=131072)
     p.add_argument('--restarts', type=int, default=2)
     p.add_argument('--prefill-chunk', type=int, default=128)
     p.add_argument('--expert-lookahead', choices=('off', 'on'), default='on')
     p.add_argument('--expert-major', choices=('off', 'on'), default='on')
-    p.add_argument('--retain-experts', choices=('off', 'on'), default='off',
+    p.add_argument('--retain-experts', choices=('off', 'on'), default='on',
                    help='retain healthy expert cache between requests; context is always reset')
     p.add_argument('--kv-prefix-reuse', choices=('off', 'on'), default='off',
                    help='continue from a matching prefix instead of re-prefilling it')

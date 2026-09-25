@@ -9,7 +9,7 @@
  * mimo26_gpu_worker_config_defaults. */
 static void server_defaults(mimo26_server_options *o) {
     o->worker.expert_slots_per_layer = 160u;
-    o->worker.global_kv_capacity = 262144u;
+    o->worker.global_kv_capacity = 131072u;
     o->worker.prefill_chunk = 128u;
     o->worker.expert_lookahead = true;
     o->worker.expert_major = true;
@@ -42,7 +42,7 @@ int main(void) {
     CHECK(true,"root");
     assert(!strcmp(parsed.host,"127.0.0.1")&&parsed.port==8640);
     assert(!parsed.worker.expert_lookahead&&parsed.worker.prefill_chunk==32);
-    assert(!parsed.retain_experts);
+    assert(parsed.retain_experts);   /* on by default since 2026-09-25 */
     assert(parsed.worker.expert_slots_per_layer==16&&parsed.worker.global_kv_capacity==2048);
     CHECK(true,"root","--expert-lookahead","on","--prefill-chunk","64","--slots","48","--context","1024","--port","8765","--host","127.0.0.1");
     assert(parsed.worker.expert_lookahead&&parsed.worker.prefill_chunk==64&&parsed.worker.expert_slots_per_layer==48);
@@ -70,7 +70,7 @@ int main(void) {
     CHECK(false,"root","--prefill-chunk","129");
     CHECK(false,"root","--context","0"); CHECK(false,"root","--context","4294967296");
     /* The memory guard's floor: 0 disables it, and it must reject junk the
-     * same way every other numeric option does. Default is 20 GiB. */
+     * same way every other numeric option does. Default is 8 GiB. */
     CHECK(true,"root","--min-headroom-gib","0");
     CHECK(true,"root","--min-headroom-gib","512");
     CHECK(false,"root","--min-headroom-gib","513");
@@ -126,7 +126,7 @@ int main(void) {
         assert(mimo26_server_parse_options(2,(char**)d,&got,error,sizeof error));
         assert(got.worker.expert_major && got.worker.expert_lookahead);
         assert(got.worker.expert_slots_per_layer==160u);
-        assert(got.worker.global_kv_capacity==262144u);
+        assert(got.worker.global_kv_capacity==131072u);
         server_defaults(&got);
         const char *off[]={"x","root","--expert-lookahead","off"};
         assert(mimo26_server_parse_options(4,(char**)off,&got,error,sizeof error));

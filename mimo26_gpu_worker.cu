@@ -237,21 +237,31 @@ void mimo26_gpu_worker_config_defaults(mimo26_gpu_worker_config *config)
         return;
     }
     /*
-     * 262,144 tokens, chosen 2026-09-24 as the largest context that fits
-     * safely beside the 160-slot expert cache: the profile predicts 110.4 GiB
-     * and the startup guard's 10 GiB floor refuses 294,912 (111.1 GiB).
+     * 131,072 tokens, paired with the 160 slots below.
      *
-     * KV is the cheap part of this architecture -- 39 of 48 layers are SWA
-     * capped at a 128-token window, so only the 9 global layers grow, at
-     * 22.6 KiB/token. Going from 2,048 to 262,144 costs 5.6 GiB. What binds
-     * is the expert cache at 95.6 GiB, not context, so this is a slots-versus-
-     * context trade rather than a hardware limit.
+     * 262,144 was the default from 2026-09-24 until the serving qualification
+     * on 2026-09-25 refused to start on it. At 160 slots that profile predicts
+     * 111.4 GiB, and MemAvailable on an IDLE host drifts 118.7-120.5 GiB, so
+     * it clears the 8 GiB floor only sometimes -- it was refused outright with
+     * nothing else running. A default that starts depending on page-cache
+     * state is not a default.
      *
-     * Note what this does NOT buy: prefill runs at ~16 tok/s, so a genuinely
-     * 262K-token prompt is hours of ingest. The capacity is for long agentic
-     * sessions that accumulate, not for single enormous prompts.
+     * 131,072 predicts 108.3 GiB and leaves about 10.5 GiB, and is the pairing
+     * that qualified 7/7 through the real server.
+     *
+     * KV itself remains cheap -- 39 of 48 layers are SWA capped at a 128-token
+     * window, so only the 9 global layers grow, at 22.6 KiB/token. What binds
+     * is the expert cache, so this is a slots-versus-context trade rather than
+     * a hardware limit: 128 slots hold 262,144 comfortably, predicting
+     * 92.7 GiB with ~30 GiB spare, and that is the conservative profile to run
+     * where the host is unknown.
+     *
+     * Note what neither buys: prefill falls from ~17.6 tok/s at short prompts
+     * to ~10.5 at 11K, so a genuinely large cold prompt is hours of ingest.
+     * Large contexts are reached by accumulating across turns with
+     * --kv-prefix-reuse, not by single enormous prompts.
      */
-    config->global_kv_capacity = 262144u;
+    config->global_kv_capacity = 131072u;
     /*
      * The September 24 short-request sweep motivated a larger pooled cache.
      * The rates below divide generated tokens by WHOLE request time, including
