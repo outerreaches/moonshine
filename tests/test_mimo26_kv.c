@@ -314,6 +314,108 @@ int main(void)
     printf("  ok  zero-depth journal admits no rollback; zero capacity "
            "refused\n");
 
+    /*
+     * Persisted prefix state. A checkpoint is only worth having if what comes
+     * back is indistinguishable from what went out, and only safe if a damaged
+     * or foreign file is refused without touching the cache.
+     */
+    {
+        const char *path = "/tmp/test_mimo26_kv_state.bin";
+        mimo26_kv_cache *source = NULL;
+        assert(mimo26_kv_create(&source, GLOBAL_CAPACITY, ROLLBACK_DEPTH) ==
+               MIMO26_KV_OK);
+        /* Past the 128 window, so windowed layers have evicted and carry a
+         * nonzero first_position -- the case a naive exporter gets wrong. */
+        for (uint64_t token = 0; token < 200u; token++) {
+            commit_token(source, token);
+        }
+        snapshot exported;
+        snapshot_take(source, &exported);
+
+        mimo26_kv_state_info written;
+        assert(mimo26_kv_export(source, path, &written) == MIMO26_KV_OK);
+        assert(written.length == 200u);
+        assert(written.file_bytes > written.payload_bytes);
+        printf("  ok  exported %llu positions, %.3f MiB in %.3f s\n",
+               (unsigned long long)written.length,
+               (double)written.file_bytes / (1024.0 * 1024.0),
+               written.wall_seconds);
+
+        /* Into a FRESH cache, so a pass cannot come from bytes left behind. */
+        mimo26_kv_cache *restored = NULL;
+        assert(mimo26_kv_create(&restored, GLOBAL_CAPACITY, ROLLBACK_DEPTH) ==
+               MIMO26_KV_OK);
+        mimo26_kv_state_info read_back;
+        assert(mimo26_kv_import(restored, path, &read_back) == MIMO26_KV_OK);
+        assert(read_back.payload_crc64 == written.payload_crc64);
+        assert(read_back.layout_crc64 == written.layout_crc64);
+        assert(snapshot_equal_live(restored, &exported));
+        printf("  ok  imported into a fresh cache, all %u layers byte-equal "
+               "including evicted windows\n", MIMO26_TEXT_LAYER_COUNT);
+
+        /* The journal is deliberately not carried: a restored checkpoint must
+         * not let a rewind cross into positions the file never described. */
+        assert(mimo26_kv_rollback_available(restored) == 0u);
+        printf("  ok  restored state admits no rollback across the "
+               "checkpoint boundary\n");
+
+        /* Continuing from a restored prefix must match continuing from the
+         * original -- this is the property the whole feature rests on. */
+        commit_token(source, 200u);
+        commit_token(restored, 200u);
+        snapshot continued;
+        snapshot_take(source, &continued);
+        assert(snapshot_equal_live(restored, &continued));
+        snapshot_free(&continued);
+        printf("  ok  one more token on each diverges nowhere\n");
+
+        /* A single flipped payload byte must be refused, and refused without
+         * disturbing the cache it was offered to. */
+        FILE *tamper = fopen(path, "r+b");
+        assert(tamper != NULL);
+        assert(fseek(tamper, 96, SEEK_SET) == 0);
+        int original = fgetc(tamper);
+        assert(original != EOF);
+        assert(fseek(tamper, 96, SEEK_SET) == 0);
+        assert(fputc(original ^ 0x40, tamper) != EOF);
+        assert(fclose(tamper) == 0);
+
+        snapshot guard;
+        snapshot_take(restored, &guard);
+        assert(mimo26_kv_import(restored, path, NULL) == MIMO26_KV_INVALID_STATE);
+        assert(snapshot_equal_live(restored, &guard));
+        assert(mimo26_kv_inspect(restored, path, NULL) ==
+               MIMO26_KV_INVALID_STATE);
+        snapshot_free(&guard);
+        printf("  ok  one flipped payload byte is refused, cache untouched\n");
+
+        /* A file written at a different capacity has different strides and
+         * must not load, however intact it is. */
+        mimo26_kv_cache *narrow = NULL;
+        assert(mimo26_kv_create(&narrow, GLOBAL_CAPACITY / 2u,
+                                ROLLBACK_DEPTH) == MIMO26_KV_OK);
+        assert(mimo26_kv_export(source, path, NULL) == MIMO26_KV_OK);
+        assert(mimo26_kv_import(narrow, path, NULL) == MIMO26_KV_INVALID_STATE);
+        assert(mimo26_kv_length(narrow) == 0u);
+        mimo26_kv_destroy(narrow);
+        printf("  ok  a checkpoint from another context is refused\n");
+
+        /* An open transaction has no position yet, so it is not history. */
+        assert(mimo26_kv_begin(source, mimo26_kv_length(source)) ==
+               MIMO26_KV_OK);
+        assert(mimo26_kv_export(source, path, NULL) == MIMO26_KV_INVALID_STATE);
+        assert(mimo26_kv_import(source, path, NULL) == MIMO26_KV_INVALID_STATE);
+        assert(mimo26_kv_abort(source) == MIMO26_KV_OK);
+        printf("  ok  export and import refuse an open transaction\n");
+
+        assert(mimo26_kv_import(restored, "/tmp/definitely-not-here.bin",
+                                NULL) == MIMO26_KV_INVALID_STATE);
+        snapshot_free(&exported);
+        mimo26_kv_destroy(source);
+        mimo26_kv_destroy(restored);
+        (void)remove(path);
+    }
+
     printf("test_mimo26_kv: ok\n");
     return 0;
 }

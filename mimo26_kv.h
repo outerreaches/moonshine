@@ -105,6 +105,60 @@ mimo26_kv_status mimo26_kv_view(const mimo26_kv_cache *cache, uint32_t layer,
 /* Bytes currently allocated, for the memory ledger. */
 size_t mimo26_kv_allocated_bytes(const mimo26_kv_cache *cache);
 
+/*
+ * Persisted committed history, so a prefix can be restored instead of
+ * re-evaluated. Follows K3's prefix checkpoints, which is where the design
+ * comes from: re-prefilling 10K tokens costs about 1,000 s at the measured
+ * rate, while the same state is ~244 MiB and reloads in tens of milliseconds.
+ *
+ * Only semantic continuation state is written -- committed keys, values,
+ * per-layer history and first_position, and the cache length. The rollback
+ * journal and any open transaction are deliberately excluded: they are
+ * recovery scaffolding rather than history, and restoring them would let a
+ * later rewind cross a checkpoint boundary into positions the file never
+ * described.
+ */
+typedef struct {
+    uint32_t format_version;
+    uint64_t global_capacity;  /* capacity the file was written at */
+    uint64_t length;           /* committed positions in the file */
+    uint64_t payload_bytes;
+    uint64_t file_bytes;
+    uint64_t payload_crc64;
+    uint64_t layout_crc64;     /* per-layer kv_heads, window and capacity */
+    double   wall_seconds;
+} mimo26_kv_state_info;
+
+/*
+ * Write committed history to `path`, atomically: the payload goes to a
+ * temporary beside it and is renamed only once fully written and synced, so a
+ * reader never observes a short file. Refuses while a transaction is open.
+ */
+mimo26_kv_status mimo26_kv_export(const mimo26_kv_cache *cache,
+                                  const char *path,
+                                  mimo26_kv_state_info *info);
+
+/*
+ * Header, identity and payload CRC only. Never mutates the cache, so a caller
+ * can qualify a candidate file before deciding to load it.
+ */
+mimo26_kv_status mimo26_kv_inspect(const mimo26_kv_cache *cache,
+                                   const char *path,
+                                   mimo26_kv_state_info *info);
+
+/*
+ * Replace committed history with the file's.
+ *
+ * Everything is validated before the cache is touched -- magic, version,
+ * layout identity, exact file length and the whole payload CRC -- so a
+ * rejected file leaves the cache exactly as it was. The one case that can
+ * fail after mutation begins is an I/O error during the apply pass, and that
+ * resets the cache to empty rather than leaving a partial history: an empty
+ * cache is merely slow, a partial one answers from history it does not have.
+ */
+mimo26_kv_status mimo26_kv_import(mimo26_kv_cache *cache, const char *path,
+                                  mimo26_kv_state_info *info);
+
 #ifdef __cplusplus
 }
 #endif
