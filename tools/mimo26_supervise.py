@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Opt-in, loopback-only process supervision. Never replays requests."""
 import argparse
+import os
 import json
 import math
 from pathlib import Path
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -16,7 +18,8 @@ import urllib.request
 class Supervisor:
     def __init__(self, command, port, *, restarts=2, startup=120, shutdown=30,
                  backoff=2, poll=1, log=print, gpu_free=lambda: True,
-                 expected_profile=None):
+                 expected_profile=None, release_root=None,
+                 allowed_signers=None, require_signature=False):
         self.command, self.port = command, port
         self.limit, self.startup, self.shutdown = restarts, startup, shutdown
         self.backoff, self.poll, self.log = backoff, poll, log
@@ -24,6 +27,12 @@ class Supervisor:
         self.child = None
         self.gpu_free = gpu_free
         self.expected_profile = expected_profile
+        # Resolved at every start rather than once, so activating or rolling
+        # back a release and then restarting picks up the new binary. Holding
+        # the resolved path would make rollback a no-op for a running service.
+        self.release_root = release_root
+        self.allowed_signers = allowed_signers
+        self.require_signature = require_signature
 
     def event(self, event, **details):
         self.log(json.dumps(dict(event=event, **details)), flush=True)
@@ -80,8 +89,19 @@ class Supervisor:
                 if not self.gpu_free():
                     self.event('gpu_unavailable')
                     return 1
-                self.child = subprocess.Popen(self.command)
-                self.event('started', pid=self.child.pid, replacement=attempts)
+                command = self.command
+                release = None
+                if self.release_root is not None:
+                    resolved, release, problem = resolve_release(
+                        self.release_root, self.allowed_signers,
+                        self.require_signature)
+                    if resolved is None:
+                        self.event('release_unusable', reason=problem)
+                        return 1
+                    command = [str(resolved)] + list(self.command[1:])
+                self.child = subprocess.Popen(command)
+                self.event('started', pid=self.child.pid, replacement=attempts,
+                           release=release, binary=command[0])
                 started = time.monotonic()
                 ready = False
                 reason = 'stopped'
@@ -126,10 +146,44 @@ class Supervisor:
                 self.retire()
 
 
+def resolve_release(root, allowed_signers, require_signature):
+    """Resolve <root>/current to a verified binary.
+
+    Verification is delegated to mimo26_package.py rather than reimplemented,
+    so the supervisor and the packager cannot disagree about what a valid
+    release is.
+    """
+    root = Path(root).resolve()
+    current = root / 'current'
+    if not current.is_symlink():
+        return None, None, f'no current release under {root}'
+    release = (root / os.readlink(current)).resolve()
+    command = [sys.executable, str(Path(__file__).resolve().parent /
+                                   'mimo26_package.py'),
+               'verify', str(release)]
+    if allowed_signers:
+        command += ['--allowed-signers', str(allowed_signers)]
+    if require_signature:
+        command += ['--require-signature']
+    check = subprocess.run(command, capture_output=True, text=True, timeout=300)
+    if check.returncode != 0:
+        return None, release.name, (check.stdout or check.stderr).strip()
+    binary = release / 'mimo26_server'
+    if not binary.exists():
+        return None, release.name, 'release has no mimo26_server'
+    return binary, release.name, None
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('server', type=Path)
+    p.add_argument('server', type=Path, nargs='?',
+                   help='server binary; omit when --release-root is given')
     p.add_argument('root', type=Path)
+    p.add_argument('--release-root', type=Path, default=None,
+                   help='serve <root>/current, re-resolved at every start so '
+                        'activate and rollback move a running service')
+    p.add_argument('--allowed-signers', type=Path, default=None)
+    p.add_argument('--require-signature', action='store_true')
     p.add_argument('--port', type=int, default=8640)
     # These mirror the server's own defaults deliberately. The supervisor pins
     # a profile rather than inheriting one, so an older or newer server binary
@@ -157,6 +211,10 @@ def parse_args(argv=None):
     p.add_argument('--shutdown-timeout', type=float, default=30,
                    help='seconds to wait for an owned child to reach a safe boundary; no force kill')
     a = p.parse_args(argv)
+    if (a.server is None) == (a.release_root is None):
+        p.error('give exactly one of a server path or --release-root')
+    if a.require_signature and a.allowed_signers is None:
+        p.error('--require-signature needs --allowed-signers')
     if not (1 <= a.port <= 65535 and 8 <= a.slots <= 256 and 1 <= a.context <= 0xffffffff and a.restarts >= 0):
         p.error('invalid port, slots, context or restart budget')
     if not 0 <= a.prefill_chunk <= 128 or (a.expert_lookahead == 'on' and a.prefill_chunk == 0):
@@ -179,7 +237,9 @@ def parse_args(argv=None):
 
 
 def server_command(a):
-    server = a.server.resolve(strict=True)
+    # A placeholder when a release root is in use: the supervisor replaces
+    # argv[0] at each start from <release-root>/current.
+    server = a.server.resolve(strict=True) if a.server else Path('placeholder')
     command = [str(server), str(a.root.resolve(strict=True)), '--host', '127.0.0.1',
                '--port', str(a.port), '--slots', str(a.slots), '--context', str(a.context)]
     # Always transmit the resolved profile: worker defaults can change between
@@ -213,7 +273,10 @@ def main():
                                                   retain_experts=a.retain_experts == 'on',
                                                   kv_prefix_reuse=a.kv_prefix_reuse == 'on',
                                                   request_deadline_seconds=a.request_deadline_seconds,
-                                                  min_headroom_gib=a.min_headroom_gib))
+                                                  min_headroom_gib=a.min_headroom_gib),
+                            release_root=a.release_root,
+                            allowed_signers=a.allowed_signers,
+                            require_signature=a.require_signature)
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: supervisor.stop.set())
     return supervisor.run()
