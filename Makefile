@@ -512,6 +512,35 @@ tests/test_mimo26_server_slot: tests/test_mimo26_server_slot.o \
 		mimo26_server_slot.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
+# Quarantine and recovery, against the real slot state machine.
+#
+# Both of these existed and passed but had no rule, so `make` fell through to
+# its builtin and linked with $(CC), which cannot link a hipcc object. A gate
+# that cannot be built is a gate nobody runs -- the 2026-09-25 qualification
+# recorded quarantine as "not covered" when in fact it was covered and
+# unbuildable.
+#
+# The recovery gate includes mimo26_server.cu whole and mocks only the two
+# worker reset entry points, so --gc-sections is what drops the HTTP server
+# and leaves the slot machine as the sole external dependency.
+tests/mimo26_server_recovery_gate: tests/mimo26_server_recovery_gate.cu \
+		mimo26_server_slot.o
+	$(HIPCC) $(HIPFLAGS) -ffunction-sections -fdata-sections -o $@ \
+		tests/mimo26_server_recovery_gate.cu -x none mimo26_server_slot.o \
+		-Wl,--gc-sections $(LDLIBS)
+
+tests/test_mimo26_retention_fault_model: \
+		tests/test_mimo26_retention_fault_model.c k3_expert_cache.o
+	$(CC) $(CFLAGS) -I. -o $@ $^ $(LDLIBS)
+
+tests/mimo26_prefix_reuse_gate: tests/mimo26_prefix_reuse_gate.o \
+		mimo26_gpu_worker.o mimo26_rocm_layer.o mimo26_rocm_ops.o \
+		k3_rocm_ops.o mimo26_weights.o mimo26_kv.o mimo26_manifest.o \
+		mimo26_architecture.o mimo26_attention.o mimo26_ops.o \
+		mimo26_router.o mimo26_tokenizer.o glm53_fp8_oracle.o \
+		k3_safetensors.o k3_json.o k3_io_uring.o k3_expert_cache.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS) $(ICU_LDLIBS)
+
 tests/test_mimo26_qualify.o: tests/test_mimo26_qualify.c mimo26_worker.h
 tests/test_mimo26_qualify.o: CFLAGS += -fno-fast-math
 tests/test_mimo26_qualify: tests/test_mimo26_qualify.o \
