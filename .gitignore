@@ -36,9 +36,11 @@ __pycache__/
 moonshine-pre-public-history-*.bundle
 .DS_Store
 .*.swp
-tests/mimo26_transport_gate
-tests/mimo26_server_controls_gate
-tests/mimo26_server_retention_gate
-tests/mimo26_chat_options_gate
-tests/mimo26_server_recovery_gate
-tests/mimo26_prefix_reuse_gate
+# Built gate binaries. A pattern, not a list: naming them one at a time meant
+# every new gate was untracked-dirty until someone noticed, and three of them
+# were committed as binaries before this. Sources keep their extension, so
+# only the linked output matches.
+tests/mimo26_*_gate
+!tests/mimo26_*_gate.c
+!tests/mimo26_*_gate.cu
+!tests/mimo26_*_gate.py
