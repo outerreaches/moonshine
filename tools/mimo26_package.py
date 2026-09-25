@@ -13,6 +13,8 @@ atomic way to stop.
               `previous`
     rollback  swap `current` and `previous`
     list      show what is installed and which is live
+    retire    unseal and delete a release that is neither current nor the
+              rollback target
 
 A release carries the qualification report that justifies it. `activate`
 refuses a release without one, and refuses a build made from a dirty working
@@ -244,6 +246,30 @@ def rollback(a):
     return 0
 
 
+def retire(a):
+    """Sealing a release read-only also makes its directory unremovable, which
+    is the point -- but it means retiring one needs a deliberate step rather
+    than rm -rf. Refuses to remove whatever is live or is the only way back."""
+    root = Path(a.root).resolve()
+    release = Path(a.release).resolve()
+    for link in ("current", "previous"):
+        pointer = root / link
+        if pointer.is_symlink() and \
+                (root / Path(os.readlink(pointer))).resolve() == release:
+            if link == "current":
+                print(f"refusing to retire {release.name}: it is current")
+                return 1
+            if not a.force:
+                print(f"refusing to retire {release.name}: it is the rollback "
+                      f"target; pass --force to give that up")
+                return 1
+            pointer.unlink()
+    unseal(release)
+    shutil.rmtree(release)
+    print(f"retired {release.name}")
+    return 0
+
+
 def list_releases(a):
     root = Path(a.root).resolve()
     releases = root / "releases"
@@ -287,6 +313,9 @@ def main():
     r.add_argument("--root", required=True)
     l = sub.add_parser("list"); l.set_defaults(fn=list_releases)
     l.add_argument("--root", required=True)
+    rt = sub.add_parser("retire"); rt.set_defaults(fn=retire)
+    rt.add_argument("release"); rt.add_argument("--root", required=True)
+    rt.add_argument("--force", action="store_true")
     a = p.parse_args()
     return a.fn(a)
 
