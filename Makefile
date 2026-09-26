@@ -1169,6 +1169,10 @@ tests/replay_mimo26_projection.o: tests/replay_mimo26_projection.cu k3_rocm_ops.
 	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
 tests/replay_mimo26_projection: tests/replay_mimo26_projection.o k3_rocm_ops.o
 	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/mimo26_mxfp4_oracle_sweep.o: tests/mimo26_mxfp4_oracle_sweep.cu k3_rocm_ops.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/mimo26_mxfp4_oracle_sweep: tests/mimo26_mxfp4_oracle_sweep.o k3_rocm_ops.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
 tests/test_k3_mxfp4_gemv_rows.o: tests/test_k3_mxfp4_gemv_rows.cu k3_rocm_ops.h
 	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
 tests/test_k3_mxfp4_gemv_rows: tests/test_k3_mxfp4_gemv_rows.o k3_rocm_ops.o

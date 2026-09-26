@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 static std::vector<unsigned char> read(const std::string &path, size_t size)
@@ -64,6 +65,26 @@ int main(int argc, char **argv)
         differing += std::memcmp(tiled.data() + i, loop.data() + i, 2) != 0;
     std::printf("baseline_unchanged=%d grouped_gemv_exact=%d tiled_differing=%zu/%zu\n",
                 unchanged, exact, differing, bytes / 2);
+    /*
+     * Optionally re-emit all three outputs so the float64 oracle
+     * (Scripts/mimo26-qualification/mxfp4_oracle.py) can judge each kernel
+     * against the true value rather than against its sibling. The guard's own
+     * capture holds only two of the three, and which kernel wrote its
+     * "-batch.bin" depends on the call site that tripped it -- dumping here
+     * names each file after the kernel that produced it, so the labelling
+     * cannot be lost. Writes are refused if the file exists ("wbx").
+     */
+    if (const char *dump = std::getenv("MIMO26_REPLAY_DUMP")) {
+        const std::pair<const char *, const std::vector<unsigned char> *> files[] = {
+            {"-gemv-loop.bin", &loop}, {"-gemv-rows.bin", &batch}, {"-gemm-tiled.bin", &tiled}};
+        for (const auto &entry : files) {
+            FILE *f = std::fopen((std::string(dump) + entry.first).c_str(), "wbx");
+            REQUIRE(f != nullptr);
+            const bool wrote = std::fwrite(entry.second->data(), 1, bytes, f) == bytes;
+            REQUIRE(std::fclose(f) == 0 && wrote);
+        }
+        std::printf("replay_dump prefix=%s\n", dump);
+    }
     hipFree(dp); hipFree(ds); hipFree(di); hipFree(dloop); hipFree(drows); hipFree(dtiled);
     REQUIRE(unchanged && exact);
     return 0;

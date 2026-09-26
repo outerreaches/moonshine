@@ -44,3 +44,8 @@ tests/mimo26_*_gate
 !tests/mimo26_*_gate.c
 !tests/mimo26_*_gate.cu
 !tests/mimo26_*_gate.py
+
+# Diagnostic harnesses that are not gates and so miss the pattern above. Same
+# rule: the linked output is ignored, the source keeps its extension.
+tests/mimo26_mxfp4_oracle_sweep
+tests/replay_mimo26_projection
