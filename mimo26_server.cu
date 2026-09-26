@@ -1592,6 +1592,10 @@ typedef struct {
      */
     response_state *stream;
     double last_keepalive;
+    /* Prefill's own start, not the request's: the dashboard divides evaluated
+     * tokens by this to show a live rate, and folding in tokenization would
+     * understate it. */
+    double prefill_started;
 } prefill_request_context;
 
 static bool prefill_progress(void *context, size_t done, size_t total)
@@ -1606,23 +1610,39 @@ static bool prefill_progress(void *context, size_t done, size_t total)
         }
     }
     /*
-     * An SSE comment: ignored by every client, but it is bytes on the wire,
-     * which is what resets a transport idle timer. Throttled because the hook
-     * fires once per chunk and the point is liveness, not bandwidth.
+     * One throttled tick serves two consumers, because both need the same
+     * thing at the same cadence and neither should drive the other.
+     *
+     *   the client -- an SSE comment, ignored by every parser but bytes on
+     *   the wire, which is what resets a transport idle timer;
+     *   the observer -- a progress record, so a prefill that runs for
+     *   fifteen minutes is visible as it goes rather than only once it ends.
+     *
+     * Ten seconds: short enough to beat an idle timeout by a wide margin,
+     * long enough that a long prefill costs tens of lines rather than
+     * thousands.
      */
-    if (request->stop == MIMO26_SLOT_CONTINUE && request->stream != NULL &&
-        request->stream->headers_sent) {
+    if (request->stop == MIMO26_SLOT_CONTINUE) {
         const double now = now_seconds();
         if (now - request->last_keepalive >= 10.0) {
             request->last_keepalive = now;
-            char note[96];
-            const int size = snprintf(note, sizeof note,
-                                      ": prefill %zu/%zu\n\n", done, total);
-            if (size > 0 && !send_all(request->stream->fd, note,
-                                      (size_t)size)) {
-                /* The client is gone; stop rather than finish work nobody
-                 * will read. */
-                request->stop = MIMO26_SLOT_STOP_CANCELLED;
+            /* Logged whether or not the response streams: a non-streaming
+             * request is exactly as slow and exactly as opaque. */
+            server_log("INFO", "request.prefill.progress",
+                       runtime->inflight_id,
+                       "completed=%zu total=%zu elapsed=%.3f unit=token",
+                       done, total, now - request->prefill_started);
+            if (request->stream != NULL && request->stream->headers_sent) {
+                char note[96];
+                const int size = snprintf(note, sizeof note,
+                                          ": prefill %zu/%zu\n\n", done,
+                                          total);
+                if (size > 0 && !send_all(request->stream->fd, note,
+                                          (size_t)size)) {
+                    /* The client is gone; stop rather than finish work
+                     * nobody will read. */
+                    request->stop = MIMO26_SLOT_STOP_CANCELLED;
+                }
             }
         }
     }
@@ -1793,7 +1813,7 @@ static void handle_chat(server_runtime *runtime, int fd,
     }
     prefill_request_context progress_context = {
         runtime, fd, request_control(runtime, fd),
-        state.streaming ? &state : NULL, now_seconds()};
+        state.streaming ? &state : NULL, now_seconds(), now_seconds()};
     if (progress_context.stop != MIMO26_SLOT_CONTINUE) {
         /* No work or logits to consume when already stopped before prefill. */
     } else if (mimo26_gpu_worker_prefill(runtime->worker, prompt.ids + reuse,
