@@ -85,6 +85,19 @@ typedef struct {
      */
     bool expert_major;
     /*
+     * Use the weight-reuse tiled MXFP4 GEMM for the expert projections rather
+     * than the launch-amortizing GEMV, which re-reads each expert's weights
+     * once per vector block.
+     *
+     * Off by default, and NOT because it is less accurate -- a float64 oracle
+     * finds it strictly nearer the truth on every output where it differs from
+     * the GEMV (94 of 3.08M, none against) and ~2.1-2.8x faster. It is off
+     * because enabling it re-bases every full-vector equality fixture in this
+     * lane, which is a deliberate act, not a default.
+     * See [[MiMo MXFP4 Kernel Oracle 2026-09-26]].
+     */
+    bool expert_weight_reuse;
+    /*
      * Ceiling on the attention score scratch, in bytes.
      *
      * The scratch a full chunk wants is chunk * 64 * (history + 2) floats,
@@ -119,6 +132,9 @@ uint64_t mimo26_gpu_worker_attention_scratch_floats(
  * requested config, or /health can advertise a mode that is not executing.
  */
 bool mimo26_gpu_worker_expert_major(const mimo26_gpu_worker *worker);
+/* The mode actually in force after MIMO26_EXPERT_WEIGHT_REUSE is resolved, so
+ * /health reports what runs rather than what was asked for. */
+bool mimo26_gpu_worker_expert_weight_reuse(const mimo26_gpu_worker *worker);
 
 /*
  * Fold the MIMO26_EXPERT_MAJOR override into a config, strictly. Call before

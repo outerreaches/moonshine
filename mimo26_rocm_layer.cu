@@ -375,15 +375,23 @@ static mimo26_rocm_layer_status run_mlp_moe_expert_major(
             expert.gate_packed == NULL || expert.down_scales == NULL) {
             return MIMO26_ROCM_LAYER_EXPERT_UNAVAILABLE;
         }
+        /*
+         * gemv_rows amortizes launches but re-reads the expert's weights once
+         * per vector block; the tiled form reuses them across a 16-vector tile.
+         * Selected by the profile, resolved in the worker -- never read from the
+         * environment here, for the reason above.
+         */
+        const auto project = layer->expert_weight_reuse ? k3_rocm_mxfp4_gemm_bf16
+                                                        : k3_rocm_mxfp4_gemv_rows_bf16;
         if (!k3_rocm_gather_rows_bf16(scratch->expert_gathered, scratch->normed,
                                       device_gather + offset[e], members,
                                       MIMO26_ROCM_HIDDEN, stream) ||
-            !k3_rocm_mxfp4_gemv_rows_bf16(scratch->mlp_gate, expert.gate_packed,
+            !project(scratch->mlp_gate, expert.gate_packed,
                                      expert.gate_scales,
                                      scratch->expert_gathered, members,
                                      EXPERT_INTERMEDIATE, MIMO26_ROCM_HIDDEN,
                                      stream) ||
-            !k3_rocm_mxfp4_gemv_rows_bf16(scratch->mlp_up, expert.up_packed,
+            !project(scratch->mlp_up, expert.up_packed,
                                      expert.up_scales,
                                      scratch->expert_gathered, members,
                                      EXPERT_INTERMEDIATE, MIMO26_ROCM_HIDDEN,
@@ -391,7 +399,7 @@ static mimo26_rocm_layer_status run_mlp_moe_expert_major(
             !mimo26_rocm_silu_product_bf16(
                 scratch->mlp_active, scratch->mlp_gate, scratch->mlp_up,
                 (uint64_t)members * EXPERT_INTERMEDIATE, stream) ||
-            !k3_rocm_mxfp4_gemv_rows_bf16(scratch->expert_out, expert.down_packed,
+            !project(scratch->expert_out, expert.down_packed,
                                      expert.down_scales, scratch->mlp_active,
                                      members, MIMO26_ROCM_HIDDEN,
                                      EXPERT_INTERMEDIATE, stream) ||

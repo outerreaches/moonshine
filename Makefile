@@ -1149,6 +1149,10 @@ MIMO26_EM_GATE_OBJS = mimo26_gpu_worker.o mimo26_tokenizer.o \
 	k3_json.o k3_io_uring.o k3_expert_cache.o
 tests/mimo26_expert_major_gate.o: tests/mimo26_expert_major_gate.cu mimo26_gpu_worker.h mimo26_tokenizer.h
 	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/test_mimo26_worker_overrides.o: tests/test_mimo26_worker_overrides.cu mimo26_gpu_worker.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/test_mimo26_worker_overrides: tests/test_mimo26_worker_overrides.o $(MIMO26_EM_GATE_OBJS)
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS) $(ICU_LDLIBS)
 tests/mimo26_expert_major_projection_guard.o: tests/mimo26_expert_major_projection_guard.cu mimo26_rocm_layer.h k3_rocm_ops.h
 	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
 tests/mimo26_expert_major_gate: tests/mimo26_expert_major_gate.o $(MIMO26_EM_GATE_OBJS)

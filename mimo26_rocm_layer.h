@@ -184,6 +184,24 @@ typedef struct {
      * overrides it for A/B work.
      */
     bool expert_major;
+    /*
+     * Run the expert projections through the weight-reuse tiled GEMM
+     * (k3_rocm_mxfp4_gemm_bf16) instead of k3_rocm_mxfp4_gemv_rows_bf16, which
+     * re-reads the expert's weights once per vector block.
+     *
+     * NOT bit-exact to gemv_rows: they differ on ~1 in 30,000 outputs of a real
+     * down projection. A float64 oracle says the tile is the one that is RIGHT
+     * where they differ -- 94 disagreements over 3.08M outputs at 17 widths,
+     * all 94 nearer the true value, none against -- and it is ~2.1x faster at
+     * production group sizes, 2.8x at width 128. See
+     * [[MiMo MXFP4 Kernel Oracle 2026-09-26]].
+     *
+     * Off by default all the same, because turning it on re-bases every
+     * full-vector equality fixture in the lane. Set by the worker from its
+     * config so the mode is visible on /health, never read from the
+     * environment here.
+     */
+    bool expert_weight_reuse;
 } mimo26_rocm_layer;
 
 /*

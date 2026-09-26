@@ -445,6 +445,11 @@ bool mimo26_gpu_worker_expert_major(const mimo26_gpu_worker *worker)
     return worker == NULL ? false : worker->config.expert_major;
 }
 
+bool mimo26_gpu_worker_expert_weight_reuse(const mimo26_gpu_worker *worker)
+{
+    return worker == NULL ? false : worker->config.expert_weight_reuse;
+}
+
 mimo26_gpu_worker_status mimo26_gpu_worker_resolve_overrides(
     mimo26_gpu_worker_config *config, char *error, size_t error_size)
 {
@@ -458,23 +463,40 @@ mimo26_gpu_worker_status mimo26_gpu_worker_resolve_overrides(
      * while /health went on reporting the configured mode.
      */
     const char *value = getenv("MIMO26_EXPERT_MAJOR");
-    if (value == NULL) {
-        return MIMO26_GPU_WORKER_OK;
+    if (value != NULL) {
+        const bool on = strcmp(value, "1") == 0 || strcmp(value, "on") == 0;
+        const bool off = strcmp(value, "0") == 0 || strcmp(value, "off") == 0;
+        if (!on && !off) {
+            return fail(error, error_size, MIMO26_GPU_WORKER_INVALID_ARGUMENT,
+                        "MIMO26_EXPERT_MAJOR must be 0, 1, on or off; got \"%s\". "
+                        "Refusing rather than guessing a mode.", value);
+        }
+        if (on && !config->expert_lookahead) {
+            return fail(error, error_size, MIMO26_GPU_WORKER_INVALID_ARGUMENT,
+                        "MIMO26_EXPERT_MAJOR=%s needs expert lookahead on; grouped "
+                        "prefill without the remaining-group schedule is slower",
+                        value);
+        }
+        config->expert_major = on;
     }
-    const bool on = strcmp(value, "1") == 0 || strcmp(value, "on") == 0;
-    const bool off = strcmp(value, "0") == 0 || strcmp(value, "off") == 0;
-    if (!on && !off) {
-        return fail(error, error_size, MIMO26_GPU_WORKER_INVALID_ARGUMENT,
-                    "MIMO26_EXPERT_MAJOR must be 0, 1, on or off; got \"%s\". "
-                    "Refusing rather than guessing a mode.", value);
+    /*
+     * Second override, same strictness, selecting the expert projection kernel.
+     * It exists so the weight-reuse tile can be measured against the shipping
+     * GEMV in ONE binary: an A/B across two builds would charge this box's
+     * 13-21% warm-up and ~2.6% drift to the kernel.
+     * See [[perf-screens-need-interleaved-baselines]].
+     */
+    const char *reuse = getenv("MIMO26_EXPERT_WEIGHT_REUSE");
+    if (reuse != NULL) {
+        const bool on = strcmp(reuse, "1") == 0 || strcmp(reuse, "on") == 0;
+        const bool off = strcmp(reuse, "0") == 0 || strcmp(reuse, "off") == 0;
+        if (!on && !off) {
+            return fail(error, error_size, MIMO26_GPU_WORKER_INVALID_ARGUMENT,
+                        "MIMO26_EXPERT_WEIGHT_REUSE must be 0, 1, on or off; got "
+                        "\"%s\". Refusing rather than guessing a mode.", reuse);
+        }
+        config->expert_weight_reuse = on;
     }
-    if (on && !config->expert_lookahead) {
-        return fail(error, error_size, MIMO26_GPU_WORKER_INVALID_ARGUMENT,
-                    "MIMO26_EXPERT_MAJOR=%s needs expert lookahead on; grouped "
-                    "prefill without the remaining-group schedule is slower",
-                    value);
-    }
-    config->expert_major = on;
     return MIMO26_GPU_WORKER_OK;
 }
 
@@ -1671,6 +1693,7 @@ mimo26_gpu_worker_status mimo26_gpu_worker_prefill(
             context.prepare_group_future = w->is_moe && worker->config.expert_lookahead
                                          ? prepare_group_future : NULL;
             context.expert_major = worker->config.expert_major;
+            context.expert_weight_reuse = worker->config.expert_weight_reuse;
 
             const mimo26_rocm_layer_status status = mimo26_rocm_layer_prefill(
                 &context, &worker->scratch, worker->hidden,

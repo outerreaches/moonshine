@@ -7,6 +7,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <climits>
+#include <cerrno>
+#include <sys/stat.h>
 #include <string>
 #include <vector>
 
@@ -68,6 +71,60 @@ static bool dump_device(const char *prefix, const char *suffix,
     return std::fclose(file) == 0 && ok;
 }
 
+static unsigned env_unsigned(const char *name, unsigned fallback)
+{
+    const char *value = std::getenv(name);
+    if (value == NULL || *value == '\0') return fallback;
+    char *end = NULL;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    return (end != NULL && *end == '\0' && parsed > 0ul) ? (unsigned)parsed : fallback;
+}
+
+/*
+ * Capture real projections for the float64 oracle
+ * (Scripts/mimo26-qualification/mxfp4_oracle.py).
+ *
+ * The mismatch dump above cannot do this job: it fires only where the kernels
+ * already disagree and then aborts the prefill, so it yields exactly one
+ * projection of one shape. The oracle needs the shapes where they AGREE too --
+ * agreement on real data is evidence, and the gate/up shape (2048x4096) had
+ * none at all. So this dumps inputs unconditionally on a stride, and capture
+ * mode makes a mismatch non-fatal so the run walks the whole model.
+ *
+ * Only the inputs are written. tests/mimo26_mxfp4_oracle_sweep runs every
+ * kernel over them offline and names each output after the kernel that
+ * produced it, which is what keeps the labels trustworthy -- see
+ * [[capture-filenames-do-not-name-implementations]].
+ */
+static unsigned capture_seen, capture_written;
+
+static bool capturing(void) { return std::getenv("MIMO26_PROJECTION_CAPTURE") != NULL; }
+
+static void maybe_capture(const void *packed, const void *scales, const void *input,
+                          uint32_t vectors, uint32_t rows, uint32_t columns)
+{
+    const char *root = std::getenv("MIMO26_PROJECTION_CAPTURE");
+    if (root == NULL) return;
+    if (capture_written >= env_unsigned("MIMO26_PROJECTION_CAPTURE_MAX", 12u)) return;
+    /* A prime stride spreads captures over layers, experts and both shapes
+     * instead of taking the first N, which would all be layer 0. */
+    if (capture_seen++ % env_unsigned("MIMO26_PROJECTION_CAPTURE_STRIDE", 97u) != 0u) return;
+
+    char directory[PATH_MAX];
+    std::snprintf(directory, sizeof directory, "%s/l%u-n%u-%ux%ux%u", root,
+                  current_layer, capture_seen, vectors, rows, columns);
+    if (mkdir(directory, 0755) != 0 && errno != EEXIST) return;
+
+    const std::string prefix = std::string(directory) + "/projection";
+    bool ok = dump_device(prefix.c_str(), "-packed.bin", packed, (size_t)rows * columns / 2);
+    ok = dump_device(prefix.c_str(), "-scales.bin", scales, (size_t)rows * columns / 32) && ok;
+    ok = dump_device(prefix.c_str(), "-input.bin", input, (size_t)vectors * columns * 2) && ok;
+    capture_written += ok ? 1u : 0u;
+    std::fprintf(stderr, "projection_capture layer=%u seen=%u written=%u saved=%d "
+                 "vectors=%u rows=%u columns=%u dir=%s\n", current_layer, capture_seen,
+                 capture_written, (int)ok, vectors, rows, columns, directory);
+}
+
 static bool check_projection(
     void *output, const void *packed, const void *scales, const void *input,
     uint32_t vectors, uint32_t rows, uint32_t columns, void *stream, bool exact_rows)
@@ -79,6 +136,7 @@ static bool check_projection(
         return false;
     if (vectors == 1) return true;
     projection++;
+    maybe_capture(packed, scales, input, vectors, rows, columns);
     size_t bytes = (size_t)vectors * rows * sizeof(uint16_t);
     uint16_t *reference = nullptr;
     if (hipMalloc(&reference, bytes) != hipSuccess) return false;
@@ -115,7 +173,10 @@ static bool check_projection(
             saved = dump_device(prefix, "-loop.bin", reference, bytes) && saved;
             std::fprintf(stderr, "projection_dump saved=%d prefix=%s\n", saved, prefix);
         }
-        ok = false;
+        /* In capture mode a mismatch is the expected finding, not a reason to
+         * stop: aborting here is what limited the 2026-09-24 evidence to one
+         * projection of one shape. The oracle decides who is right afterwards. */
+        ok = capturing();
     }
     hipFree(reference);
     return ok;

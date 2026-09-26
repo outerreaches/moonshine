@@ -508,6 +508,7 @@ typedef struct {
     uint16_t           expert_slots_per_layer;
     bool               expert_lookahead;
     bool               expert_major;
+    bool               expert_weight_reuse;
     bool               retain_experts;
     double             request_deadline_seconds;
     /*
@@ -948,7 +949,7 @@ static int render_health(server_runtime *runtime, char *body, size_t limit)
         "\"version\":\"" MOONSHINE_VERSION "\",\"auth\":\"%s\","
         "\"pid\":%d,\"stock_profile\":%s,"
         "\"phase\":\"%s\",\"context\":%zu,\"prefill_chunk\":%u,\"expert_lookahead\":%s,"
-        "\"expert_major\":%s,\"expert_slots\":%u,"
+        "\"expert_major\":%s,\"expert_weight_reuse\":%s,\"expert_slots\":%u,"
         "\"kv_prefix_reuse\":%s,\"prefix_hits\":%llu,"
         "\"prefix_misses\":%llu,\"prefix_tokens_saved\":%llu,"
         "\"prefix_disk_hits\":%llu,\"prefix_disk_publishes\":%llu,"
@@ -985,6 +986,7 @@ static int render_health(server_runtime *runtime, char *body, size_t limit)
         mimo26_slot_phase_name(slot->phase), runtime->context_capacity,
         (unsigned)runtime->prefill_chunk, runtime->expert_lookahead ? "true" : "false",
         runtime->expert_major ? "true" : "false",
+        runtime->expert_weight_reuse ? "true" : "false",
         (unsigned)runtime->expert_slots_per_layer,
         runtime->kv_prefix_reuse ? "true" : "false",
         (unsigned long long)runtime->prefix_hits,
@@ -2388,6 +2390,7 @@ int main(int argc, char **argv)
     runtime.prefill_chunk = config.prefill_chunk;
     runtime.expert_slots_per_layer = config.expert_slots_per_layer;
     runtime.expert_major = config.expert_major;
+    runtime.expert_weight_reuse = config.expert_weight_reuse;
     runtime.expert_lookahead = config.expert_lookahead;
     runtime.retain_experts = options.retain_experts;
     runtime.request_deadline_seconds = (double)options.request_deadline_seconds;
@@ -2494,6 +2497,12 @@ int main(int argc, char **argv)
                    effective ? "on" : "off");
         }
         runtime.expert_major = effective;
+        const bool reuse = mimo26_gpu_worker_expert_weight_reuse(runtime.worker);
+        if (reuse != runtime.expert_weight_reuse) {
+            printf("expert weight reuse overridden by environment: %s -> %s\n",
+                   runtime.expert_weight_reuse ? "on" : "off", reuse ? "on" : "off");
+        }
+        runtime.expert_weight_reuse = reuse;
     }
     /*
      * Opened after the worker, because the bundle's identity is this KV's
