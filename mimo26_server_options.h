@@ -96,6 +96,16 @@ typedef struct {
      * slot for hours; only the request deadline bounded it.
      */
     uint32_t max_output_tokens;
+    /*
+     * Path for a periodically rewritten status document, identical to
+     * /health. Exists because the obvious observer -- polling /health -- is
+     * unsafe against this engine: it serves one request at a time and stops
+     * calling accept() while it works, so a poller's completed handshake sits
+     * in the accept backlog and a five-second tick overflowed a 16-slot
+     * backlog during one long prefill, after which the kernel refused real
+     * clients. A file costs the reader nothing and the server one rename.
+     */
+    const char *status_file;
     const char *prefix_cache_dir;
     uint32_t prefix_cache_gib;
     uint32_t prefix_cache_entries;
@@ -132,6 +142,7 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
     parsed.kv_prefix_reuse = false;
     parsed.api_key = getenv("MIMO26_API_KEY");
     parsed.max_output_tokens = 8192u;
+    parsed.status_file = NULL;
     parsed.prefix_cache_dir = NULL;
     parsed.prefix_cache_gib = 16u;
     parsed.prefix_cache_entries = 32u;
@@ -155,6 +166,7 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
         else if (!strcmp(key,"--prefix-cache-entries")) bit=8192;
         else if (!strcmp(key,"--api-key")) bit=16384;
         else if (!strcmp(key,"--max-output-tokens")) bit=32768;
+        else if (!strcmp(key,"--status-file")) bit=65536;
         if (!bit || (seen & bit) || i + 1 >= argc) {
             snprintf(error,error_size,"unknown, duplicate or missing-value option: %s",key); return false;
         }
@@ -173,6 +185,13 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
                 return false;
             }
             parsed.prefix_cache_dir=value;
+        } else if (bit == 65536) {
+            if (value[0] != '/') {
+                snprintf(error,error_size,
+                         "--status-file requires an absolute path");
+                return false;
+            }
+            parsed.status_file=value;
         } else if (bit == 16384) {
             /* An empty key means no key, matching K3, rather than a
              * credential every caller can guess. */

@@ -25,6 +25,7 @@
 #include "moonshine_version.h"
 #include "k3_prefix_reuse.h"
 #include "k3_prefix_bundle.h"
+#include <fcntl.h>
 #include <limits.h>
 #include <sys/stat.h>
 #include "mimo26_server_slot.h"
@@ -58,6 +59,59 @@ static void on_signal(int signal_number)
 {
     (void)signal_number;
     g_shutdown = 1;
+}
+
+/* Wall clock, for a reader in another process; now_seconds() is monotonic
+ * and means nothing outside this one. */
+
+/*
+ * Structured log, in the shape k3_server.c emits and the dashboard already
+ * parses: "<ISO8601 with ms> <LEVEL> <event.name> key=value ...".
+ *
+ * Ported rather than invented. The dashboard renders a Moonshine card from
+ * exactly these records -- requests, in-flight state, engine facts -- without
+ * ever opening a connection, which matters because this engine stops calling
+ * accept() while it works and a poller's handshake sits in the backlog until
+ * the kernel refuses real clients. Matching K3's vocabulary means both
+ * engines feed one parser.
+ */
+static void server_log(const char *level, const char *event,
+                       const char *completion_id, const char *fmt, ...)
+{
+    struct timespec now;
+    struct tm utc;
+    char stamp[40];
+    clock_gettime(CLOCK_REALTIME, &now);
+    gmtime_r(&now.tv_sec, &utc);
+    if (strftime(stamp, sizeof stamp, "%Y-%m-%dT%H:%M:%S.000Z", &utc) == 0u) {
+        memcpy(stamp, "1970-01-01T00:00:00.000Z", 25u);
+    }
+    const unsigned ms = (unsigned)((now.tv_nsec / 1000000L) % 1000L);
+    stamp[20] = (char)('0' + ms / 100u);
+    stamp[21] = (char)('0' + (ms / 10u) % 10u);
+    stamp[22] = (char)('0' + ms % 10u);
+
+    char message[1024] = {0};
+    if (fmt != NULL && fmt[0] != '\0') {
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(message, sizeof message, fmt, ap);
+        va_end(ap);
+    }
+    if (completion_id != NULL && completion_id[0] != '\0') {
+        fprintf(stderr, "%s %s %s id=%s%s%s\n", stamp, level, event,
+                completion_id, message[0] ? " " : "", message);
+    } else {
+        fprintf(stderr, "%s %s %s%s%s\n", stamp, level, event,
+                message[0] ? " " : "", message);
+    }
+}
+
+static double wall_clock_epoch(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_REALTIME, &t);
+    return (double)t.tv_sec + (double)t.tv_nsec / 1e9;
 }
 
 static double now_seconds(void)
@@ -479,6 +533,35 @@ typedef struct {
      * answers the question itself.
      */
     bool               stock_profile;
+    /*
+     * Activity, for an observer that must not open a connection. This engine
+     * serves one request at a time and stops calling accept() while it works,
+     * so a poller's TCP handshake completes in the kernel and sits in the
+     * accept backlog; at a five-second tick that overflowed a 16-slot backlog
+     * during one long prefill and the kernel began refusing real clients.
+     * The dashboard therefore reads a file, and this is what fills it.
+     */
+    const char        *status_file;
+    bool               inflight;
+    double             inflight_since;
+    double             inflight_since_epoch;
+    size_t             inflight_prompt;
+    char               inflight_id[64];
+    /* Last completed request, and a small window for a rate that is not one
+     * sample. */
+    char               last_id[64];
+    size_t             last_prompt_tokens;
+    size_t             last_completion_tokens;
+    size_t             last_reused_tokens;
+    double             last_prefill_seconds;
+    double             last_decode_seconds;
+    double             last_total_seconds;
+    char               last_finish[24];
+    bool               last_from_disk;
+    double             window_prefill_tokens;
+    double             window_prefill_seconds;
+    double             window_decode_tokens;
+    double             window_decode_seconds;
     uint32_t          *resident_ids;
     size_t             resident_count;
     size_t             resident_capacity;
@@ -843,12 +926,16 @@ static bool attempt_recovery(server_runtime *runtime)
     return mimo26_slot_recover(&runtime->slot);
 }
 
-static void send_health(int fd, server_runtime *runtime)
+/*
+ * Rendered once and used twice: /health for anything that can safely poll,
+ * and the status file for the dashboard, which cannot. Two renderers would
+ * drift, and the file is the one nobody would notice going stale.
+ */
+static int render_health(server_runtime *runtime, char *body, size_t limit)
 {
     mimo26_gpu_worker_stats stats;
     mimo26_gpu_worker_get_stats(runtime->worker, &stats);
     const mimo26_slot *slot = &runtime->slot;
-    char body[1024];
     /*
      * `ready` is the liveness answer a load balancer needs: healthy AND able
      * to start work now. A quarantined or draining worker reports not ready
@@ -856,7 +943,7 @@ static void send_health(int fd, server_runtime *runtime)
      * makes the check useful.
      */
     const int size = snprintf(
-        body, sizeof body,
+        body, limit,
         "{\"status\":\"%s\",\"ready\":%s,\"model\":\"%s\","
         "\"version\":\"" MOONSHINE_VERSION "\",\"auth\":\"%s\","
         "\"pid\":%d,\"stock_profile\":%s,"
@@ -872,7 +959,25 @@ static void send_health(int fd, server_runtime *runtime)
         "\"expert_hit_rate\":%.4f,\"resident_gib\":%.2f,"
         "\"admitted\":%llu,\"rejected_busy\":%llu,"
         "\"rejected_quarantined\":%llu,\"cancelled\":%llu,"
-        "\"deadline_stops\":%llu,\"faults\":%llu,\"recoveries\":%llu}",
+        "\"deadline_stops\":%llu,\"faults\":%llu,\"recoveries\":%llu,"
+        /* Activity. inflight is the only field that answers "is it working
+         * right now"; everything else describes the last completed request. */
+        /* inflight_since_epoch, not an elapsed value: the document is only
+         * rewritten at request start and end, so a duration frozen at write
+         * time reads 0.0 for the whole request. The reader subtracts. */
+        "\"inflight\":%s,\"inflight_id\":\"%s\","
+        "\"inflight_since_epoch\":%.3f,\"inflight_prompt_tokens\":%zu,"
+        "\"now_epoch\":%.3f,"
+        "\"last_id\":\"%s\",\"last_prompt_tokens\":%zu,"
+        "\"last_completion_tokens\":%zu,\"last_reused_tokens\":%zu,"
+        "\"last_from_disk\":%s,\"last_finish\":\"%s\","
+        "\"last_prefill_seconds\":%.2f,\"last_decode_seconds\":%.2f,"
+        "\"last_total_seconds\":%.2f,"
+        "\"last_prefill_tps\":%.2f,\"last_decode_tps\":%.2f,"
+        /* Rolling, so a rate is not one sample. Prefill excludes tokens that
+         * were restored rather than evaluated, or reuse would read as an
+         * impossibly fast prefill instead of as avoided work. */
+        "\"prefill_tps\":%.2f,\"decode_tps\":%.2f}",
         slot->phase == MIMO26_SLOT_QUARANTINED ? "degraded" : "ok",
         mimo26_slot_ready(slot) ? "true" : "false", MODEL_ID,
         runtime->api_key_set ? "on" : "off",
@@ -907,9 +1012,75 @@ static void send_health(int fd, server_runtime *runtime)
         (unsigned long long)slot->cancelled,
         (unsigned long long)slot->deadline_stops,
         (unsigned long long)slot->faults,
-        (unsigned long long)slot->recoveries);
-    if (size > 0) {
+        (unsigned long long)slot->recoveries,
+        runtime->inflight ? "true" : "false",
+        runtime->inflight ? runtime->inflight_id : "",
+        runtime->inflight ? runtime->inflight_since_epoch : 0.0,
+        runtime->inflight ? runtime->inflight_prompt : (size_t)0,
+        wall_clock_epoch(),
+        runtime->last_id, runtime->last_prompt_tokens,
+        runtime->last_completion_tokens, runtime->last_reused_tokens,
+        runtime->last_from_disk ? "true" : "false", runtime->last_finish,
+        runtime->last_prefill_seconds, runtime->last_decode_seconds,
+        runtime->last_total_seconds,
+        runtime->last_prefill_seconds > 0.0
+            ? (double)(runtime->last_prompt_tokens - runtime->last_reused_tokens)
+                  / runtime->last_prefill_seconds : 0.0,
+        runtime->last_decode_seconds > 0.0
+            ? (double)runtime->last_completion_tokens
+                  / runtime->last_decode_seconds : 0.0,
+        runtime->window_prefill_seconds > 0.0
+            ? runtime->window_prefill_tokens / runtime->window_prefill_seconds
+            : 0.0,
+        runtime->window_decode_seconds > 0.0
+            ? runtime->window_decode_tokens / runtime->window_decode_seconds
+            : 0.0);
+    return size;
+}
+
+static void send_health(int fd, server_runtime *runtime)
+{
+    char body[2048];
+    const int size = render_health(runtime, body, sizeof body);
+    if (size > 0 && (size_t)size < sizeof body) {
         send_response(fd, 200, "OK", "application/json", body, (size_t)size);
+    } else {
+        send_error(fd, 500, "Internal Server Error", "health_unavailable",
+                   "could not render the health document");
+    }
+}
+
+/*
+ * Publish the same document to a file, atomically, for observers that must
+ * not connect. Written at request start and end, so "working now" is visible
+ * rather than inferred from a gap between samples. Failures are silent by
+ * design: losing a status write must never disturb serving.
+ */
+static void write_status_file(server_runtime *runtime)
+{
+    if (runtime->status_file == NULL) {
+        return;
+    }
+    char body[2048];
+    const int size = render_health(runtime, body, sizeof body);
+    if (size <= 0 || (size_t)size >= sizeof body) {
+        return;
+    }
+    char temporary[PATH_MAX];
+    if (snprintf(temporary, sizeof temporary, "%s.new",
+                 runtime->status_file) >= (int)sizeof temporary) {
+        return;
+    }
+    const int handle = open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+                            0644);
+    if (handle < 0) {
+        return;
+    }
+    const bool wrote = write(handle, body, (size_t)size) == (ssize_t)size &&
+                       write(handle, "\n", 1) == 1;
+    close(handle);
+    if (!wrote || rename(temporary, runtime->status_file) != 0) {
+        (void)remove(temporary);
     }
 }
 
@@ -1505,9 +1676,11 @@ static void handle_chat(server_runtime *runtime, int fd,
      */
     size_t reuse = plan_prefix_reuse(runtime, prompt.ids, prompt.count);
     resident_invalidate(runtime);
+    bool from_disk_reuse = false;
     if (reuse == 0) {
         /* Nothing resident extends this prompt; try the stored prefixes. */
         reuse = restore_prefix_from_disk(runtime, prompt.ids, prompt.count);
+        from_disk_reuse = reuse > 0;
     }
     if (reuse > 0) {
         runtime->prefix_hits++;
@@ -1523,6 +1696,23 @@ static void handle_chat(server_runtime *runtime, int fd,
             return;
         }
     }
+    runtime->inflight = true;
+    runtime->inflight_since = started;
+    runtime->inflight_since_epoch = wall_clock_epoch();
+    runtime->inflight_prompt = prompt.count;
+    snprintf(runtime->inflight_id, sizeof runtime->inflight_id,
+             "chatcmpl-mimo26-%llu",
+             (unsigned long long)runtime->slot.request_id);
+    server_log("INFO", "request.start", runtime->inflight_id,
+               "prompt=%zu tools=%d reasoning=%s", prompt.count,
+               request.tools_json != NULL ? 1 : 0,
+               request.enable_thinking ? "on" : "off");
+    server_log("INFO", "request.prefill.start", runtime->inflight_id,
+               "prompt=%zu evaluated=%zu reused=%zu reuse=%s", prompt.count,
+               prompt.count - reuse, reuse,
+               reuse == 0 ? "none" : (from_disk_reuse ? "disk" : "resident"));
+    write_status_file(runtime);
+
     response_state state;
     memset(&state, 0, sizeof state);
     state.fd = fd;
@@ -1557,6 +1747,11 @@ static void handle_chat(server_runtime *runtime, int fd,
      */
     bool failed = false;
     uint32_t next = 0;
+    /* Split on purpose: one number cannot distinguish a slow prompt from slow
+     * generation, and they have different causes and different fixes. */
+    double prefill_seconds = 0.0;
+    double decode_seconds = 0.0;
+    const double prefill_started = now_seconds();
     prefill_request_context progress_context = {runtime, fd, request_control(runtime, fd)};
     if (progress_context.stop != MIMO26_SLOT_CONTINUE) {
         /* No work or logits to consume when already stopped before prefill. */
@@ -1572,6 +1767,14 @@ static void handle_chat(server_runtime *runtime, int fd,
          * which is exactly the state a later turn can continue from. */
         publish_prefix_checkpoint(runtime, prompt.ids, prompt.count);
     }
+    prefill_seconds = now_seconds() - prefill_started;
+    server_log("INFO", "request.prefill.complete", runtime->inflight_id,
+               "evaluated=%zu reused=%zu seconds=%.3f rate=%.2f",
+               prompt.count - reuse, reuse, prefill_seconds,
+               prefill_seconds > 0.0
+                   ? (double)(prompt.count - reuse) / prefill_seconds : 0.0);
+    server_log("INFO", "request.decode.start", runtime->inflight_id, "");
+    const double decode_started = now_seconds();
     if (failed) {
         /* A decode failure means the worker's state is not trusted. */
         mimo26_slot_fault(&runtime->slot);
@@ -1870,6 +2073,51 @@ static void handle_chat(server_runtime *runtime, int fd,
             "%.2fs\n",
             state.id, prompt.count, produced_tokens, reasoning_used,
             finish_reason, now_seconds() - started);
+    decode_seconds = now_seconds() - decode_started;
+    {
+        const double total = now_seconds() - started;
+        snprintf(runtime->last_id, sizeof runtime->last_id, "%s", state.id);
+        snprintf(runtime->last_finish, sizeof runtime->last_finish, "%s",
+                 finish_reason);
+        runtime->last_prompt_tokens = prompt.count;
+        runtime->last_completion_tokens = produced_tokens;
+        runtime->last_reused_tokens = reuse;
+        runtime->last_from_disk = reuse > 0 && from_disk_reuse;
+        runtime->last_prefill_seconds = prefill_seconds;
+        runtime->last_decode_seconds = decode_seconds;
+        runtime->last_total_seconds = total;
+        /* Only tokens actually evaluated count toward a prefill rate; the
+         * reused ones were restored, and folding them in would report a rate
+         * the engine never achieved. */
+        if (prompt.count > reuse && prefill_seconds > 0.0) {
+            runtime->window_prefill_tokens += (double)(prompt.count - reuse);
+            runtime->window_prefill_seconds += prefill_seconds;
+        }
+        if (produced_tokens > 0 && decode_seconds > 0.0) {
+            runtime->window_decode_tokens += (double)produced_tokens;
+            runtime->window_decode_seconds += decode_seconds;
+        }
+        runtime->inflight = false;
+        mimo26_gpu_worker_stats final;
+        mimo26_gpu_worker_get_stats(runtime->worker, &final);
+        if (failed) {
+            server_log("ERROR", "request.failed", state.id,
+                       "prompt=%zu total=%.3f error=\"%s\"", prompt.count,
+                       total, error);
+        } else {
+            server_log("INFO", "request.complete", state.id,
+                       "prompt=%zu evaluated=%zu reused=%zu prefill=%.3f "
+                       "generated=%zu decode=%.3f rate=%.2f total=%.3f "
+                       "finish=%s cache=%llu/%llu",
+                       prompt.count, prompt.count - reuse, reuse,
+                       prefill_seconds, produced_tokens, decode_seconds,
+                       decode_seconds > 0.0
+                           ? (double)produced_tokens / decode_seconds : 0.0,
+                       total, finish_reason,
+                       (unsigned long long)final.expert_hits,
+                       (unsigned long long)final.expert_accesses);
+        }
+    }
     runtime->served++;
     if (!failed) {
         /* A request that completed cleanly proves the worker recovered, so
@@ -1898,6 +2146,7 @@ static void handle_chat(server_runtime *runtime, int fd,
     }
     free(trail.ids);
 
+    write_status_file(runtime);
     free(collected);
     free(reasoning);
     free(logits);
@@ -1971,6 +2220,7 @@ int main(int argc, char **argv)
     runtime.request_deadline_seconds = (double)options.request_deadline_seconds;
     runtime.kv_prefix_reuse = options.kv_prefix_reuse;
     runtime.min_headroom_gib = options.min_headroom_gib;
+    runtime.status_file = options.status_file;
     g_max_output_tokens = options.max_output_tokens;
     runtime.api_key_set = options.api_key != NULL;
     {
@@ -1998,6 +2248,10 @@ int main(int argc, char **argv)
         fprintf(stderr, "tokenizer: %s\n", error);
         return 1;
     }
+    server_log("INFO", "server.load.start", NULL,
+               "experts=%u context=%zu chunk=%u",
+               (unsigned)config.expert_slots_per_layer,
+               config.global_kv_capacity, (unsigned)config.prefill_chunk);
     printf("loading the worker (%u expert slots per layer, context %zu, "
            "prefill chunk %u, expert lookahead %s, expert-major %s, "
            "request deadline %us)\n",
@@ -2131,6 +2385,17 @@ int main(int argc, char **argv)
         return 1;
     }
     runtime.listener = listener;
+    write_status_file(&runtime);
+    server_log("INFO", "server.ready", NULL,
+               "version=\"%s\" experts=%u context=%zu max_output=%u "
+               "load=%.1f state=%.2f auth=%s reuse=%s",
+               MOONSHINE_VERSION, (unsigned)config.expert_slots_per_layer,
+               config.global_kv_capacity, options.max_output_tokens,
+               stats.load_seconds,
+               (double)mimo26_gpu_worker_resident_bytes(runtime.worker) /
+                   1073741824.0,
+               runtime.api_key_set ? "on" : "off",
+               runtime.kv_prefix_reuse ? "on" : "off");
     printf("listening on http://%s:%d  (model %s)\n", host, port, MODEL_ID);
 
     while (!g_shutdown) {
