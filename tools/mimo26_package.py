@@ -423,7 +423,14 @@ def rollback(a):
 def retire(a):
     """Sealing a release read-only also makes its directory unremovable, which
     is the point -- but it means retiring one needs a deliberate step rather
-    than rm -rf. Refuses to remove whatever is live or is the only way back."""
+    than rm -rf. Refuses to remove whatever is live or is the only way back.
+
+    Note what this does NOT protect: `previous` may point at a rebuild of the
+    same commit as `current`, in which case rolling back changes nothing and
+    retiring everything else leaves no real way out. Retiring in bulk once
+    left exactly that state. Check `list` for the commit column before
+    clearing house.
+    """
     root = Path(a.root).resolve()
     release = Path(a.release).resolve()
     for link in ("current", "previous"):
@@ -460,8 +467,9 @@ def list_releases(a):
                  "previous" if item.name == prev else "        "
         if ok:
             q = manifest.get("qualification")
-            detail = (f"{q['checks_passed']}/{q['checks_total']} {q['label']}"
-                      if q else "unqualified")
+            detail = (f"{manifest['git']['short']}  "
+                      + (f"{q['checks_passed']}/{q['checks_total']} {q['label']}"
+                         if q else "unqualified"))
             if manifest["git"]["dirty"]:
                 detail += " DIRTY"
         else:
