@@ -1364,7 +1364,22 @@ static bool parse_chat(const char *body, size_t body_size,
         }
         const int32_t role = k3_json_object_get(&document, m, "role");
         const int32_t content = k3_json_object_get(&document, m, "content");
-        if (role < 0 || content < 0) {
+        /*
+         * An assistant turn that only made tool calls has no text, and the
+         * OpenAI shape for it is content null or content absent. Both were
+         * refused, so a caller could get tool calls out of this server and
+         * then be unable to send the results back -- the whole point of
+         * making them. Accepted as empty, and only when tool_calls is present:
+         * a user message with no content is a client bug worth surfacing
+         * rather than silently treating as blank.
+         */
+        const int32_t message_calls = k3_json_object_get(&document, m,
+                                                         "tool_calls");
+        const bool content_is_null =
+            content >= 0 && document.tokens[content].type == K3_JSON_NULL;
+        const bool calls_without_text =
+            message_calls >= 0 && (content < 0 || content_is_null);
+        if (role < 0 || (content < 0 && !calls_without_text)) {
             REFUSE("invalid_request", "each message needs a role and content");
         }
         if (!k3_json_string_equal(&document, role, "system") &&
@@ -1382,7 +1397,12 @@ static bool parse_chat(const char *body, size_t body_size,
         take(request, role_text);
 
         char *content_text = NULL;
-        if (document.tokens[content].type == K3_JSON_ARRAY) {
+        if (calls_without_text) {
+            content_text = strdup("");
+            if (content_text == NULL) {
+                REFUSE("invalid_request", "content is too large");
+            }
+        } else if (document.tokens[content].type == K3_JSON_ARRAY) {
             /* Content parts: text is concatenated, anything else refused.
              * A dropped image part would silently change the question. */
             size_t used = 0, capacity = 1024u;
