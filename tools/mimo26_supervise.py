@@ -208,6 +208,12 @@ def parse_args(argv=None):
     p.add_argument('--prefix-cache-entries', type=int, default=8)
     p.add_argument('--request-deadline-seconds', type=int, default=600)
     p.add_argument('--min-headroom-gib', type=int, default=8)
+    # Forwarded but not pinned: the path is not on /health, so there is
+    # nothing to verify it against. Everything in expected_profile must be
+    # observable, or the check fails closed on a value nobody publishes.
+    p.add_argument('--status-file', type=Path, default=None,
+                   help='engine-written status document for observers that '
+                        'must not open a connection')
     p.add_argument('--shutdown-timeout', type=float, default=30,
                    help='seconds to wait for an owned child to reach a safe boundary; no force kill')
     a = p.parse_args(argv)
@@ -251,6 +257,8 @@ def server_command(a):
     command += ['--request-deadline-seconds', str(a.request_deadline_seconds)]
     command += ['--min-headroom-gib', str(a.min_headroom_gib)]
     command += ['--kv-prefix-reuse', a.kv_prefix_reuse]
+    if a.status_file is not None:
+        command += ['--status-file', str(a.status_file.resolve())]
     if a.prefix_cache_dir is not None:
         command += ['--prefix-cache-dir', str(a.prefix_cache_dir.resolve()),
                     '--prefix-cache-gib', str(a.prefix_cache_gib),
