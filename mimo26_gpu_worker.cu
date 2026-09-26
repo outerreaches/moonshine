@@ -321,6 +321,18 @@ void mimo26_gpu_worker_config_defaults(mimo26_gpu_worker_config *config)
     config->expert_lookahead = true;
     config->expert_major = true;
     /*
+     * Assigned, not left to the caller's zeroing. Omitting it made
+     * "default-off" a property of how the caller happened to allocate the
+     * struct rather than of this function: the server survived only because it
+     * uses `mimo26_server_options options{}`, while a caller reusing a config
+     * or declaring it uninitialized inherited whatever was already there. A
+     * default that depends on the caller is not a default.
+     *
+     * Off because the tile is an unqualified behavioural change, not because it
+     * is less accurate -- see [[MiMo MXFP4 Kernel Oracle 2026-09-26]].
+     */
+    config->expert_weight_reuse = false;
+    /*
      * 256 MiB. Full-width sizing would want 8 GiB at the 262144 context above,
      * which is what made that context fail to allocate.
      *

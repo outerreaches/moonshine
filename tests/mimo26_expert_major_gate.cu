@@ -157,7 +157,11 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    mimo26_gpu_worker_config config;
+    /* Zero-initialized on purpose. config_defaults assigns every field it owns,
+     * but it did not always -- expert_weight_reuse was missing until
+     * 2026-09-26, so this declaration handed the worker whatever was on the
+     * stack unless an override happened to be set. */
+    mimo26_gpu_worker_config config{};
     mimo26_gpu_worker_config_defaults(&config);
     config.expert_slots_per_layer = (uint16_t)slots;
     config.prefill_chunk = (uint16_t)chunk;
@@ -170,6 +174,18 @@ int main(int argc, char **argv)
         std::fprintf(stderr, "worker: %s\n", error);
         return 1;
     }
+    /*
+     * The mode that actually ran, read back off the worker rather than echoed
+     * from the request. A comparison whose arms are not stated cannot be
+     * checked afterwards, and the runner asserts against this line.
+     */
+    std::printf("{\"phase\":\"profile\",\"expert_major\":%s,\"expert_lookahead\":%s,"
+                "\"expert_weight_reuse\":%s,\"slots\":%u,\"chunk\":%u,\"context\":%u}\n",
+                mimo26_gpu_worker_expert_major(worker) ? "true" : "false",
+                lookahead ? "true" : "false",
+                mimo26_gpu_worker_expert_weight_reuse(worker) ? "true" : "false",
+                slots, chunk, context);
+    std::fflush(stdout);
     std::vector<float> logits(152576);
     unsigned repeat = 0;
     auto dump = [&](const std::string &name) -> bool {

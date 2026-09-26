@@ -129,10 +129,44 @@ int main(void)
         unsetenv("MIMO26_EXPERT_WEIGHT_REUSE");
     }
 
-    /* The default profile must not enable either by accident. */
+    /*
+     * The defaults function must ASSIGN every field it claims to default, not
+     * inherit it.
+     *
+     * The first version of this check declared the config uninitialized and
+     * asserted the flag was false. It passed, because that stack slot happened
+     * to be zero -- while mimo26_gpu_worker_config_defaults never assigned the
+     * field at all. "Default-off" was a property of the caller's allocation.
+     * So start from deliberately nonzero memory: anything the function forgets
+     * to write stays 0xFF and fails here.
+     */
     {
         mimo26_gpu_worker_config config;
+        memset(&config, 0xFF, sizeof config);
+        config.expert_weight_reuse = true;
+        config.expert_major = true;
+        config.expert_lookahead = true;
         mimo26_gpu_worker_config_defaults(&config);
+        assert(!config.expert_weight_reuse);   /* the field that was missing */
+        assert(config.expert_major);
+        assert(config.expert_lookahead);
+        assert(config.global_kv_capacity == 131072u);
+        assert(config.expert_slots_per_layer == 160u);
+        assert(config.prefill_chunk == 128u);
+        assert(config.memory_limit_bytes == 0u);
+        assert(config.attention_scratch_bytes == 256ull * 1024ull * 1024ull);
+        ++checks;
+    }
+    /* And the resolved-override path must agree with it from that same
+     * nonzero start, with no environment set. */
+    {
+        mimo26_gpu_worker_config config;
+        char error[256] = {0};
+        memset(&config, 0xFF, sizeof config);
+        config.expert_weight_reuse = true;
+        mimo26_gpu_worker_config_defaults(&config);
+        assert(mimo26_gpu_worker_resolve_overrides(&config, error, sizeof error) ==
+               MIMO26_GPU_WORKER_OK);
         assert(!config.expert_weight_reuse);
         ++checks;
     }

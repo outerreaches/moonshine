@@ -37,6 +37,10 @@ def main():
     p.add_argument('--compare', type=Path)
     p.add_argument('--layer-trace', action='store_true')
     p.add_argument('--lookahead', choices=('on', 'off'), default='off')
+    p.add_argument('--weight-reuse', choices=('on', 'off'), default='off',
+                   help='expert projection kernel: off is the shipping GEMV, '
+                        'on is the tiled weight-reuse GEMM. Always passed to the '
+                        'child explicitly so neither arm inherits a default.')
     a = p.parse_args()
     assert 1 <= a.chunk <= 256 and a.tokens + a.decodes <= a.context <= 4096
     assert 0 <= a.decodes <= 32 and 0 < a.tokens and 0 < a.timeout <= 3600
@@ -52,16 +56,34 @@ def main():
         cmd.append('on')
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(('MIMO26_', 'K3_'))}
-    if a.mode == 'grouped':
-        env['MIMO26_EXPERT_MAJOR'] = '1'
+    #
+    # BOTH arms state their mode explicitly.
+    #
+    # This used to set MIMO26_EXPERT_MAJOR only for 'grouped' and leave 'base'
+    # to inherit the binary's default -- which is expert_major=true. So with
+    # lookahead on, the base arm GROUPED TOO and the comparison was
+    # grouped-vs-grouped while reporting base-vs-grouped. The environment
+    # cleanup above also strips MIMO26_EXPERT_WEIGHT_REUSE without replacing
+    # it, so the projection kernel was equally unstated.
+    #
+    # An arm that does not name its mode is not a control.
+    #
+    env['MIMO26_EXPERT_MAJOR'] = '1' if a.mode == 'grouped' else '0'
+    env['MIMO26_EXPERT_WEIGHT_REUSE'] = a.weight_reuse
+    # The worker refuses grouping without lookahead, so catch the contradiction
+    # here rather than as an opaque startup failure.
+    assert not (a.mode == 'grouped' and a.lookahead == 'off'), \
+        'grouped prefill requires --lookahead on; the worker refuses the pair'
     env['MIMO26_PROJECTION_DUMP'] = str(out / 'projection')
     if a.layer_trace:
         assert a.repeats == 1, 'layer trace filenames require one request'
         env['MIMO26_LAYER_TRACE'] = str(out / 'layer')
     report = dict(complete=False, passed=False, command=cmd, mode=a.mode,
+                  lookahead=a.lookahead, weight_reuse=a.weight_reuse,
                   binary_sha256=sha(binary), runner_sha256=sha(out / 'runner.py'),
                   environment={key: env.get(key) for key in
-                      ('MIMO26_EXPERT_MAJOR', 'MIMO26_GPU_PROFILE',
+                      ('MIMO26_EXPERT_MAJOR', 'MIMO26_EXPERT_WEIGHT_REUSE',
+                       'MIMO26_GPU_PROFILE',
                        'HIP_VISIBLE_DEVICES', 'ROCR_VISIBLE_DEVICES',
                        'HSA_OVERRIDE_GFX_VERSION')}, memory=[], errors=[])
     def save():
@@ -106,6 +128,24 @@ def main():
                             if x.startswith('{')]
         prefills = [x for x in report['phases'] if x.get('phase') == 'prefill']
         assert len(prefills) == a.repeats and all(x['tokens'] == a.tokens for x in prefills), 'prompt length mismatch'
+        #
+        # The arm must prove it ran what was asked. The gate reads these back
+        # off the worker after override resolution, so this catches a mode that
+        # was requested but silently not applied -- which is how a base arm once
+        # grouped anyway and the comparison compared nothing.
+        #
+        profiles = [x for x in report['phases'] if x.get('phase') == 'profile']
+        assert len(profiles) == 1, f'expected one profile line, got {len(profiles)}'
+        report['effective'] = effective = profiles[0]
+        assert effective['expert_major'] == (a.mode == 'grouped'), \
+            f"arm asked for {a.mode} but ran expert_major={effective['expert_major']}"
+        assert effective['expert_weight_reuse'] == (a.weight_reuse == 'on'), \
+            (f"arm asked for weight reuse {a.weight_reuse} but ran "
+             f"expert_weight_reuse={effective['expert_weight_reuse']}")
+        assert effective['expert_lookahead'] == (a.lookahead == 'on'), \
+            f"arm asked for lookahead {a.lookahead} but ran {effective['expert_lookahead']}"
+        assert (effective['slots'], effective['chunk'], effective['context']) == \
+            (a.slots, a.chunk, a.context), 'resolved profile does not match the request'
         if a.layer_trace:
             report['layers'] = {x.name: sha(x) for x in out.glob('layer-*.bin')}
             assert len(report['layers']) == 48 * 3 * ((a.tokens + a.chunk - 1) // a.chunk)

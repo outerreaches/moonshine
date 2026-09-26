@@ -2509,12 +2509,43 @@ int main(int argc, char **argv)
      * geometry -- layer count, per-layer heads, window and capacity. Gating on
      * it means a checkpoint written under a different profile is never even
      * offered, before the file's own identity check gets a chance to refuse it.
+     *
+     * Geometry alone is NOT a semantic identity, which the 2026-09-26 review
+     * caught. Two workers can agree on every dimension and still write
+     * different KV for the same tokens if they compute it differently -- the
+     * tiled expert kernel does exactly that. Under a geometry-only identity a
+     * checkpoint written by the GEMV would be offered to tiled execution and
+     * silently restored, corrupting both serving and any A/B comparison.
+     *
+     * So mix the arithmetic into the identity the bundle gates on: an
+     * implementation version that is bumped by hand whenever the numerics
+     * change, plus the effective kernel mode. Different arithmetic then refuses
+     * the store instead of reading it.
+     *
+     * STILL OPEN: model identity. Nothing here distinguishes two different
+     * checkpoints of compatibly-shaped weights, so a cache directory must not
+     * be shared between models. Tracked in the review note.
      */
     if (options.prefix_cache_dir != NULL) {
         (void)mkdir(options.prefix_cache_dir, 0700);
+        /* Bump when the KV-producing arithmetic changes in any way. */
+        enum { MIMO26_KV_NUMERICS_VERSION = 1u };
+        uint64_t identity_crc = mimo26_gpu_worker_layout_crc64(runtime.worker);
+        const uint64_t numerics[] = {
+            (uint64_t)MIMO26_KV_NUMERICS_VERSION,
+            runtime.expert_weight_reuse ? 1u : 0u,
+        };
+        for (size_t i = 0; i < sizeof numerics / sizeof *numerics; i++) {
+            /* splitmix64 finalizer, mixed in sequentially: cheap, no new
+             * dependency, and avalanches so a one-bit mode change relocates
+             * the whole identity. */
+            uint64_t x = identity_crc ^ (numerics[i] + 0x9E3779B97F4A7C15ull);
+            x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+            x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+            identity_crc = x ^ (x >> 31);
+        }
         const k3_prefix_bundle_identity identity = {
-            1u, (uint32_t)config.global_kv_capacity,
-            mimo26_gpu_worker_layout_crc64(runtime.worker), false};
+            1u, (uint32_t)config.global_kv_capacity, identity_crc, false};
         char bundle_error[512];
         if (!k3_prefix_bundle_open(&runtime.prefix_bundle,
                                    options.prefix_cache_dir, &identity,
@@ -2526,17 +2557,23 @@ int main(int argc, char **argv)
              * The commonest cause is a context change: the bundle's identity
              * includes the capacity its checkpoints were written at, so
              * every stored prefix becomes unreadable and the store refuses
-             * itself. Refusing is right -- the alternative is silently
-             * discarding a cache someone may want -- but the operator needs
-             * to be told which lever to pull.
+             * itself. Since 2026-09-26 the expert kernel mode is in the
+             * identity too, so toggling --expert-weight-reuse invalidates a
+             * store for the same reason and by design. Refusing is right --
+             * the alternative is silently restoring KV computed by different
+             * arithmetic -- but the operator needs to be told which lever to
+             * pull.
              */
             fprintf(stderr, "prefix cache: %s\n", bundle_error);
             fprintf(stderr,
                     "prefix cache: this store was written for a different "
-                    "profile than %zu context. Point --prefix-cache-dir at a "
-                    "new directory, or remove %s to discard the stored "
-                    "prefixes and start fresh.\n",
-                    config.global_kv_capacity, options.prefix_cache_dir);
+                    "profile than %zu context with expert weight reuse %s. "
+                    "Point --prefix-cache-dir at a new directory (each "
+                    "arithmetic mode needs its own), or remove %s to discard "
+                    "the stored prefixes and start fresh.\n",
+                    config.global_kv_capacity,
+                    runtime.expert_weight_reuse ? "on" : "off",
+                    options.prefix_cache_dir);
             return 1;
         }
         runtime.prefix_entries = k3_prefix_bundle_count(runtime.prefix_bundle);
