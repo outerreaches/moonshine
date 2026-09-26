@@ -1582,19 +1582,48 @@ typedef struct {
     server_runtime *runtime;
     int client;
     mimo26_slot_step stop;
+    /*
+     * Present when the response is streaming, so prefill can keep the
+     * connection alive. A cold prefill emits no tokens for minutes, and a
+     * client that sees no bytes at all concludes the request is dead --
+     * undici, which is what this lane's harness uses, gives up after 300 s of
+     * silence. A 9,597-token prompt took 302 s and was cancelled one second
+     * after prefill finished, having done all the work.
+     */
+    response_state *stream;
+    double last_keepalive;
 } prefill_request_context;
 
 static bool prefill_progress(void *context, size_t done, size_t total)
 {
     prefill_request_context *request = (prefill_request_context *)context;
     server_runtime *runtime = request->runtime;
-    (void)done;
-    (void)total;
     if (request->stop == MIMO26_SLOT_CONTINUE) {
         request->stop = request_control(runtime, request->client);
         if (request->stop == MIMO26_SLOT_CONTINUE) {
             refuse_backlog(runtime);
             request->stop = request_control(runtime, request->client);
+        }
+    }
+    /*
+     * An SSE comment: ignored by every client, but it is bytes on the wire,
+     * which is what resets a transport idle timer. Throttled because the hook
+     * fires once per chunk and the point is liveness, not bandwidth.
+     */
+    if (request->stop == MIMO26_SLOT_CONTINUE && request->stream != NULL &&
+        request->stream->headers_sent) {
+        const double now = now_seconds();
+        if (now - request->last_keepalive >= 10.0) {
+            request->last_keepalive = now;
+            char note[96];
+            const int size = snprintf(note, sizeof note,
+                                      ": prefill %zu/%zu\n\n", done, total);
+            if (size > 0 && !send_all(request->stream->fd, note,
+                                      (size_t)size)) {
+                /* The client is gone; stop rather than finish work nobody
+                 * will read. */
+                request->stop = MIMO26_SLOT_STOP_CANCELLED;
+            }
         }
     }
     return request->stop == MIMO26_SLOT_CONTINUE;
@@ -1752,7 +1781,19 @@ static void handle_chat(server_runtime *runtime, int fd,
     double prefill_seconds = 0.0;
     double decode_seconds = 0.0;
     const double prefill_started = now_seconds();
-    prefill_request_context progress_context = {runtime, fd, request_control(runtime, fd)};
+    /*
+     * Open the stream BEFORE prefill, not after. Held until prefill finished,
+     * the whole prompt was evaluated behind a connection that had received no
+     * bytes at all, and a client with an ordinary idle timeout hung up just
+     * as the work completed. The cost is that a prefill failure can no longer
+     * carry an HTTP status, which the failure paths below now handle.
+     */
+    if (state.streaming && !stream_begin(&state)) {
+        mimo26_slot_cancel(&runtime->slot);
+    }
+    prefill_request_context progress_context = {
+        runtime, fd, request_control(runtime, fd),
+        state.streaming ? &state : NULL, now_seconds()};
     if (progress_context.stop != MIMO26_SLOT_CONTINUE) {
         /* No work or logits to consume when already stopped before prefill. */
     } else if (mimo26_gpu_worker_prefill(runtime->worker, prompt.ids + reuse,
@@ -1780,17 +1821,20 @@ static void handle_chat(server_runtime *runtime, int fd,
         mimo26_slot_fault(&runtime->slot);
         fprintf(stderr, "mimo26 request %s: prefill failed: %s\n",
                 state.id, error);
-        send_error(fd, 500, "Internal Server Error", "decode_failed",
-                   "the worker faulted during prefill and is quarantined");
+        if (state.headers_sent) {
+            /* The stream is already open, so the status line is spent. Close
+             * it the way a client can detect rather than pretending. */
+            stream_chunk(&state, NULL, 0, "error");
+            const char *done = "data: [DONE]\n\n";
+            send_all(fd, done, strlen(done));
+        } else {
+            send_error(fd, 500, "Internal Server Error", "decode_failed",
+                       "the worker faulted during prefill and is quarantined");
+        }
         free(logits);
         mimo26_token_buffer_free(&prompt);
         chat_request_free(&request);
         return;
-    }
-
-    if (state.streaming && !stream_begin(&state) && !g_shutdown &&
-        progress_context.stop == MIMO26_SLOT_CONTINUE) {
-        mimo26_slot_cancel(&runtime->slot);
     }
 
     mimo26_decode_stream decoder;
