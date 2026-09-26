@@ -1564,6 +1564,42 @@ static bool stream_chunk(response_state *state, const char *text,
     return size > 0 && send_all(state->fd, frame, (size_t)size);
 }
 
+/*
+ * One delta frame carrying the parsed tool calls.
+ *
+ * A streaming turn used to forward the model's own call syntax as content and
+ * never emit this, so a caller saw <function=...> as prose -- exactly what
+ * the parser exists to prevent. `calls_json` is the same array the
+ * non-streaming response builds, so both shapes agree.
+ */
+static bool stream_tool_calls(response_state *state, const char *calls_json)
+{
+    char *frame = NULL;
+    size_t used = 0, capacity = 0;
+    char error[256];
+    char head[512];
+    const int size = snprintf(head, sizeof head,
+                              "data: {\"id\":\"%s\",\"object\":"
+                              "\"chat.completion.chunk\",\"created\":%ld,"
+                              "\"model\":\"%s\",\"choices\":[{\"index\":0,"
+                              "\"delta\":{\"tool_calls\":",
+                              state->id, state->created, MODEL_ID);
+    if (size <= 0 || (size_t)size >= sizeof head) {
+        return false;
+    }
+    if (!append_json(&frame, &used, &capacity, head) ||
+        !append_json(&frame, &used, &capacity, calls_json) ||
+        !append_json(&frame, &used, &capacity,
+                     "},\"finish_reason\":null}]}\n\n")) {
+        free(frame);
+        return false;
+    }
+    (void)error;
+    const bool ok = send_all(state->fd, frame, used);
+    free(frame);
+    return ok;
+}
+
 /* Controls are checked only before work or at committed GPU boundaries.
  * Shutdown drains the slot; it is not a client cancellation. */
 static mimo26_slot_step request_control(server_runtime *runtime, int client)
@@ -1647,6 +1683,68 @@ static bool prefill_progress(void *context, size_t done, size_t total)
         }
     }
     return request->stop == MIMO26_SLOT_CONTINUE;
+}
+
+/*
+ * Take the tool calls out of a completed turn.
+ *
+ * Shared by both response shapes on purpose. This lived inline in the
+ * non-streaming branch, which is why the streaming branch had no tool calls
+ * at all and forwarded the model's own syntax as prose instead. One
+ * implementation means the two shapes cannot disagree about what a call is.
+ *
+ * On success *text becomes the visible remainder, *finish becomes
+ * "tool_calls" when any were found, and the returned string is the OpenAI
+ * array. Returns NULL when there are none. Caller frees.
+ */
+static char *take_tool_calls(const char *id, char **text, size_t *text_used,
+                             const char **finish, char *error,
+                             size_t error_size)
+{
+    if (*text == NULL) {
+        return NULL;
+    }
+    char *visible = NULL;
+    mimo26_parsed_tool_call *parsed = NULL;
+    size_t parsed_count = 0;
+    if (!mimo26_tokenizer_parse_tool_calls(*text, &visible, &parsed,
+                                           &parsed_count, error,
+                                           error_size)) {
+        return NULL;
+    }
+    free(*text);
+    *text = visible;
+    *text_used = strlen(visible);
+    if (parsed_count == 0) {
+        mimo26_tool_calls_free(parsed, parsed_count);
+        return NULL;
+    }
+    *finish = "tool_calls";
+    char *calls = NULL;
+    size_t used = 0, capacity = 0;
+    append_json(&calls, &used, &capacity, "[");
+    for (size_t i = 0; i < parsed_count; i++) {
+        char *escaped_name = NULL, *escaped_args = NULL;
+        size_t ignored = 0;
+        k3_json_escape(parsed[i].name, strlen(parsed[i].name), &escaped_name,
+                       &ignored, error, error_size);
+        k3_json_escape(parsed[i].arguments_json,
+                       strlen(parsed[i].arguments_json), &escaped_args,
+                       &ignored, error, error_size);
+        char entry[512];
+        snprintf(entry, sizeof entry,
+                 "%s{\"id\":\"call_%s_%zu\",\"type\":\"function\","
+                 "\"function\":{\"name\":%s,\"arguments\":%s}}",
+                 i ? "," : "", id, i,
+                 escaped_name != NULL ? escaped_name : "\"\"",
+                 escaped_args != NULL ? escaped_args : "\"{}\"");
+        append_json(&calls, &used, &capacity, entry);
+        free(escaped_name);
+        free(escaped_args);
+    }
+    append_json(&calls, &used, &capacity, "]");
+    mimo26_tool_calls_free(parsed, parsed_count);
+    return calls;
 }
 
 static void handle_chat(server_runtime *runtime, int fd,
@@ -1883,6 +1981,12 @@ static void handle_chat(server_runtime *runtime, int fd,
      * the words.
      */
     bool in_reasoning = false;
+    /*
+     * Text between the tool-call markers is the model's call syntax, not
+     * prose. It still has to be collected so it can be parsed at the end, but
+     * it must not be streamed as content.
+     */
+    bool in_tool_call = false;
     char *reasoning = NULL;
     size_t reasoning_used = 0, reasoning_capacity = 0;
     while (true) {
@@ -1921,6 +2025,7 @@ static void handle_chat(server_runtime *runtime, int fd,
          */
         if (next == MIMO26_TOK_TOOL_CALL_OPEN ||
             next == MIMO26_TOK_TOOL_CALL_CLOSE) {
+            in_tool_call = next == MIMO26_TOK_TOOL_CALL_OPEN;
             const char *marker = next == MIMO26_TOK_TOOL_CALL_OPEN
                                      ? "<tool_call>" : "</tool_call>";
             const size_t marker_length = strlen(marker);
@@ -1987,11 +2092,18 @@ static void handle_chat(server_runtime *runtime, int fd,
             reasoning_used += piece_size;
             reasoning[reasoning_used] = '\0';
         } else if (piece_size > 0) {
-            if (state.streaming) {
+            /*
+             * Collected whether or not the response streams. A streaming turn
+             * used to forward each piece and keep nothing, which left no text
+             * to parse tool calls out of -- so a streaming caller received the
+             * model's raw call syntax and no tool_calls at all.
+             */
+            if (state.streaming && !in_tool_call) {
                 if (!stream_chunk(&state, piece, piece_size, NULL)) {
                     mimo26_slot_cancel(&runtime->slot);
                 }
-            } else {
+            }
+            {
                 if (collected_used + piece_size + 1u > collected_capacity) {
                     collected_capacity =
                         (collected_used + piece_size + 1u) * 2u;
@@ -2033,6 +2145,21 @@ static void handle_chat(server_runtime *runtime, int fd,
          * or publish a partially collected tool call during shutdown. */
         mimo26_slot_finish(&runtime->slot);
     } else if (state.streaming) {
+        /*
+         * The call syntax was withheld from the content stream while it was
+         * being generated, so this is where it becomes tool_calls. Emitted
+         * before the terminal frame, which then carries finish_reason
+         * tool_calls rather than stop.
+         */
+        char *calls_text = take_tool_calls(state.id, &collected,
+                                           &collected_used, &finish_reason,
+                                           error, sizeof error);
+        if (calls_text != NULL) {
+            if (!stream_tool_calls(&state, calls_text)) {
+                mimo26_slot_cancel(&runtime->slot);
+            }
+            free(calls_text);
+        }
         stream_chunk(&state, NULL, 0, finish_reason);
         const char *done = "data: [DONE]\n\n";
         send_all(fd, done, strlen(done));
@@ -2045,20 +2172,9 @@ static void handle_chat(server_runtime *runtime, int fd,
          * half-formed one would put the model's internal syntax in front of
          * a user.
          */
-        char *visible = NULL;
-        mimo26_parsed_tool_call *parsed = NULL;
-        size_t parsed_count = 0;
-        if (collected != NULL &&
-            mimo26_tokenizer_parse_tool_calls(collected, &visible, &parsed,
-                                              &parsed_count, error,
-                                              sizeof error)) {
-            free(collected);
-            collected = visible;
-            collected_used = strlen(visible);
-            if (parsed_count > 0) {
-                finish_reason = "tool_calls";
-            }
-        }
+        char *calls_text = take_tool_calls(state.id, &collected,
+                                           &collected_used, &finish_reason,
+                                           error, sizeof error);
         char *escaped = NULL;
         size_t escaped_size = 0;
         if (collected != NULL) {
@@ -2071,33 +2187,7 @@ static void handle_chat(server_runtime *runtime, int fd,
             k3_json_escape(reasoning, reasoning_used, &escaped_reasoning,
                            &escaped_reasoning_size, error, sizeof error);
         }
-        /* Render the calls in OpenAI's shape, with arguments as a JSON
-         * string, which is what clients parse. */
-        char *calls_text = NULL;
-        size_t calls_used = 0, calls_capacity = 0;
-        if (parsed_count > 0) {
-            append_json(&calls_text, &calls_used, &calls_capacity, "[");
-            for (size_t i = 0; i < parsed_count; i++) {
-                char *escaped_name = NULL, *escaped_args = NULL;
-                size_t ignored = 0;
-                k3_json_escape(parsed[i].name, strlen(parsed[i].name),
-                               &escaped_name, &ignored, error, sizeof error);
-                k3_json_escape(parsed[i].arguments_json,
-                               strlen(parsed[i].arguments_json),
-                               &escaped_args, &ignored, error, sizeof error);
-                char entry[512];
-                snprintf(entry, sizeof entry,
-                         "%s{\"id\":\"call_%s_%zu\",\"type\":\"function\","
-                         "\"function\":{\"name\":%s,\"arguments\":%s}}",
-                         i ? "," : "", state.id, i,
-                         escaped_name != NULL ? escaped_name : "\"\"",
-                         escaped_args != NULL ? escaped_args : "\"{}\"");
-                append_json(&calls_text, &calls_used, &calls_capacity, entry);
-                free(escaped_name);
-                free(escaped_args);
-            }
-            append_json(&calls_text, &calls_used, &calls_capacity, "]");
-        }
+        const size_t calls_used = calls_text != NULL ? strlen(calls_text) : 0u;
         const size_t body_capacity =
             escaped_size + escaped_reasoning_size + calls_used + 1024u;
         char *body = (char *)malloc(body_capacity);
@@ -2126,7 +2216,6 @@ static void handle_chat(server_runtime *runtime, int fd,
         free(escaped);
         free(escaped_reasoning);
         free(calls_text);
-        mimo26_tool_calls_free(parsed, parsed_count);
         mimo26_slot_finish(&runtime->slot);
     }
 
