@@ -43,6 +43,22 @@ typedef enum {
 
 typedef struct mimo26_gpu_worker mimo26_gpu_worker;
 
+/*
+ * The shipped attention-scratch budget, as one definition rather than a literal
+ * repeated between the defaults and the tests.
+ *
+ * It silently sets how deep a history the prefill attends in one launch:
+ *
+ *   width = min(chunk, (bytes / 4) / (64 * (history + 2)))
+ *
+ * At 256 MiB with a 128 chunk that is a single launch up to history 8190, 127
+ * queries at 8191, and 7 at the 131,072 context. Changing this moves every one
+ * of those boundaries, so tests/test_mimo26_attention_deep asserts them against
+ * this macro -- a change here fails that test rather than quietly relocating
+ * which depths the suite covers.
+ */
+#define MIMO26_DEFAULT_ATTENTION_SCRATCH_BYTES (256ull * 1024ull * 1024ull)
+
 typedef struct {
     /* Positions retained by full-attention layers; windowed layers always
      * keep 128, so this alone sets the context ceiling. */

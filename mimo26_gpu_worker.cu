@@ -344,7 +344,7 @@ void mimo26_gpu_worker_config_defaults(mimo26_gpu_worker_config *config)
      * that costs seconds at that depth. Below a ~16K history a full 128-token
      * chunk still fits in one launch, so the cap is inert for short contexts.
      */
-    config->attention_scratch_bytes = 256ull * 1024ull * 1024ull;
+    config->attention_scratch_bytes = MIMO26_DEFAULT_ATTENTION_SCRATCH_BYTES;
 }
 
 /*

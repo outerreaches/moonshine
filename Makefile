@@ -1051,6 +1051,19 @@ tests/test_mimo26_gpu_attention: tests/test_mimo26_gpu_attention.o \
 		mimo26_rocm_ops.o mimo26_attention.o mimo26_ops.o \
 		mimo26_architecture.o
 	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_mimo26_attention_deep.o: tests/test_mimo26_attention_deep.cu \
+		mimo26_attention.h mimo26_gpu_worker.h \
+		mimo26_rocm_ops.h mimo26_ops.h mimo26_architecture.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/test_mimo26_kv_footprint.o: tests/test_mimo26_kv_footprint.cu \
+		mimo26_attention.h mimo26_gpu_worker.h mimo26_architecture.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/test_mimo26_kv_footprint: tests/test_mimo26_kv_footprint.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_mimo26_attention_deep: tests/test_mimo26_attention_deep.o \
+		mimo26_rocm_ops.o mimo26_attention.o mimo26_ops.o \
+		mimo26_architecture.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
 
 # G3: MiMo attention on the GPU, bit-exact against the CPU oracle.
 mimo26-gpu-attention: tests/test_mimo26_gpu_attention
