@@ -2086,7 +2086,21 @@ int main(int argc, char **argv)
                                    (uint64_t)options.prefix_cache_gib *
                                        1073741824ull,
                                    bundle_error, sizeof bundle_error)) {
+            /*
+             * The commonest cause is a context change: the bundle's identity
+             * includes the capacity its checkpoints were written at, so
+             * every stored prefix becomes unreadable and the store refuses
+             * itself. Refusing is right -- the alternative is silently
+             * discarding a cache someone may want -- but the operator needs
+             * to be told which lever to pull.
+             */
             fprintf(stderr, "prefix cache: %s\n", bundle_error);
+            fprintf(stderr,
+                    "prefix cache: this store was written for a different "
+                    "profile than %zu context. Point --prefix-cache-dir at a "
+                    "new directory, or remove %s to discard the stored "
+                    "prefixes and start fresh.\n",
+                    config.global_kv_capacity, options.prefix_cache_dir);
             return 1;
         }
         runtime.prefix_entries = k3_prefix_bundle_count(runtime.prefix_bundle);
