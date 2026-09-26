@@ -230,6 +230,14 @@ def build(a):
             print("               NOT the stock profile -- this release is "
                   "qualified for the flags that run were given, not for "
                   "no-flags defaults")
+        # Say it here, not only at activation. Packaging a report that cannot
+        # promote the release is worth knowing while the operator is still
+        # looking, rather than discovering it later with a signed artifact.
+        shortfall = qualification_shortfall(report)
+        if shortfall:
+            print("               this report will NOT satisfy activate:")
+            for reason in shortfall:
+                print(f"                 - {reason}")
     else:
         print("  qualified    NONE -- activate will refuse this release")
     if manifest["model"]:
@@ -360,6 +368,97 @@ def point(link, target):
     os.replace(temporary, link)
 
 
+#
+# What a qualification report must contain before it can promote a release.
+#
+# Activation used to require only that a report EXIST. It read checks_passed and
+# checks_total, printed them, and never compared them -- so a release whose
+# evidence said 8/11 activated exactly like one that said 11/11, and an empty
+# report satisfied the condition too. The signature then attested to a binary
+# nobody had qualified. Found by the 2026-09-26 review.
+#
+# Versioned because the set grows: a report produced before a check existed
+# cannot retroactively cover it, and bumping this is how that becomes visible
+# rather than silent.
+#
+QUALIFICATION_SET_VERSION = 1
+MANDATORY_CHECKS = (
+    "tool call parsed",
+    "reasoning separated",
+    "reasoning answer correct",
+    "survives client disconnect",
+    "tight max_tokens starves content, not faults",
+    "streaming tool calls match non-streaming",
+    "all tool-result shapes accepted",
+    "tool-result shape does not change the answer",
+    "content still required without tool_calls",
+    "no quarantine during soak",
+)
+# The soak check names its request count, so match it by prefix.
+MANDATORY_PREFIXES = ("soak ",)
+
+
+def parse_expected_profile(text):
+    """`context=131072,kv_prefix_reuse=true` -> dict, for --expect-profile."""
+    expected = {}
+    for item in (x.strip() for x in (text or "").split(",") if x.strip()):
+        if "=" not in item:
+            sys.exit(f"--expect-profile needs key=value pairs; got {item!r}")
+        key, _, value = item.partition("=")
+        low = value.strip().lower()
+        expected[key.strip()] = (True if low == "true" else False if low == "false"
+                                 else int(value) if value.strip().lstrip("-").isdigit()
+                                 else value.strip())
+    return expected
+
+
+def qualification_shortfall(report, allow_experimental_kernel=False, expected_profile=None):
+    """Every reason this report cannot justify a promotion. Empty means it can."""
+    reasons = []
+    checks = report.get("checks")
+    if not isinstance(checks, list) or not checks:
+        return ["qualification report records no checks"]
+
+    failed = [c.get("check") for c in checks if not c.get("pass")]
+    if failed:
+        reasons.append(f"{len(failed)} check(s) failed: {', '.join(map(str, failed[:4]))}")
+
+    present = {c.get("check") for c in checks if c.get("pass")}
+    missing = [name for name in MANDATORY_CHECKS if name not in present]
+    for prefix in MANDATORY_PREFIXES:
+        if not any(isinstance(n, str) and n.startswith(prefix) for n in present):
+            missing.append(prefix + "...")
+    if missing:
+        reasons.append(f"mandatory set v{QUALIFICATION_SET_VERSION} not covered, "
+                       f"missing {len(missing)}: {', '.join(missing[:4])}")
+
+    #
+    # The profile the evidence was gathered under has to be the one being shipped.
+    #
+    # Requiring stock_profile outright would be wrong: production deliberately
+    # runs non-stock (a 1800s deadline, prefix reuse on), so a release intended
+    # for those flags could never be promoted. What matters is that the operator
+    # STATES the intended profile and the evidence matches it. Stock needs no
+    # statement; anything else does.
+    #
+    profile = report.get("profile") or {}
+    if report.get("stock_profile") is not True and not expected_profile:
+        reasons.append("report is not from the stock profile and no "
+                       "--expect-profile was given, so nothing states which "
+                       "profile this release is qualified for")
+    for key, want in (expected_profile or {}).items():
+        if key not in profile:
+            reasons.append(f"--expect-profile names {key!r}, absent from the report's profile")
+        elif profile[key] != want:
+            reasons.append(f"profile mismatch: expected {key}={want!r}, "
+                           f"report ran {profile[key]!r}")
+    if profile.get("expert_weight_reuse") is True and not allow_experimental_kernel:
+        reasons.append("report was gathered with the experimental tiled expert "
+                       "kernel; pass --allow-experimental-kernel to promote it "
+                       "deliberately")
+    return reasons
+
+
 def activate(a):
     release = Path(a.release).resolve()
     ok, manifest = verify_release(release, quiet=True)
@@ -373,6 +472,16 @@ def activate(a):
     if not manifest.get("qualification"):
         print("refusing to activate: no qualification report; package with "
               "--qualification RESULTS.json")
+        return 1
+    # verify_release has already checked this file's hash against the manifest,
+    # so it is the evidence the release was signed over.
+    report = json.loads((release / "qualification.json").read_text())
+    shortfall = qualification_shortfall(report, a.allow_experimental_kernel,
+                                        parse_expected_profile(a.expect_profile))
+    if shortfall:
+        print("refusing to activate: the qualification does not justify a promotion")
+        for reason in shortfall:
+            print(f"  - {reason}")
         return 1
     state, note = check_signature(release, a.allowed_signers)
     if state == "bad":
@@ -495,6 +604,15 @@ def main():
     ac.add_argument("release"); ac.add_argument("--root", required=True)
     ac.add_argument("--allowed-signers")
     ac.add_argument("--require-signature", action="store_true")
+    ac.add_argument("--expect-profile", default="",
+                    help="comma-separated key=value the report's profile must "
+                         "match, e.g. context=131072,kv_prefix_reuse=true. "
+                         "Required for a non-stock report: the intended profile "
+                         "has to be stated, not inferred")
+    ac.add_argument("--allow-experimental-kernel", action="store_true",
+                    help="promote a release qualified with the tiled expert "
+                         "kernel; off by default because that mode changes what "
+                         "the model computes")
     r = sub.add_parser("rollback"); r.set_defaults(fn=rollback)
     r.add_argument("--root", required=True)
     l = sub.add_parser("list"); l.set_defaults(fn=list_releases)
