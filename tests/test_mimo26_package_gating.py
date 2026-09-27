@@ -23,6 +23,7 @@ package = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(package)
 
 checks = 0
+KERNEL_OFF = {"expert_weight_reuse": False}
 
 
 def report(names=None, failed=(), stock=True, weight_reuse=False, empty=False):
@@ -66,49 +67,76 @@ def case(name, reasons, expect_refused, expect_contains=None):
 def main():
     short = package.qualification_shortfall
 
-    # The one report that should promote.
-    case("complete, all passing, stock", short(report()), False)
+    # The one report that should promote. The kernel must be stated even for a
+    # stock report, since stock is itself a claim about which kernel ran.
+    case("complete, all passing, stock, kernel stated",
+         short(report(), expected_profile={"expert_weight_reuse": False}), False)
+    case("complete and passing but kernel unstated", short(report()), True,
+         "does not state it")
 
     # Failed outcomes. This is the hole the review found.
     case("one check failed",
-         short(report(failed={"reasoning answer correct"})), True, "failed")
+         short(report(failed={"reasoning answer correct"}), expected_profile=KERNEL_OFF), True, "failed")
     case("every check failed",
-         short(report(failed=set(package.MANDATORY_CHECKS))), True, "failed")
+         short(report(failed=set(package.MANDATORY_CHECKS)), expected_profile=KERNEL_OFF), True, "failed")
 
     # Empty and missing coverage.
-    case("no checks at all", short(report(empty=True)), True, "no checks")
+    case("no checks at all", short(report(empty=True), expected_profile=KERNEL_OFF), True, "no checks")
     case("checks key absent", short({"stock_profile": True}), True, "no checks")
     case("checks not a list", short({"checks": {}, "stock_profile": True}), True, "no checks")
 
     # Incomplete: passing, but not the required set.
     case("only the first two checks",
-         short(report(names=list(package.MANDATORY_CHECKS[:2]))), True, "mandatory set")
+         short(report(names=list(package.MANDATORY_CHECKS[:2])), expected_profile=KERNEL_OFF), True, "mandatory set")
     case("mandatory set but no soak",
-         short(report(names=list(package.MANDATORY_CHECKS))), True, "mandatory set")
+         short(report(names=list(package.MANDATORY_CHECKS)), expected_profile=KERNEL_OFF), True, "mandatory set")
     case("soak present, one mandatory name missing",
          short(report(names=list(package.MANDATORY_CHECKS[1:])
-                      + ["soak 20 requests, no faults"])), True, "mandatory set")
+                      + ["soak 20 requests, no faults"]), expected_profile=KERNEL_OFF), True, "mandatory set")
 
     # Wrong profile. Non-stock is allowed only when the intended profile is
     # STATED -- production runs non-stock deliberately, so refusing it outright
     # would make the real serving profile unpromotable.
-    case("non-stock with nothing stated", short(report(stock=False)), True, "stock profile")
+    # Deliberately passes NO expected_profile: that is the condition under test.
+    case("non-stock with nothing stated", short(report(stock=False)), True,
+         "stock profile")
     case("non-stock, profile stated and matching",
-         short(report(stock=False), expected_profile={"context": 131072}), False)
+         short(report(stock=False),
+               expected_profile={"context": 131072, **KERNEL_OFF}), False)
     case("non-stock, stated profile disagrees",
-         short(report(stock=False), expected_profile={"context": 262144}),
+         short(report(stock=False),
+               expected_profile={"context": 262144, **KERNEL_OFF}),
          True, "profile mismatch")
     case("stated profile names a field the report lacks",
-         short(report(stock=False), expected_profile={"tensor_parallel": 4}),
+         short(report(stock=False),
+               expected_profile={"tensor_parallel": 4, **KERNEL_OFF}),
          True, "absent from the report")
     case("stock report, stated profile still checked",
-         short(report(), expected_profile={"expert_slots": 999}), True, "profile mismatch")
-    case("experimental kernel, not allowed",
-         short(report(weight_reuse=True)), True, "tiled expert")
-    case("experimental kernel, allowed deliberately",
-         short(report(weight_reuse=True), allow_experimental_kernel=True), False)
+         short(report(), expected_profile={"expert_slots": 999, **KERNEL_OFF}),
+         True, "profile mismatch")
+    #
+    # The expert kernel must be STATED, not inferred. The old rule refused
+    # weight_reuse=true as "experimental"; that framing died when the tile became
+    # the default, because it would refuse every ordinary release and wave
+    # through the unusual one. What matters either way: a release says which
+    # arithmetic its evidence covers.
+    #
+    case("kernel on, not stated", short(report(weight_reuse=True)), True,
+         "does not state it")
+    case("kernel off, not stated", short(report(weight_reuse=False)), True,
+         "does not state it")
+    case("kernel on, stated as on",
+         short(report(weight_reuse=True),
+               expected_profile={"expert_weight_reuse": True}), False)
+    case("kernel off, stated as off",
+         short(report(weight_reuse=False),
+               expected_profile={"expert_weight_reuse": False}), False)
+    case("kernel on, stated as off",
+         short(report(weight_reuse=True),
+               expected_profile={"expert_weight_reuse": False}), True,
+         "profile mismatch")
 
-    # A report from a binary predating the flag has no such mode to be in.
+    # A report from a binary predating the field has no such mode to state.
     case("weight-reuse field absent", short(report(weight_reuse=None)), False)
 
     # A failing check must be refused even when everything else is right, and a
@@ -116,7 +144,7 @@ def main():
     case("extra non-mandatory check failed",
          short(report(names=list(package.MANDATORY_CHECKS)
                       + ["soak 20 requests, no faults", "some future check"],
-                      failed={"some future check"})), True, "failed")
+                      failed={"some future check"}), expected_profile=KERNEL_OFF), True, "failed")
 
     # The --expect-profile parser itself.
     assert parsed("") == {}, parsed("")

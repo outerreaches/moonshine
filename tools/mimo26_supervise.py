@@ -198,6 +198,10 @@ def parse_args(argv=None):
     p.add_argument('--prefill-chunk', type=int, default=128)
     p.add_argument('--expert-lookahead', choices=('off', 'on'), default='on')
     p.add_argument('--expert-major', choices=('off', 'on'), default='on')
+    # Default on since 2026-09-27: the tiled expert kernel reproduces the GEMV
+    # byte for byte under greedy decoding and runs 1.25x faster. Pinned here
+    # rather than inherited so the supervisor verifies the mode it intended.
+    p.add_argument('--expert-weight-reuse', choices=('off', 'on'), default='on')
     p.add_argument('--retain-experts', choices=('off', 'on'), default='on',
                    help='retain healthy expert cache between requests; context is always reset')
     p.add_argument('--kv-prefix-reuse', choices=('off', 'on'), default='off',
@@ -254,6 +258,7 @@ def server_command(a):
     command += ['--prefill-chunk', str(a.prefill_chunk), '--expert-lookahead', a.expert_lookahead]
     command += ['--retain-experts', a.retain_experts]
     command += ['--expert-major', a.expert_major]
+    command += ['--expert-weight-reuse', a.expert_weight_reuse]
     command += ['--request-deadline-seconds', str(a.request_deadline_seconds)]
     command += ['--min-headroom-gib', str(a.min_headroom_gib)]
     command += ['--kv-prefix-reuse', a.kv_prefix_reuse]
@@ -278,6 +283,7 @@ def main():
                                                   prefill_chunk=a.prefill_chunk,
                                                   expert_lookahead=a.expert_lookahead == 'on',
                                                   expert_major=a.expert_major == 'on',
+                                                  expert_weight_reuse=a.expert_weight_reuse == 'on',
                                                   retain_experts=a.retain_experts == 'on',
                                                   kv_prefix_reuse=a.kv_prefix_reuse == 'on',
                                                   request_deadline_seconds=a.request_deadline_seconds,

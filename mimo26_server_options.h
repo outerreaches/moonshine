@@ -167,6 +167,7 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
         else if (!strcmp(key,"--api-key")) bit=16384;
         else if (!strcmp(key,"--max-output-tokens")) bit=32768;
         else if (!strcmp(key,"--status-file")) bit=65536;
+        else if (!strcmp(key,"--expert-weight-reuse")) bit=131072;
         if (!bit || (seen & bit) || i + 1 >= argc) {
             snprintf(error,error_size,"unknown, duplicate or missing-value option: %s",key); return false;
         }
@@ -196,13 +197,15 @@ static inline bool mimo26_server_parse_options(int argc, char **argv,
             /* An empty key means no key, matching K3, rather than a
              * credential every caller can guess. */
             parsed.api_key = value[0] ? value : NULL;
-        } else if (bit == 32 || bit == 64 || bit == 256 || bit == 1024) {
+        } else if (bit == 32 || bit == 64 || bit == 256 || bit == 1024 ||
+                   bit == 131072) {
             if (strcmp(value,"on") && strcmp(value,"off")) {
                 snprintf(error,error_size,"%s requires on or off",key); return false;
             }
             if (bit == 32) parsed.worker.expert_lookahead=!strcmp(value,"on");
             else if (bit == 256) parsed.worker.expert_major=!strcmp(value,"on");
             else if (bit == 1024) parsed.kv_prefix_reuse=!strcmp(value,"on");
+            else if (bit == 131072) parsed.worker.expert_weight_reuse=!strcmp(value,"on");
             else parsed.retain_experts=!strcmp(value,"on");
         } else {
             uint64_t low=1,high=UINT32_MAX;

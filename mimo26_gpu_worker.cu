@@ -321,17 +321,29 @@ void mimo26_gpu_worker_config_defaults(mimo26_gpu_worker_config *config)
     config->expert_lookahead = true;
     config->expert_major = true;
     /*
-     * Assigned, not left to the caller's zeroing. Omitting it made
-     * "default-off" a property of how the caller happened to allocate the
-     * struct rather than of this function: the server survived only because it
-     * uses `mimo26_server_options options{}`, while a caller reusing a config
-     * or declaring it uninitialized inherited whatever was already there. A
-     * default that depends on the caller is not a default.
+     * ON as of 2026-09-27. The weight-reuse tiled MXFP4 GEMM is now the default
+     * expert projection kernel.
      *
-     * Off because the tile is an unqualified behavioural change, not because it
-     * is less accurate -- see [[MiMo MXFP4 Kernel Oracle 2026-09-26]].
+     * It was off while it was an unqualified behavioural change: it perturbs
+     * routing, so ~99% of logits move. What settled it was a paired quality
+     * screen with criteria fixed before either arm ran -- and the outcome was
+     * stronger than the criteria asked for. Across 60 items in four families the
+     * two kernels produced BYTE-IDENTICAL output, because greedy's top-1 margin
+     * (~9.2) is 20-30x the logit shift (0.15-0.41). End to end it is 1.25x
+     * faster, 1.28x on 6.5K-token prompts.
+     *
+     * The boundary on that result: greedy only. Margins between ranks 2, 3 and 4
+     * are the same size as the perturbation, so if sampling is ever added the two
+     * kernels WILL diverge. This server refuses temperature/top_p rather than
+     * accepting and ignoring them, which is what makes the default safe.
+     *
+     * Assigned rather than left to the caller's zeroing, which is how it was
+     * missed until 2026-09-26: a default that depends on how the caller
+     * allocated the struct is not a default.
+     *
+     * See [[MiMo Tiled Kernel Quality Screen — Results 2026-09-26]].
      */
-    config->expert_weight_reuse = false;
+    config->expert_weight_reuse = true;
     /*
      * 256 MiB. Full-width sizing would want 8 GiB at the 262144 context above,
      * which is what made that context fail to allocate.

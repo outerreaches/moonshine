@@ -105,12 +105,12 @@ typedef struct {
      * than the launch-amortizing GEMV, which re-reads each expert's weights
      * once per vector block.
      *
-     * Off by default, and NOT because it is less accurate -- a float64 oracle
-     * finds it strictly nearer the truth on every output where it differs from
-     * the GEMV (94 of 3.08M, none against) and ~2.1-2.8x faster. It is off
-     * because enabling it re-bases every full-vector equality fixture in this
-     * lane, which is a deliberate act, not a default.
-     * See [[MiMo MXFP4 Kernel Oracle 2026-09-26]].
+     * ON by default since 2026-09-27. A float64 oracle finds it strictly nearer
+     * the truth on every output where it differs from the GEMV (94 of 3.08M,
+     * none against), and a paired quality screen found the two kernels produce
+     * byte-identical output on 60 items under greedy decoding while it runs
+     * 1.25x faster. Greedy only: ranks 2+ reorder, so sampling would diverge.
+     * See [[MiMo Tiled Kernel Quality Screen — Results 2026-09-26]].
      */
     bool expert_weight_reuse;
     /*

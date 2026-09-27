@@ -143,11 +143,15 @@ int main(void)
     {
         mimo26_gpu_worker_config config;
         memset(&config, 0xFF, sizeof config);
-        config.expert_weight_reuse = true;
+        /* Pre-set to the OPPOSITE of the default, so the assertion below proves
+         * the function assigned it rather than inheriting whatever was there.
+         * The default flipped to true on 2026-09-27; this test caught the flip,
+         * which is what it is for. */
+        config.expert_weight_reuse = false;
         config.expert_major = true;
         config.expert_lookahead = true;
         mimo26_gpu_worker_config_defaults(&config);
-        assert(!config.expert_weight_reuse);   /* the field that was missing */
+        assert(config.expert_weight_reuse);   /* on by default since 2026-09-27 */
         assert(config.expert_major);
         assert(config.expert_lookahead);
         assert(config.global_kv_capacity == 131072u);
@@ -163,11 +167,11 @@ int main(void)
         mimo26_gpu_worker_config config;
         char error[256] = {0};
         memset(&config, 0xFF, sizeof config);
-        config.expert_weight_reuse = true;
+        config.expert_weight_reuse = false;
         mimo26_gpu_worker_config_defaults(&config);
         assert(mimo26_gpu_worker_resolve_overrides(&config, error, sizeof error) ==
                MIMO26_GPU_WORKER_OK);
-        assert(!config.expert_weight_reuse);
+        assert(config.expert_weight_reuse);
         ++checks;
     }
 

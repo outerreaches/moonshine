@@ -130,10 +130,13 @@ typedef struct {
     /*
      * Expert-major prefill scratch. Per-token execution re-reads a selected
      * expert's 12.75 MiB from GTT once for every token that picks it;
-     * grouping a chunk's tokens permits reuse. The exact grouped-GEMV path
-     * only amortizes launches; it does NOT load weights once per group.
-     * One route sample suggests 7.56x ideal sharing, not measured traffic
-     * reduction (and the former weight-reuse kernel failed equality).
+     * grouping a chunk's tokens permits reuse. Which kernel exploits that is
+     * now expert_weight_reuse below: the GEMV path only amortizes launches,
+     * while the tiled path (the default since 2026-09-27) reuses weight loads
+     * across a 16-vector tile and is 1.25x faster end to end. The earlier note
+     * here that the weight-reuse kernel "failed equality" was true only against
+     * a GEMV-equality contract; judged against a float64 oracle it is the more
+     * accurate of the two.
      *
      * gathered holds one expert's token rows contiguously for the batched
      * projection. stash holds every (token, rank) expert output, so the final F32
@@ -196,10 +199,10 @@ typedef struct {
      * production group sizes, 2.8x at width 128. See
      * [[MiMo MXFP4 Kernel Oracle 2026-09-26]].
      *
-     * Off by default all the same, because turning it on re-bases every
-     * full-vector equality fixture in the lane. Set by the worker from its
-     * config so the mode is visible on /health, never read from the
-     * environment here.
+     * ON by default since 2026-09-27, after a paired quality screen found the
+     * two kernels produce byte-identical output on 60 items under greedy
+     * decoding. Set by the worker from its config so the mode is visible on
+     * /health, never read from the environment here.
      */
     bool expert_weight_reuse;
 } mimo26_rocm_layer;

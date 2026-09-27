@@ -14,6 +14,7 @@ static void server_defaults(mimo26_server_options *o) {
     o->worker.prefill_chunk = 128u;
     o->worker.expert_lookahead = true;
     o->worker.expert_major = true;
+    o->worker.expert_weight_reuse = true;
 }
 
 static mimo26_server_options parsed;
@@ -110,6 +111,24 @@ int main(void) {
         const char *argv4[]={"x","root","--request-deadline-seconds","86401"};
         assert(!mimo26_server_parse_options(4,(char**)argv4,&got,error,sizeof error));
     }
+    /*
+     * The expert projection kernel. On by default since 2026-09-27, and settable
+     * either way from the command line so an operator can pin the GEMV without
+     * reaching for an environment variable.
+     */
+    CHECK(true,"root","--expert-weight-reuse","on");
+    assert(parsed.worker.expert_weight_reuse);
+    CHECK(true,"root","--expert-weight-reuse","off");
+    assert(!parsed.worker.expert_weight_reuse);
+    CHECK(false,"root","--expert-weight-reuse","true");
+    CHECK(false,"root","--expert-weight-reuse","1");
+    CHECK(false,"root","--expert-weight-reuse","");
+    CHECK(false,"root","--expert-weight-reuse");
+    CHECK(false,"root","--expert-weight-reuse","on","--expert-weight-reuse","off");
+    /* Unlike grouping it has no coupling to lookahead: weight reuse is a
+     * property of one call, not of the schedule. */
+    CHECK(true,"root","--expert-weight-reuse","on","--expert-lookahead","off");
+
     /* Grouped prefill follows lookahead by default, but the explicit
      * contradiction is refused rather than quietly downgraded. */
     CHECK(true,"root","--expert-major","on","--expert-lookahead","on");
@@ -126,6 +145,7 @@ int main(void) {
         const char *d[]={"x","root"};
         assert(mimo26_server_parse_options(2,(char**)d,&got,error,sizeof error));
         assert(got.worker.expert_major && got.worker.expert_lookahead);
+        assert(got.worker.expert_weight_reuse);   /* on by default since 2026-09-27 */
         assert(got.worker.expert_slots_per_layer==160u);
         assert(got.worker.global_kv_capacity==131072u);
         server_defaults(&got);

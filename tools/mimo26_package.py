@@ -413,6 +413,9 @@ def parse_expected_profile(text):
 
 
 def qualification_shortfall(report, allow_experimental_kernel=False, expected_profile=None):
+    # allow_experimental_kernel is retained only so older call sites keep working;
+    # the kernel is now governed by --expect-profile like any other setting.
+    del allow_experimental_kernel
     """Every reason this report cannot justify a promotion. Empty means it can."""
     reasons = []
     checks = report.get("checks")
@@ -452,10 +455,22 @@ def qualification_shortfall(report, allow_experimental_kernel=False, expected_pr
         elif profile[key] != want:
             reasons.append(f"profile mismatch: expected {key}={want!r}, "
                            f"report ran {profile[key]!r}")
-    if profile.get("expert_weight_reuse") is True and not allow_experimental_kernel:
-        reasons.append("report was gathered with the experimental tiled expert "
-                       "kernel; pass --allow-experimental-kernel to promote it "
-                       "deliberately")
+    #
+    # The expert kernel must always be STATED, never inferred from a default.
+    #
+    # This used to refuse `expert_weight_reuse: true` as "experimental". That
+    # framing died when the tile became the default on 2026-09-27 -- it would now
+    # refuse every ordinary release and wave through the unusual one. What
+    # actually matters is unchanged by which kernel is in fashion: a release must
+    # say which arithmetic its evidence covers, because the two are not
+    # bit-identical and a reader cannot tell from the binary.
+    #
+    if "expert_weight_reuse" in profile and \
+            "expert_weight_reuse" not in (expected_profile or {}):
+        reasons.append("the report records expert_weight_reuse="
+                       f"{profile['expert_weight_reuse']} but --expect-profile "
+                       "does not state it; name the expert kernel explicitly, it "
+                       "changes what the model computes")
     return reasons
 
 
