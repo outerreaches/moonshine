@@ -56,6 +56,7 @@
 #include "mimo26_rocm_ops.h"
 #include <hip/hip_runtime.h>
 #include <inttypes.h>
+#include <ctime>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -97,6 +98,13 @@ static void ok(const char *what, int passed, const char *detail)
         }                                                                     \
     } while (0)
 
+static double seconds_now(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (double)now.tv_sec + (double)now.tv_nsec * 1e-9;
+}
+
 static uint32_t rng_state = 0x5EED1234u;
 static float next_uniform(float low, float high)
 {
@@ -115,8 +123,116 @@ static uint64_t production_width(uint64_t history, uint64_t chunk)
     return width;
 }
 
+
+/*
+ * Timing sweep: does the scratch budget govern deep-prefill attention cost?
+ *
+ * At the shipped 256 MiB and a 131,072 history the width is 7, so a 128-token
+ * chunk needs 19 sub-batch passes and each pass re-reads the whole history's KV.
+ * A larger budget means fewer passes. If attention at depth is bandwidth-bound on
+ * that re-reading, cost should fall roughly with the pass count -- and a full
+ * 131,072 prefill, extrapolated at ~26 h from two live measurements, would be
+ * dominated by it.
+ *
+ * Measures ONE global-layer attention call, which is where the cost is: 9 global
+ * layers attend the whole history, the other 39 are capped at a 128 window.
+ * Interleaved across budgets with a discarded warm-up, per
+ * [[perf-screens-need-interleaved-baselines]] -- this box drifts ~2.6%.
+ *
+ * MIMO26_DEEP_BENCH=<repeats> selects this instead of the correctness cases.
+ */
+static int bench(unsigned repeats)
+{
+    static const uint64_t depths[] = {16384u, 32768u, 65536u, 131072u};
+    static const uint64_t budgets_mib[] = {256u, 512u, 1024u, 2048u, 4096u};
+    const uint64_t chunk = PRODUCTION_CHUNK;
+    const size_t kv_heads = 4u, kv_groups = (size_t)QH / 4u;   /* a global layer */
+
+    printf("one global-layer attention call, chunk %llu, interleaved, %u repeats\n\n",
+           (unsigned long long)chunk, repeats);
+    printf("%8s %7s %6s %7s %11s %9s %8s\n", "history", "budget", "width",
+           "passes", "seconds", "GB read", "GB/s");
+
+    for (size_t d = 0; d < sizeof depths / sizeof *depths; d++) {
+        const uint64_t total = depths[d], prior = total - chunk;
+        const size_t key_count = (size_t)total * kv_heads * QK;
+        const size_t value_count = (size_t)total * kv_heads * VD;
+
+        uint16_t *keys = (uint16_t *)malloc(key_count * 2);
+        uint16_t *values = (uint16_t *)malloc(value_count * 2);
+        uint16_t *queries = (uint16_t *)malloc((size_t)chunk * QH * QK * 2);
+        if (!keys || !values || !queries) return 2;
+        rng_state = 0xBEEF00u + (uint32_t)d;
+        for (size_t i = 0; i < key_count; i++) keys[i] = mimo26_f32_to_bf16(next_uniform(-1.5f, 1.5f));
+        for (size_t i = 0; i < value_count; i++) values[i] = mimo26_f32_to_bf16(next_uniform(-2.f, 2.f));
+        for (size_t i = 0; i < (size_t)chunk * QH * QK; i++)
+            queries[i] = mimo26_f32_to_bf16(next_uniform(-1.5f, 1.5f));
+
+        void *dk = NULL, *dv = NULL, *dq = NULL, *dout = NULL;
+        HIP_OK(hipMalloc(&dk, key_count * 2));
+        HIP_OK(hipMalloc(&dv, value_count * 2));
+        HIP_OK(hipMalloc(&dq, (size_t)chunk * QH * QK * 2));
+        HIP_OK(hipMalloc(&dout, (size_t)chunk * QH * VD * 2));
+        HIP_OK(hipMemcpy(dk, keys, key_count * 2, hipMemcpyHostToDevice));
+        HIP_OK(hipMemcpy(dv, values, value_count * 2, hipMemcpyHostToDevice));
+        HIP_OK(hipMemcpy(dq, queries, (size_t)chunk * QH * QK * 2, hipMemcpyHostToDevice));
+        free(keys); free(values); free(queries);
+
+        const size_t budget_count = sizeof budgets_mib / sizeof *budgets_mib;
+        double seconds[8] = {0};
+        float *scratch[8] = {NULL};
+        uint64_t width[8] = {0}, floats[8] = {0};
+        const uint64_t row = mimo26_rocm_attention_scratch_floats(total);
+        for (size_t b = 0; b < budget_count; b++) {
+            uint64_t w = (budgets_mib[b] * 1024u * 1024u / sizeof(float)) / row;
+            if (w > chunk) w = chunk;
+            if (w == 0u) w = 1u;
+            width[b] = w;
+            floats[b] = w * row;
+            HIP_OK(hipMalloc(&scratch[b], floats[b] * sizeof(float)));
+        }
+        /* Interleaved: one pass over every budget per repeat, warm-up discarded. */
+        for (unsigned r = 0; r < repeats + 1u; r++) {
+            for (size_t b = 0; b < budget_count; b++) {
+                HIP_OK(hipDeviceSynchronize());
+                const double t0 = seconds_now();
+                if (!mimo26_rocm_attention_prefill(
+                        dout, dq, dk, dv, NULL, scratch[b], floats[b],
+                        (uint32_t)kv_heads, (uint32_t)kv_groups, 0u, total, 0u,
+                        prior, (uint32_t)chunk, mimo26_attention_scale(), NULL)) {
+                    fprintf(stderr, "launch failed\n");
+                    return 2;
+                }
+                HIP_OK(hipDeviceSynchronize());
+                if (r > 0u) seconds[b] += seconds_now() - t0;
+            }
+        }
+        for (size_t b = 0; b < budget_count; b++) {
+            const double sec = seconds[b] / repeats;
+            const uint64_t passes = (chunk + width[b] - 1u) / width[b];
+            /* each pass re-reads the whole history's keys and values */
+            const double gb = (double)passes * (double)total * kv_heads *
+                              (QK + VD) * 2.0 / 1e9;
+            printf("%8llu %6lluM %6llu %7llu %11.5f %9.2f %8.0f\n",
+                   (unsigned long long)total, (unsigned long long)budgets_mib[b],
+                   (unsigned long long)width[b], (unsigned long long)passes,
+                   sec, gb, gb / sec);
+            HIP_OK(hipFree(scratch[b]));
+        }
+        printf("\n");
+        HIP_OK(hipFree(dk)); HIP_OK(hipFree(dv));
+        HIP_OK(hipFree(dq)); HIP_OK(hipFree(dout));
+    }
+    return 0;
+}
+
 int main(void)
 {
+    if (const char *b = getenv("MIMO26_DEEP_BENCH")) {
+        int devices = 0;
+        if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) return 2;
+        return bench((unsigned)strtoul(b, NULL, 10));
+    }
     int devices = 0;
     if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) {
         fprintf(stderr, "no HIP device\n");
