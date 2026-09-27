@@ -836,15 +836,33 @@ static size_t restore_prefix_from_disk(server_runtime *runtime,
  * would be keyed by tokens the client never echoes back when the model's
  * reasoning is separated from its visible content, and would never match.
  */
+/* Bump when the KV-producing arithmetic changes in any way; it names the
+ * prefix store's directory, so a bump retires the old checkpoints. */
+enum { MIMO26_KV_NUMERICS_VERSION = 1u };
+
 static void publish_prefix_checkpoint(server_runtime *runtime,
                                       const uint32_t *ids, size_t count)
 {
-    if (runtime->prefix_bundle == NULL || count < PREFIX_PUBLISH_MIN_TOKENS ||
-        !mimo26_gpu_worker_idle(runtime->worker)) {
+    /*
+     * Say why, when the answer is no.
+     *
+     * These guards used to return silently, which is how resumable prefill first
+     * appeared to do nothing at all: publishes stayed at 0 with no indication of
+     * which precondition had failed. A checkpoint quietly not happening is
+     * exactly the kind of thing that needs a line in the log.
+     */
+    const char *refusal = NULL;
+    if (runtime->prefix_bundle == NULL) refusal = "no prefix store configured";
+    else if (count < PREFIX_PUBLISH_MIN_TOKENS) refusal = "prefix shorter than the publish floor";
+    else if (!mimo26_gpu_worker_idle(runtime->worker)) refusal = "worker not idle";
+    else if (mimo26_gpu_worker_position(runtime->worker) != (uint64_t)count)
+        refusal = "worker position does not match the prefix length";
+    if (refusal != NULL) {
+        server_log("INFO", "prefix.publish.declined", runtime->inflight_id,
+                   "reason=%s tokens=%zu position=%llu floor=%u", refusal, count,
+                   (unsigned long long)mimo26_gpu_worker_position(runtime->worker),
+                   (unsigned)PREFIX_PUBLISH_MIN_TOKENS);
         return;
-    }
-    if (mimo26_gpu_worker_position(runtime->worker) != (uint64_t)count) {
-        return;   /* prefill stopped early; this is not that prompt's state */
     }
     size_t existing = SIZE_MAX;
     if (k3_prefix_bundle_find_exact(runtime->prefix_bundle, ids, count,
@@ -1974,6 +1992,37 @@ static void handle_chat(server_runtime *runtime, int fd,
         /* The prompt is now evaluated and nothing has been generated on top,
          * which is exactly the state a later turn can continue from. */
         publish_prefix_checkpoint(runtime, prompt.ids, prompt.count);
+    } else if (progress_context.evaluated > 0u) {
+        /*
+         * RESUMABLE PREFILL. The prefill ran out of time (or the client left)
+         * part-way, so publish what it DID evaluate instead of discarding it.
+         *
+         * Without this, prefix reuse could never help the case it exists for. A
+         * checkpoint was published only on completion, so a prompt too long for
+         * the deadline re-prefilled from zero on every retry and died at the same
+         * token: the deadline prevented the very checkpoint that would beat the
+         * deadline. Observed on 2026-09-27 with a 46,346-token prompt that
+         * reached 17,664 tokens in 1,800 s, three times over, publishes = 0.
+         *
+         * With it, a long prompt is ingested across attempts -- ~17K, then
+         * resuming to ~35K, then complete -- each one inside the deadline.
+         *
+         * Safe because a chunk is transactional across all 48 layers, so the
+         * only yield point is BETWEEN chunks: `evaluated` is chunk-aligned and
+         * the committed KV is exactly what a fresh prefill of that prefix
+         * produces, which is the property mimo26_prefix_reuse_gate already
+         * checks across FRESH, CONTINUE and RESTORE. And it is not taken on
+         * trust -- publish_prefix_checkpoint refuses unless the worker is idle
+         * and its position equals the count passed here, so a mistake in this
+         * arithmetic declines to publish rather than storing a mislabelled
+         * prefix.
+         *
+         * reuse + evaluated, because the worker was handed the prompt past the
+         * reused prefix and counts from there, while a checkpoint is keyed by
+         * the absolute token sequence.
+         */
+        publish_prefix_checkpoint(runtime, prompt.ids,
+                                  reuse + progress_context.evaluated);
     }
     prefill_seconds = now_seconds() - prefill_started;
     /*
@@ -2321,7 +2370,11 @@ static void handle_chat(server_runtime *runtime, int fd,
                        "prompt=%zu evaluated=%zu reused=%zu prefill=%.3f "
                        "generated=%zu decode=%.3f rate=%.2f total=%.3f "
                        "finish=%s cache=%llu/%llu",
-                       prompt.count, prompt.count - reuse, reuse,
+                       /* prefill_evaluated, not prompt.count - reuse: this
+                        * record carried the same fabricated total the
+                        * prefill.complete one did, claiming a stopped prefill
+                        * had evaluated the whole prompt. */
+                       prompt.count, prefill_evaluated, reuse,
                        prefill_seconds, produced_tokens, decode_seconds,
                        decode_seconds > 0.0
                            ? (double)produced_tokens / decode_seconds : 0.0,
@@ -2564,28 +2617,40 @@ int main(int argc, char **argv)
      * be shared between models. Tracked in the review note.
      */
     if (options.prefix_cache_dir != NULL) {
-        (void)mkdir(options.prefix_cache_dir, 0700);
-        /* Bump when the KV-producing arithmetic changes in any way. */
-        enum { MIMO26_KV_NUMERICS_VERSION = 1u };
-        uint64_t identity_crc = mimo26_gpu_worker_layout_crc64(runtime.worker);
-        const uint64_t numerics[] = {
-            (uint64_t)MIMO26_KV_NUMERICS_VERSION,
-            runtime.expert_weight_reuse ? 1u : 0u,
-        };
-        for (size_t i = 0; i < sizeof numerics / sizeof *numerics; i++) {
-            /* splitmix64 finalizer, mixed in sequentially: cheap, no new
-             * dependency, and avalanches so a one-bit mode change relocates
-             * the whole identity. */
-            uint64_t x = identity_crc ^ (numerics[i] + 0x9E3779B97F4A7C15ull);
-            x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
-            x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
-            identity_crc = x ^ (x >> 31);
+        /*
+         * Separate stores per arithmetic mode, by DIRECTORY.
+         *
+         * This was a composite CRC mixed into the bundle identity, and that was
+         * wrong in a way that disabled publishing entirely: the identity is
+         * compared against the exported state file's own model_layout_crc64,
+         * and that field is the KV's integrity check -- mimo26_kv import
+         * requires it to equal the live cache's layout CRC (mimo26_kv.c:647).
+         * So the store expected a composite the state file could never carry,
+         * every k3_prefix_bundle_publish was refused with "checkpoint state
+         * identity is invalid", and the only symptom was publishes stuck at 0.
+         *
+         * A directory needs no identity surgery, cannot disagree with the state
+         * file, and is legible: an operator can see which store belongs to which
+         * kernel. Checkpoints written by one mode are never offered to the other
+         * because the other never looks in that directory.
+         */
+        char store[PATH_MAX];
+        const int written = snprintf(store, sizeof store, "%s/k%u-%s",
+                                     options.prefix_cache_dir,
+                                     (unsigned)MIMO26_KV_NUMERICS_VERSION,
+                                     runtime.expert_weight_reuse ? "tiled" : "gemv");
+        if (written <= 0 || (size_t)written >= sizeof store) {
+            fprintf(stderr, "prefix cache: directory path too long\n");
+            return 1;
         }
+        (void)mkdir(options.prefix_cache_dir, 0700);
+        (void)mkdir(store, 0700);
         const k3_prefix_bundle_identity identity = {
-            1u, (uint32_t)config.global_kv_capacity, identity_crc, false};
+            1u, (uint32_t)config.global_kv_capacity,
+            mimo26_gpu_worker_layout_crc64(runtime.worker), false};
         char bundle_error[512];
         if (!k3_prefix_bundle_open(&runtime.prefix_bundle,
-                                   options.prefix_cache_dir, &identity,
+                                   store, &identity,
                                    options.prefix_cache_entries,
                                    (uint64_t)options.prefix_cache_gib *
                                        1073741824ull,
@@ -2604,18 +2669,16 @@ int main(int argc, char **argv)
             fprintf(stderr, "prefix cache: %s\n", bundle_error);
             fprintf(stderr,
                     "prefix cache: this store was written for a different "
-                    "profile than %zu context with expert weight reuse %s. "
-                    "Point --prefix-cache-dir at a new directory (each "
-                    "arithmetic mode needs its own), or remove %s to discard "
-                    "the stored prefixes and start fresh.\n",
-                    config.global_kv_capacity,
-                    runtime.expert_weight_reuse ? "on" : "off",
-                    options.prefix_cache_dir);
+                    "profile than %zu context. Each expert kernel already gets "
+                    "its own subdirectory (%s), so this is a geometry change: "
+                    "point --prefix-cache-dir somewhere new, or remove %s to "
+                    "discard the stored prefixes and start fresh.\n",
+                    config.global_kv_capacity, store, store);
             return 1;
         }
         runtime.prefix_entries = k3_prefix_bundle_count(runtime.prefix_bundle);
         printf("prefix cache at %s: %zu stored, %u entries and %u GiB at "
-               "most\n", options.prefix_cache_dir, runtime.prefix_entries,
+               "most\n", store, runtime.prefix_entries,
                options.prefix_cache_entries, options.prefix_cache_gib);
     }
 
