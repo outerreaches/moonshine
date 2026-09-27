@@ -838,6 +838,38 @@ static size_t restore_prefix_from_disk(server_runtime *runtime,
  */
 /* Bump when the KV-producing arithmetic changes in any way; it names the
  * prefix store's directory, so a bump retires the old checkpoints. */
+/*
+ * A stop that produced NOTHING is not a truncation.
+ *
+ * Mapping "deadline" to the schema's "length" fixed a real defect -- the internal
+ * name was rejected outright by strict clients -- but it introduced a subtler one.
+ * With zero completion tokens the DeepSeek harness rendered "length" as:
+ *
+ *     Output token limit reached. The reply was cut off; earlier output is
+ *     preserved in the conversation. Send "continue" to let the model resume.
+ *
+ * Every clause is false when a prefill deadline fired before generation began:
+ * there was no output limit, nothing was cut off, nothing was preserved. A loud
+ * wrong error had been traded for a quiet wrong message, which is worse -- the
+ * operator is told to do something that does not address the cause.
+ *
+ * So the wire answer depends on whether any tokens were produced:
+ *
+ *   generated > 0, stopped at a limit  -> 200 with finish_reason "length".
+ *                                         The reply genuinely was cut off.
+ *   generated == 0, stopped at a limit -> an HTTP error naming the real cause.
+ *                                         The request did not complete at all.
+ *
+ * This is not a return to the original bug. That was a schema violation, which a
+ * client cannot interpret; this is a documented failure status with a structured
+ * body, which is exactly what the convention has for a server-side timeout.
+ */
+static bool stop_produced_nothing(const char *internal, size_t generated)
+{
+    return generated == 0u && internal != NULL &&
+           (!strcmp(internal, "deadline") || !strcmp(internal, "shutdown"));
+}
+
 enum { MIMO26_KV_NUMERICS_VERSION = 1u };
 
 static void publish_prefix_checkpoint(server_runtime *runtime,
@@ -2267,7 +2299,26 @@ static void handle_chat(server_runtime *runtime, int fd,
             }
             free(calls_text);
         }
-        stream_chunk(&state, NULL, 0, finish_reason);
+        if (stop_produced_nothing(finish_reason, produced_tokens)) {
+            /* A 200 was already committed with the headers, so the status cannot
+             * carry this. An error frame can, and a client that ignores it is no
+             * worse off than with a misleading finish_reason. */
+            char frame[640];
+            const int size = snprintf(frame, sizeof frame,
+                "data: {\"error\":{\"message\":\"%s reached after %.0fs before "
+                "any token was generated; evaluated %zu of %zu prompt tokens "
+                "(%zu reused). The evaluated prefix was checkpointed, so "
+                "retrying resumes from it.\",\"type\":\"server_error\","
+                "\"code\":\"%s\"}}\n\n",
+                !strcmp(finish_reason, "deadline")
+                    ? "request deadline" : "server shutdown",
+                prefill_seconds, prefill_evaluated + reuse, prompt.count, reuse,
+                !strcmp(finish_reason, "deadline")
+                    ? "deadline_exceeded" : "server_shutdown");
+            if (size > 0) send_all(fd, frame, (size_t)size);
+        } else {
+            stream_chunk(&state, NULL, 0, finish_reason);
+        }
         const char *done = "data: [DONE]\n\n";
         send_all(fd, done, strlen(done));
         mimo26_slot_finish(&runtime->slot);
@@ -2279,6 +2330,25 @@ static void handle_chat(server_runtime *runtime, int fd,
          * half-formed one would put the model's internal syntax in front of
          * a user.
          */
+        if (stop_produced_nothing(finish_reason, produced_tokens)) {
+            char detail[512];
+            snprintf(detail, sizeof detail,
+                     "%s reached after %.0fs before any token was generated; "
+                     "evaluated %zu of %zu prompt tokens (%zu reused). The "
+                     "evaluated prefix was checkpointed, so retrying the same "
+                     "request resumes from it rather than restarting.",
+                     !strcmp(finish_reason, "deadline")
+                         ? "request deadline" : "server shutdown",
+                     prefill_seconds, prefill_evaluated + reuse, prompt.count,
+                     reuse);
+            send_error(fd, 504, "Gateway Timeout",
+                       !strcmp(finish_reason, "deadline")
+                           ? "deadline_exceeded" : "server_shutdown", detail);
+            mimo26_slot_finish(&runtime->slot);
+            /* collected and reasoning are released by the shared tail below,
+             * which also records last_finish and the deadline counter -- this
+             * path must not short-circuit either. */
+        } else {
         char *calls_text = take_tool_calls(state.id, &collected,
                                            &collected_used, &finish_reason,
                                            error, sizeof error);
@@ -2325,6 +2395,7 @@ static void handle_chat(server_runtime *runtime, int fd,
         free(escaped_reasoning);
         free(calls_text);
         mimo26_slot_finish(&runtime->slot);
+        }
     }
 
     /* Logged without content: a request log that contains the prompt is a
