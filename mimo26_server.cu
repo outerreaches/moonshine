@@ -1570,8 +1570,10 @@ static bool stream_chunk(response_state *state, const char *text,
                         "data: {\"id\":\"%s\",\"object\":"
                         "\"chat.completion.chunk\",\"created\":%ld,"
                         "\"model\":\"%s\",\"choices\":[{\"index\":0,"
-                        "\"delta\":{},\"finish_reason\":\"%s\"}]}\n\n",
-                        state->id, state->created, MODEL_ID, finish_reason);
+                        "\"delta\":{},\"finish_reason\":\"%s\","
+                        "\"x_moonshine_finish\":\"%s\"}]}\n\n",
+                        state->id, state->created, MODEL_ID,
+                        mimo26_slot_wire_finish_reason(finish_reason), finish_reason);
     } else {
         size = snprintf(frame, sizeof frame,
                         "data: {\"id\":\"%s\",\"object\":"
@@ -1641,6 +1643,19 @@ typedef struct {
     int client;
     mimo26_slot_step stop;
     /*
+     * Tokens this prefill actually evaluated, as last reported by the progress
+     * callback.
+     *
+     * Without it, request.prefill.complete logged the whole remaining prompt as
+     * "evaluated" even when the deadline had cut the prefill short, and divided
+     * by it: a 46,346-token prompt that reached 17,664 tokens in 1,819 s was
+     * recorded as "evaluated=46346 rate=25.48" when the real rate was ~9.7 t/s.
+     * That is the same error as dividing a prompt by a truncated wall clock and
+     * calling it throughput -- it inflates the number precisely when the run
+     * failed. See [[perf-screens-need-interleaved-baselines]].
+     */
+    size_t evaluated;
+    /*
      * Present when the response is streaming, so prefill can keep the
      * connection alive. A cold prefill emits no tokens for minutes, and a
      * client that sees no bytes at all concludes the request is dead --
@@ -1660,6 +1675,11 @@ static bool prefill_progress(void *context, size_t done, size_t total)
 {
     prefill_request_context *request = (prefill_request_context *)context;
     server_runtime *runtime = request->runtime;
+    /* Unconditionally, ahead of the throttle below: the last value seen is what
+     * a stopped prefill has to report, and it must not depend on whether the
+     * tick happened to fire on the final chunk. */
+    request->evaluated = done;
+    (void)total;
     if (request->stop == MIMO26_SLOT_CONTINUE) {
         request->stop = request_control(runtime, request->client);
         if (request->stop == MIMO26_SLOT_CONTINUE) {
@@ -1931,9 +1951,16 @@ static void handle_chat(server_runtime *runtime, int fd,
     if (state.streaming && !stream_begin(&state)) {
         mimo26_slot_cancel(&runtime->slot);
     }
+    /* Designated, not positional: this was positional, so adding a field in the
+     * middle of the struct silently shifted &state into it. */
     prefill_request_context progress_context = {
-        runtime, fd, request_control(runtime, fd),
-        state.streaming ? &state : NULL, now_seconds(), now_seconds()};
+        .runtime = runtime,
+        .client = fd,
+        .stop = request_control(runtime, fd),
+        .evaluated = 0u,
+        .stream = state.streaming ? &state : NULL,
+        .last_keepalive = now_seconds(),
+        .prefill_started = now_seconds()};
     if (progress_context.stop != MIMO26_SLOT_CONTINUE) {
         /* No work or logits to consume when already stopped before prefill. */
     } else if (mimo26_gpu_worker_prefill(runtime->worker, prompt.ids + reuse,
@@ -1949,11 +1976,20 @@ static void handle_chat(server_runtime *runtime, int fd,
         publish_prefix_checkpoint(runtime, prompt.ids, prompt.count);
     }
     prefill_seconds = now_seconds() - prefill_started;
+    /*
+     * A stopped prefill reports what it evaluated, not what it was asked to.
+     * `stopped` is also logged so a reader never has to infer from a rate why
+     * evaluated is short of the prompt.
+     */
+    const bool prefill_stopped = progress_context.stop != MIMO26_SLOT_CONTINUE;
+    const size_t prefill_evaluated =
+        prefill_stopped ? progress_context.evaluated : prompt.count - reuse;
     server_log("INFO", "request.prefill.complete", runtime->inflight_id,
-               "evaluated=%zu reused=%zu seconds=%.3f rate=%.2f",
-               prompt.count - reuse, reuse, prefill_seconds,
+               "evaluated=%zu of=%zu reused=%zu stopped=%s seconds=%.3f rate=%.2f",
+               prefill_evaluated, prompt.count - reuse, reuse,
+               prefill_stopped ? "true" : "false", prefill_seconds,
                prefill_seconds > 0.0
-                   ? (double)(prompt.count - reuse) / prefill_seconds : 0.0);
+                   ? (double)prefill_evaluated / prefill_seconds : 0.0);
     server_log("INFO", "request.decode.start", runtime->inflight_id, "");
     const double decode_started = now_seconds();
     if (failed) {
@@ -2220,14 +2256,15 @@ static void handle_chat(server_runtime *runtime, int fd,
                 "\"created\":%ld,\"model\":\"%s\",\"choices\":[{\"index\":0,"
                 "\"message\":{\"role\":\"assistant\",\"content\":%s,"
                 "\"reasoning_content\":%s,\"tool_calls\":%s},"
-                "\"finish_reason\":\"%s\"}],\"usage\":{"
+                "\"finish_reason\":\"%s\","
+                "\"x_moonshine_finish\":\"%s\"}],\"usage\":{"
                 "\"prompt_tokens\":%zu,\"completion_tokens\":%zu,"
                 "\"total_tokens\":%zu}}",
                 state.id, state.created, MODEL_ID,
                 escaped != NULL ? escaped : "\"\"",
                 escaped_reasoning != NULL ? escaped_reasoning : "null",
                 calls_text != NULL ? calls_text : "null",
-                finish_reason, prompt.count,
+                mimo26_slot_wire_finish_reason(finish_reason), finish_reason, prompt.count,
                 produced_tokens, prompt.count + produced_tokens);
             if (size > 0) {
                 send_response(fd, 200, "OK", "application/json", body,

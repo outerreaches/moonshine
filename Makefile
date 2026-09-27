@@ -738,6 +738,9 @@ test-mimo26-next-use-cache: tests/test_mimo26_next_use_cache
 tests/test_mimo26_server_options: tests/test_mimo26_server_options.c \
 	mimo26_server_options.h mimo26_gpu_worker.h
 	$(CC) $(CFLAGS) -I. -o $@ $<
+tests/test_mimo26_finish_reason: tests/test_mimo26_finish_reason.c \
+	mimo26_server_slot.c mimo26_server_slot.h
+	$(CC) $(CFLAGS) -I. -o $@ tests/test_mimo26_finish_reason.c mimo26_server_slot.c
 
 # Compile the actual server callback into a CPU-only socket regression;
 # unused GPU entry points are discarded, not linked or initialized.

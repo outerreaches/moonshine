@@ -197,6 +197,37 @@ const char *mimo26_slot_phase_name(mimo26_slot_phase phase)
     return "unknown";
 }
 
+/*
+ * The stop reason as a value the OpenAI chat-completions schema actually
+ * defines: stop, length, tool_calls, content_filter, function_call.
+ *
+ * Internally this lane uses a richer vocabulary -- "deadline", "cancelled",
+ * "shutdown" -- which is right for /health, the structured log and the
+ * qualification battery, and wrong on the wire. A strict client rejects the
+ * whole response: on 2026-09-27 the DeepSeek harness reported
+ *
+ *     This turn failed  Provider finish_reason: deadline  PI_AI_ERROR
+ *
+ * so a request that had legitimately run out of time looked like a protocol
+ * fault, and the operator saw an error rather than "this prompt is too long for
+ * the deadline".
+ *
+ * "deadline" and "shutdown" become "length": the schema's word for stopped-at-a-
+ * limit, which is truthful -- generation ended early rather than at a natural
+ * end. "cancelled" becomes "stop" and is moot, since the socket is already gone.
+ * Derived from the same string the logs use, rather than tracked in a second
+ * variable, so a new internal reason cannot be emitted on the wire by accident:
+ * anything unrecognised is passed through and will be caught by the schema test.
+ */
+const char *mimo26_slot_wire_finish_reason(const char *internal)
+{
+    if (internal == NULL) return "stop";
+    if (!strcmp(internal, "deadline") || !strcmp(internal, "shutdown"))
+        return "length";
+    if (!strcmp(internal, "cancelled")) return "stop";
+    return internal;   /* stop, length and tool_calls are already valid */
+}
+
 const char *mimo26_slot_finish_reason(mimo26_slot_step step)
 {
     switch (step) {

@@ -146,6 +146,11 @@ bool mimo26_slot_ready(const mimo26_slot *slot);
 const char *mimo26_slot_phase_name(mimo26_slot_phase phase);
 const char *mimo26_slot_finish_reason(mimo26_slot_step step);
 
+/* The same reason as a value the OpenAI chat-completions schema defines. See
+ * the definition for why "deadline" becomes "length"; tests/test_mimo26_finish_reason
+ * asserts every internal reason maps to something a strict client accepts. */
+const char *mimo26_slot_wire_finish_reason(const char *internal);
+
 #ifdef __cplusplus
 }
 #endif
