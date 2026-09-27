@@ -1799,7 +1799,24 @@ mimo26_gpu_worker_status mimo26_gpu_worker_prefill(
         /* Between chunks is the only safe place to yield: a chunk is
          * transactional across all 48 layers, so stopping inside one would
          * leave the journal half-written. */
-        if (progress != NULL && !progress(progress_context, done, count)) {
+        /*
+         * A stop with every token already evaluated is not worth honouring.
+         *
+         * The callback runs after the final chunk too, so a deadline landing
+         * there discarded a fully-evaluated prompt: the KV was complete, only the
+         * final logits were missing. That wasted the entire prefill -- up to 30
+         * minutes of it -- and left a checkpoint the retry could not even use,
+         * because exact-prefix admission requires at least two tokens after the
+         * retained prefix and a full-prompt checkpoint leaves none.
+         *
+         * What remains after the loop is one rmsnorm and one vocab GEMV over a
+         * single position: microseconds against the wall already spent. Bounding
+         * work is what the deadline is for, and there is no meaningful work left
+         * to bound, so finish.
+         */
+        const bool everything_evaluated = done >= count;
+        if (progress != NULL && !progress(progress_context, done, count) &&
+            !everything_evaluated) {
             retention_guard.completed = true; /* committed chunk boundary */
             return fail(error, error_size, MIMO26_GPU_WORKER_OK,
                         "prefill stopped after %zu of %zu tokens", done,

@@ -552,6 +552,7 @@ typedef struct {
      * sample. */
     char               last_id[64];
     size_t             last_prompt_tokens;
+    size_t             last_evaluated_tokens;   /* prefill actually computed */
     size_t             last_completion_tokens;
     size_t             last_reused_tokens;
     double             last_prefill_seconds;
@@ -870,9 +871,28 @@ static bool stop_produced_nothing(const char *internal, size_t generated)
            (!strcmp(internal, "deadline") || !strcmp(internal, "shutdown"));
 }
 
+/* Mirrors K3_PREFIX_REUSE_MIN_SUFFIX in k3_prefix_reuse.c: exact-prefix
+ * admission requires this many tokens after the retained prefix. */
+enum { PREFIX_RETRY_MIN_SUFFIX = 2u };
+
 enum { MIMO26_KV_NUMERICS_VERSION = 1u };
 
-static void publish_prefix_checkpoint(server_runtime *runtime,
+/*
+ * What happened when a checkpoint was offered, so a client is told the truth.
+ *
+ * The responses used to promise unconditionally that "the evaluated prefix was
+ * checkpointed, so retrying resumes from it". Publication can decline for five
+ * reasons, and even a successful publish is useless to an IDENTICAL retry if it
+ * covers the whole prompt: exact-prefix admission requires at least
+ * K3_PREFIX_REUSE_MIN_SUFFIX tokens after the retained prefix.
+ */
+typedef struct {
+    bool   stored;        /* an entry now exists covering `retained` tokens */
+    bool   resumable;     /* ...and an identical retry can actually use it */
+    size_t retained;
+} prefix_publish_outcome;
+
+static prefix_publish_outcome publish_prefix_checkpoint(server_runtime *runtime,
                                       const uint32_t *ids, size_t count)
 {
     /*
@@ -894,12 +914,12 @@ static void publish_prefix_checkpoint(server_runtime *runtime,
                    "reason=%s tokens=%zu position=%llu floor=%u", refusal, count,
                    (unsigned long long)mimo26_gpu_worker_position(runtime->worker),
                    (unsigned)PREFIX_PUBLISH_MIN_TOKENS);
-        return;
+        return (prefix_publish_outcome){false, false, 0u};
     }
     size_t existing = SIZE_MAX;
     if (k3_prefix_bundle_find_exact(runtime->prefix_bundle, ids, count,
                                     &existing)) {
-        return;   /* already stored */
+        return (prefix_publish_outcome){true, false, count};  /* already stored */
     }
     char id[33];
     char state_path[PATH_MAX];
@@ -909,7 +929,7 @@ static void publish_prefix_checkpoint(server_runtime *runtime,
                                               sizeof state_path, error,
                                               sizeof error)) {
         fprintf(stderr, "mimo26: checkpoint path refused: %s\n", error);
-        return;
+        return (prefix_publish_outcome){false, false, 0u};
     }
     mimo26_kv_state_info info;
     if (mimo26_gpu_worker_export_state(runtime->worker, state_path, &info,
@@ -917,7 +937,7 @@ static void publish_prefix_checkpoint(server_runtime *runtime,
         MIMO26_GPU_WORKER_OK) {
         fprintf(stderr, "mimo26: checkpoint export failed: %s\n", error);
         (void)remove(state_path);
-        return;
+        return (prefix_publish_outcome){false, false, 0u};
     }
     k3_engine_state_file_info state_info;
     prefix_state_info(&info, &state_info);
@@ -930,13 +950,14 @@ static void publish_prefix_checkpoint(server_runtime *runtime,
                                   sizeof error)) {
         fprintf(stderr, "mimo26: checkpoint publish failed: %s\n", error);
         (void)remove(state_path);
-        return;
+        return (prefix_publish_outcome){false, false, 0u};
     }
     runtime->prefix_disk_publishes++;
     runtime->prefix_entries = k3_prefix_bundle_count(runtime->prefix_bundle);
     fprintf(stderr, "mimo26: checkpoint published, %zu tokens, %.1f MiB, "
             "%.3f s\n", count,
             (double)info.file_bytes / (1024.0 * 1024.0), info.wall_seconds);
+    return (prefix_publish_outcome){true, false, count};
 }
 
 #define MAX_RECOVERY_ATTEMPTS 3u
@@ -1020,6 +1041,7 @@ static int render_health(server_runtime *runtime, char *body, size_t limit)
         "\"inflight_since_epoch\":%.3f,\"inflight_prompt_tokens\":%zu,"
         "\"now_epoch\":%.3f,"
         "\"last_id\":\"%s\",\"last_prompt_tokens\":%zu,"
+        "\"last_evaluated_tokens\":%zu,"
         "\"last_completion_tokens\":%zu,\"last_reused_tokens\":%zu,"
         "\"last_from_disk\":%s,\"last_finish\":\"%s\","
         "\"last_prefill_seconds\":%.2f,\"last_decode_seconds\":%.2f,"
@@ -1071,12 +1093,13 @@ static int render_health(server_runtime *runtime, char *body, size_t limit)
         runtime->inflight ? runtime->inflight_prompt : (size_t)0,
         wall_clock_epoch(),
         runtime->last_id, runtime->last_prompt_tokens,
+        runtime->last_evaluated_tokens,
         runtime->last_completion_tokens, runtime->last_reused_tokens,
         runtime->last_from_disk ? "true" : "false", runtime->last_finish,
         runtime->last_prefill_seconds, runtime->last_decode_seconds,
         runtime->last_total_seconds,
         runtime->last_prefill_seconds > 0.0
-            ? (double)(runtime->last_prompt_tokens - runtime->last_reused_tokens)
+            ? (double)runtime->last_evaluated_tokens
                   / runtime->last_prefill_seconds : 0.0,
         runtime->last_decode_seconds > 0.0
             ? (double)runtime->last_completion_tokens
@@ -2003,6 +2026,7 @@ static void handle_chat(server_runtime *runtime, int fd,
     }
     /* Designated, not positional: this was positional, so adding a field in the
      * middle of the struct silently shifted &state into it. */
+    prefix_publish_outcome checkpoint = {false, false, 0u};
     prefill_request_context progress_context = {
         .runtime = runtime,
         .client = fd,
@@ -2023,7 +2047,7 @@ static void handle_chat(server_runtime *runtime, int fd,
         next = mimo26_gpu_worker_argmax(logits);
         /* The prompt is now evaluated and nothing has been generated on top,
          * which is exactly the state a later turn can continue from. */
-        publish_prefix_checkpoint(runtime, prompt.ids, prompt.count);
+        checkpoint = publish_prefix_checkpoint(runtime, prompt.ids, prompt.count);
     } else if (progress_context.evaluated > 0u) {
         /*
          * RESUMABLE PREFILL. The prefill ran out of time (or the client left)
@@ -2053,8 +2077,25 @@ static void handle_chat(server_runtime *runtime, int fd,
          * reused prefix and counts from there, while a checkpoint is keyed by
          * the absolute token sequence.
          */
-        publish_prefix_checkpoint(runtime, prompt.ids,
-                                  reuse + progress_context.evaluated);
+        /*
+         * Cap the stored prefix so an IDENTICAL retry can actually use it.
+         *
+         * Exact-prefix admission needs at least K3_PREFIX_REUSE_MIN_SUFFIX (2)
+         * tokens after the retained prefix, so a checkpoint covering the whole
+         * prompt is inadmissible for a retry of that same prompt -- which is
+         * precisely the retry this path exists to help. Storing two tokens fewer
+         * costs two tokens of recomputation and makes the entry usable. It
+         * remains a valid prefix for a longer follow-up turn either way.
+         */
+        size_t retain = reuse + progress_context.evaluated;
+        if (retain + PREFIX_RETRY_MIN_SUFFIX > prompt.count) {
+            retain = prompt.count > PREFIX_RETRY_MIN_SUFFIX
+                         ? prompt.count - PREFIX_RETRY_MIN_SUFFIX : 0u;
+        }
+        checkpoint = publish_prefix_checkpoint(runtime, prompt.ids, retain);
+        checkpoint.resumable = checkpoint.stored && checkpoint.retained > reuse &&
+                               checkpoint.retained + PREFIX_RETRY_MIN_SUFFIX <=
+                                   prompt.count;
     }
     prefill_seconds = now_seconds() - prefill_started;
     /*
@@ -2079,9 +2120,23 @@ static void handle_chat(server_runtime *runtime, int fd,
         fprintf(stderr, "mimo26 request %s: prefill failed: %s\n",
                 state.id, error);
         if (state.headers_sent) {
-            /* The stream is already open, so the status line is spent. Close
-             * it the way a client can detect rather than pretending. */
-            stream_chunk(&state, NULL, 0, "error");
+            /*
+             * The stream is already open, so the status line is spent. Close it
+             * the way a client can detect rather than pretending.
+             *
+             * This used to send finish_reason "error", which is NOT a value the
+             * chat-completions schema defines -- so it reproduced exactly the
+             * strict-client rejection that the deadline repair was for, and the
+             * slot-stop mapping tests never covered it because this string never
+             * passes through the enum. An error FRAME says the same thing in a
+             * shape clients parse, and matches the zero-token deadline path.
+             */
+            char frame[512];
+            const int size = snprintf(frame, sizeof frame,
+                "data: {\"error\":{\"message\":\"the worker faulted during "
+                "prefill and is quarantined\",\"type\":\"server_error\","
+                "\"code\":\"prefill_failed\"}}\n\n");
+            if (size > 0) send_all(fd, frame, (size_t)size);
             const char *done = "data: [DONE]\n\n";
             send_all(fd, done, strlen(done));
         } else {
@@ -2307,12 +2362,17 @@ static void handle_chat(server_runtime *runtime, int fd,
             const int size = snprintf(frame, sizeof frame,
                 "data: {\"error\":{\"message\":\"%s reached after %.0fs before "
                 "any token was generated; evaluated %zu of %zu prompt tokens "
-                "(%zu reused). The evaluated prefix was checkpointed, so "
-                "retrying resumes from it.\",\"type\":\"server_error\","
+                "(%zu reused). %s\",\"type\":\"server_error\","
                 "\"code\":\"%s\"}}\n\n",
                 !strcmp(finish_reason, "deadline")
                     ? "request deadline" : "server shutdown",
                 prefill_seconds, prefill_evaluated + reuse, prompt.count, reuse,
+                checkpoint.resumable
+                    ? "Retrying the same request resumes from the checkpoint."
+                    : (checkpoint.stored
+                           ? "A checkpoint was stored but an identical retry "
+                             "cannot resume from it."
+                           : "No checkpoint was stored."),
                 !strcmp(finish_reason, "deadline")
                     ? "deadline_exceeded" : "server_shutdown");
             if (size > 0) send_all(fd, frame, (size_t)size);
@@ -2332,15 +2392,27 @@ static void handle_chat(server_runtime *runtime, int fd,
          */
         if (stop_produced_nothing(finish_reason, produced_tokens)) {
             char detail[512];
+            /* Only promise resumption when usable state actually exists. The
+             * first version of this message promised it unconditionally, while
+             * publication can decline for five reasons and a whole-prompt entry
+             * is inadmissible for an identical retry. */
             snprintf(detail, sizeof detail,
                      "%s reached after %.0fs before any token was generated; "
-                     "evaluated %zu of %zu prompt tokens (%zu reused). The "
-                     "evaluated prefix was checkpointed, so retrying the same "
-                     "request resumes from it rather than restarting.",
+                     "evaluated %zu of %zu prompt tokens (%zu reused). %s",
                      !strcmp(finish_reason, "deadline")
                          ? "request deadline" : "server shutdown",
                      prefill_seconds, prefill_evaluated + reuse, prompt.count,
-                     reuse);
+                     reuse,
+                     checkpoint.resumable
+                         ? "The evaluated prefix was checkpointed, so retrying "
+                           "the same request resumes from it rather than "
+                           "restarting."
+                         : (checkpoint.stored
+                                ? "A checkpoint was stored but an identical "
+                                  "retry cannot resume from it; a longer "
+                                  "follow-up request can."
+                                : "No checkpoint was stored, so a retry starts "
+                                  "from the beginning."));
             send_error(fd, 504, "Gateway Timeout",
                        !strcmp(finish_reason, "deadline")
                            ? "deadline_exceeded" : "server_shutdown", detail);
@@ -2412,6 +2484,19 @@ static void handle_chat(server_runtime *runtime, int fd,
         snprintf(runtime->last_finish, sizeof runtime->last_finish, "%s",
                  finish_reason);
         runtime->last_prompt_tokens = prompt.count;
+        /*
+         * Evaluated, distinct from requested and from reused.
+         *
+         * The health rates divided (last_prompt_tokens - last_reused_tokens) by
+         * the prefill wall, which is the tokens the request ASKED for. After an
+         * early stop that overstates throughput -- by 2.62x on the recorded
+         * 46,346-token request that evaluated 17,664 -- and it disagreed with the
+         * structured logs, which were fixed to use the evaluated count while
+         * these two surfaces were not. The comment two lines below already gives
+         * the reason for excluding reused tokens; unevaluated ones are the same
+         * argument.
+         */
+        runtime->last_evaluated_tokens = prefill_evaluated;
         runtime->last_completion_tokens = produced_tokens;
         runtime->last_reused_tokens = reuse;
         runtime->last_from_disk = reuse > 0 && from_disk_reuse;
@@ -2421,8 +2506,8 @@ static void handle_chat(server_runtime *runtime, int fd,
         /* Only tokens actually evaluated count toward a prefill rate; the
          * reused ones were restored, and folding them in would report a rate
          * the engine never achieved. */
-        if (prompt.count > reuse && prefill_seconds > 0.0) {
-            runtime->window_prefill_tokens += (double)(prompt.count - reuse);
+        if (prefill_evaluated > 0u && prefill_seconds > 0.0) {
+            runtime->window_prefill_tokens += (double)prefill_evaluated;
             runtime->window_prefill_seconds += prefill_seconds;
         }
         if (produced_tokens > 0 && decode_seconds > 0.0) {

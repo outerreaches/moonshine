@@ -26,10 +26,26 @@
  * context costs nothing further. If it does not, the difference is exactly the
  * headroom a long session will consume after the guard has already approved it.
  *
- * WHAT THIS IS NOT: the KV is allocated and written directly, with no model and
- * no prefill. It measures what a full KV costs the host. It does not establish
- * that a 131,072-token request completes, which needs hours of real ingest and
- * remains open.
+ * WHAT THIS IS NOT -- and this is a bigger gap than first recorded.
+ *
+ * The buffers here are hipMalloc'd. The server's persistent KV is host calloc
+ * (mimo26_kv.c:115-143) with a 128-position sliding window, not the 256 used
+ * below, and the expert-slot pool is preallocated rather than grown on admission
+ * (mimo26_gpu_worker.cu:1185-1190). So this measures the GTT cost of a
+ * same-sized synthetic allocation, NOT the memory behaviour of the real KV path.
+ *
+ * The 2026-09-27 review caught that after the result had already been used to
+ * "correct" a note about headroom during a filling context. It could not support
+ * that conclusion, and the correction has been retracted. The lesson is narrower
+ * than "use an external reference": GTT was the right instrument and still
+ * measured the wrong subject, because the test did not allocate the way
+ * production allocates.
+ *
+ * Retained deliberately, as an honest measurement of what it does cover, and as
+ * the arithmetic check on the geometry. Real-path memory qualification -- through
+ * mimo26_kv_create and the stage/commit path, separating host KV, device staging,
+ * journal and expert pool, with RSS/PSS as well as GTT -- remains open, as does
+ * an end-to-end deep request.
  */
 #include "mimo26_architecture.h"
 #include "mimo26_attention.h"
