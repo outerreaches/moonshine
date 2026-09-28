@@ -53,10 +53,12 @@ refer to engineering records kept outside this repository.
 
 ## What is Moonshine?
 
-Moonshine is a purpose-built inference engine for running the official Kimi K3
-SafeTensors checkpoint on one 128 GB AMD Strix Halo system. It keeps the
+Moonshine is a purpose-built inference engine for running large official
+SafeTensors checkpoints on one 128 GB AMD Strix Halo system. It keeps the
 non-routed model tier resident in ROCm memory and streams only selected MXFP4
-routed experts from local NVMe.
+routed experts from local NVMe. Kimi K3 is the lane this README documents
+throughout; MiMo V2.6 Flash is served by a second, separately built binary
+([Running MiMo V2.6 Flash](#running-mimo-v26-flash)).
 
 Moonshine is a research preview, not a general model runner. It currently
 provides:
@@ -76,7 +78,8 @@ The supported profile is deliberately narrow:
 
 - x86-64 Linux and ROCm only;
 - tested on `gfx1151` with ROCm 7.2;
-- the pinned official 96-shard Kimi K3 checkpoint;
+- the pinned official 96-shard Kimi K3 checkpoint, or the pinned
+  `XiaomiMiMo/MiMo-V2.6-Flash-RL` checkpoint on the MiMo lane;
 - Q8 static residency with dynamically allocated context, capacity-qualified
   through 128K;
 - greedy next-token inference;
