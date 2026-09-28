@@ -11,12 +11,13 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from mimo26_evidence import evidence_root
 
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--output',type=Path,required=True)
 a=p.parse_args(); out=a.output; out.mkdir()
 repo=Path(__file__).resolve().parents[1]
-vault=Path('/home/alex/Obsidian/beelink-knowledge/Projects/Moonshine/Evidence')
+vault=evidence_root()
 base=vault/'mimo26-takeover-20260922/route'
 worker=vault/'mimo26-guarded-reset-20260922/final'
 r=dict(complete=False,passed=False,commands=[],runs=[],inputs={})

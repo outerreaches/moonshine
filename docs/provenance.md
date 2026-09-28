@@ -46,6 +46,28 @@ The engine implements the tensor layout and graph described by:
 The model weights are not included and are not covered by this repository's
 MIT license.
 
+### GLM 5.3 Flash, and model-derived goldens
+
+The GLM 5.3 Flash component work references the official
+[`zai-org/GLM-5.3-Flash`](https://huggingface.co/zai-org/GLM-5.3-Flash) release,
+pinned at revision `04c4e9e95c5da8862dced7e5056455116f83a7e0`, with its
+`config.json` and `model.safetensors.index.json` digests recorded in
+`tests/fixtures/glm53_phase4_reference.json`. Equations were checked against
+Transformers GLM support at `eb4d9e2a64a013bec12289288b85d0b1210ba0aa` and
+llama.cpp PR 27773 at `a771613af20f3dc60247e4b6a3d11516f0664673`.
+
+The Phase-4 golden arrays are computed **by running those official weights**, so
+they are model-derived data governed by the publisher's terms rather than by this
+repository's MIT license, and their bytes are **not committed here**. What is
+committed is the provenance needed to rebuild and then check them: source
+identity, shard and tensor names, digests, synthetic input formulas, tolerances,
+and each golden's SHA-256. See `docs/glm53-phase4-goldens.md` for the
+regeneration rules, and for the one golden that still lacks a generator.
+
+The same line applies to the K3 and MiMo material described below: pinned digests
+and descriptions of a derived representation belong in the repository; bulk
+weight-derived payloads do not.
+
 ## Validation oracles
 
 The following projects informed validation but are not runtime dependencies:

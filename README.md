@@ -616,6 +616,18 @@ make test-cpu
 make test
 ```
 
+### Two environment variables the deeper gates need
+
+- **`MOONSHINE_EVIDENCE_ROOT`** — the gates in `tests/run_mimo26_*.py` compare
+  against artifacts from earlier qualification runs (prior reports, pinned worker
+  builds, recorded routes), which are kept outside this repository. Point this at
+  that tree; unset, each one refuses with an instruction rather than a stray
+  `FileNotFoundError`.
+- **`GLM53_OFFICIAL_ROOT`** — required by every `test-glm53-*-official` target.
+  It also regenerates the Phase-4 goldens, which are derived from official
+  weights and so are not committed; see
+  [docs/glm53-phase4-goldens.md](docs/glm53-phase4-goldens.md).
+
 ### Locked full-engine fixture
 
 Stop other large inference processes, confirm memory and swap state, then run:

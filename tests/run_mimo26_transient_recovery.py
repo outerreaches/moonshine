@@ -12,9 +12,10 @@ import time
 import urllib.error
 import urllib.request
 from run_mimo26_server_lookahead_gate import A, MODEL, sha
+from mimo26_evidence import evidence_root
 
 REPO=Path(__file__).resolve().parents[1]
-BASE=Path('/home/alex/Obsidian/beelink-knowledge/Projects/Moonshine/Evidence/mimo26-server-lookahead-20260923/server')
+BASE=evidence_root()/'mimo26-server-lookahead-20260923/server'
 
 
 def main():

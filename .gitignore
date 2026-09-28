@@ -6,19 +6,26 @@ core.*
 /moonshine-chat
 /moonshine-server
 /tools/screen_static_q8
-/tools/mimo26_dump_ops
-/tools/mimo26_dump_rope
-/tools/mimo26_dump_weights
-/tools/mimo26_run
-/tools/mimo26_eval
-/tools/mimo26_gpu_bench
-/tools/mimo26_gpu_run
-/tools/mimo26_server
 /tests/mimo26_server_prefill_gate
-/tools/mimo26_context_gate
+# Linked tools, as a pattern rather than a list, for the same reason as the gate
+# binaries below: the list omitted /tools/mimo26_gpu_eval, so a 1.15 MB ROCm
+# binary was committed in a1de695 and went unnoticed. Every tool here builds
+# from a same-named source, so the negations are exhaustive.
+/tools/mimo26_*
+!/tools/mimo26_*.c
+!/tools/mimo26_*.cu
+!/tools/mimo26_*.h
+!/tools/mimo26_*.py
 mimo26-eval.jsonl
 mimo26-eval-tokens.txt
 /tools/transcode_mzg2_layer
+
+# Phase-4 goldens derived from official GLM-5.3-Flash weights. Provenance and
+# digests are committed; the bytes are regenerated locally. See
+# docs/glm53-phase4-goldens.md.
+/tests/fixtures/glm53_phase4_components.bin
+/tests/fixtures/glm53_phase4_kda_v1.bin
+/tests/fixtures/glm53_official_projection_f32.bin
 tests/test_k3_*
 !tests/test_k3_*.c
 !tests/test_k3_*.cu

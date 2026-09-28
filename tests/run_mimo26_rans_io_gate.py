@@ -9,9 +9,10 @@ import subprocess
 import sys
 import tempfile
 import time
+from mimo26_evidence import evidence_root
 
 REPO=Path(__file__).resolve().parents[1]
-VAULT=Path('/home/alex/Obsidian/beelink-knowledge/Projects/Moonshine/Evidence')
+VAULT=evidence_root()
 SCREEN=VAULT/'mimo26-takeover-20260922/rans/report.json'
 BUILD=VAULT/'mimo26-lookahead-long-20260923/chunk64-on/report.json'
 SOURCES=('tests/mimo26_rans_io_gate.cu','tests/mimo26_rans_gpu_gate.cu','tests/mimo26_rans_screen.cpp',

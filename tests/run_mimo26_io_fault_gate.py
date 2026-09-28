@@ -6,13 +6,14 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
+from mimo26_evidence import evidence_root
 
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--output',type=Path,required=True)
 p.add_argument('--lookahead-build',type=Path)
 a=p.parse_args(); out=a.output; out.mkdir()
 repo=Path(__file__).resolve().parents[1]
-vault=Path('/home/alex/Obsidian/beelink-knowledge/Projects/Moonshine/Evidence')
+vault=evidence_root()
 base=vault/'mimo26-takeover-20260922/route'
 workerbase=vault/'mimo26-guarded-reset-20260922/final'
 if a.lookahead_build:workerbase=a.lookahead_build

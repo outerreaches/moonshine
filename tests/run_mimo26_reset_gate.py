@@ -6,9 +6,10 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
+from mimo26_evidence import evidence_root
 
 repo=Path(__file__).resolve().parents[1]
-base=Path('/home/alex/Obsidian/beelink-knowledge/Projects/Moonshine/Evidence/mimo26-takeover-20260922/route')
+base=evidence_root()/'mimo26-takeover-20260922/route'
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--output',type=Path,default=Path('/tmp/mimo26-reset-gate-20260922'))
 parser.add_argument('--reuse-baseline',type=Path)

@@ -941,12 +941,28 @@ test-glm53-phase5b-full: tests/test_glm53_phase5b_loader_official
 		(echo "set GLM53_OFFICIAL_ROOT to the verified official artifact" >&2; exit 2)
 	./tests/test_glm53_phase5b_loader_official "$(GLM53_OFFICIAL_ROOT)" full
 
+# Phase-4 goldens are derived from official zai-org/GLM-5.3-Flash weights, so the
+# repository carries their provenance and digests but not their bytes. These two
+# regenerate from the caller's own checkpoint; both generators refuse a source
+# whose identity does not match the pin.
+tests/fixtures/glm53_phase4_components.bin: \
+		tests/generate_glm53_phase4_component_fixture.py
+	@test -n "$(GLM53_OFFICIAL_ROOT)" || \
+		(echo "set GLM53_OFFICIAL_ROOT to regenerate $@" >&2; exit 2)
+	$(PYTHON) $< "$(GLM53_OFFICIAL_ROOT)" $@ \
+		tests/fixtures/glm53_phase4_components.json
+
+tests/fixtures/glm53_phase4_kda_v1.bin: \
+		tests/generate_glm53_phase4_kda_fixture.py
+	@test -n "$(GLM53_OFFICIAL_ROOT)" || \
+		(echo "set GLM53_OFFICIAL_ROOT to regenerate $@" >&2; exit 2)
+	$(PYTHON) $< "$(GLM53_OFFICIAL_ROOT)" --output $@
+
 test-glm53-phase4-official: tests/test_glm53_architecture_official \
 		tests/test_glm53_official_components tests/test_glm53_official_kda \
 		tests/test_glm53_official_projection \
 		tests/verify_glm53_phase4_reference.py \
 		tests/fixtures/glm53_phase4_reference.json \
-		tests/fixtures/glm53_official_projection_f32.bin \
 		tests/fixtures/glm53_phase4_kda_v1.json \
 		tests/fixtures/glm53_phase4_kda_v1.bin \
 		tests/fixtures/glm53_phase4_components.json \
@@ -966,8 +982,18 @@ test-glm53-phase4-official: tests/test_glm53_architecture_official \
 		tests/fixtures/glm53_phase4_components.bin
 	./tests/test_glm53_official_kda \
 		tests/fixtures/glm53_phase4_kda_v1.bin
-	./tests/test_glm53_official_projection "$(GLM53_OFFICIAL_ROOT)" \
-		tests/fixtures/glm53_official_projection_f32.bin
+	@# The projection golden has no in-tree generator: nothing here reproduces the
+	@# reduction order its digest pins. Skip loudly rather than fail the other
+	@# four checks, and name what a reconstruction has to match.
+	@if [ -f tests/fixtures/glm53_official_projection_f32.bin ]; then \
+		./tests/test_glm53_official_projection "$(GLM53_OFFICIAL_ROOT)" \
+			tests/fixtures/glm53_official_projection_f32.bin; \
+	else \
+		echo "SKIP test_glm53_official_projection: golden absent"; \
+		echo "     derived from official weights, so not committed, and no"; \
+		echo "     generator in this tree reproduces it -- see"; \
+		echo "     docs/glm53-phase4-goldens.md"; \
+	fi
 
 test-cache-analyzer:
 	PYTHONDONTWRITEBYTECODE=1 \

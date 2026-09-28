@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
+from mimo26_evidence import evidence_root
 
 p=argparse.ArgumentParser(description=__doc__);p.add_argument('--output',type=Path,required=True)
 p.add_argument('--candidate',action='store_true');p.add_argument('--reference',type=Path)
@@ -18,7 +19,7 @@ assert 1<=a.tokens<=8192 and 1<=a.chunk<=128 and 0<a.timeout<=3600
 assert not a.default_off or a.candidate
 assert not (a.candidate and not a.default_off) or a.reference,'lookahead requires an exact-output reference'
 out=a.output;out.mkdir();repo=Path(__file__).resolve().parents[1]
-vault=Path('/home/alex/Obsidian/beelink-knowledge/Projects/Moonshine/Evidence')
+vault=evidence_root()
 base=vault/'mimo26-takeover-20260922/route';worker=vault/'mimo26-guarded-reset-20260922/final'
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 r=dict(complete=False,passed=False,candidate=a.candidate,lookahead_enabled=a.candidate and not a.default_off,commands=[],inputs={},memory=[])

@@ -66,10 +66,20 @@ with shard.open('rb') as f:
     for key,field in [(p['weight_name'],'weight_sha256'),(p['scale_name'],'scale_sha256')]:
         begin,end=header[key]['data_offsets']; f.seek(data+begin)
         if hashlib.sha256(f.read(end-begin)).hexdigest()!=p[field]: fail(field)
-if len(out_path.read_bytes())!=p['rows']*4: fail('reference F32 byte length')
-if sha(out_path)!=p['reference_f32_sha256']: fail('reference F32 SHA-256')
 if p['reference_f32_sha256']!=p['diagnostic_sequential_f32_sha256']:
     fail('reference/diagnostic digest mismatch')
+# The projection golden is derived from official weights and is deliberately not
+# committed. Its digest stays pinned here, so a locally reconstructed golden is
+# still checked; an absent one is announced rather than silently passed over.
+projection_checked=out_path.exists()
+if projection_checked:
+    if len(out_path.read_bytes())!=p['rows']*4: fail('reference F32 byte length')
+    if sha(out_path)!=p['reference_f32_sha256']: fail('reference F32 SHA-256')
+else:
+    print(f'SKIP projection golden absent: {out_path}')
+    print(f'     any reconstruction must hash to {p["reference_f32_sha256"]}')
 for i in range(0,len(extra),2):
     verify_extra_fixture(extra[i],extra[i+1],root,idx,o)
-print(f'PASS phase4 pinned provenance and logical payload hashes extra_fixtures={len(extra)//2}')
+print(f'PASS phase4 pinned provenance and logical payload hashes '
+      f'extra_fixtures={len(extra)//2} projection_golden='
+      f'{"checked" if projection_checked else "absent"}')

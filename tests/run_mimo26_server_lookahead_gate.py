@@ -17,10 +17,13 @@ import time
 import urllib.error
 import urllib.request
 from build_mimo26_candidate import build_fresh
+from mimo26_evidence import evidence_root
 
 REPO = Path(__file__).resolve().parents[1]
 MODEL = '/srv/modelstore/models/XiaomiMiMo__MiMo-V2.6-Flash-RL'
-DEFAULT_BUILD = Path('/home/alex/Obsidian/beelink-knowledge/Projects/Moonshine/Evidence/mimo26-lookahead-long-20260923/chunk64-on')
+# Resolved only when --worker-build is absent, so supplying one does not oblige
+# the caller to have an evidence tree at all.
+DEFAULT_BUILD_RUN = 'mimo26-lookahead-long-20260923/chunk64-on'
 
 
 def sha(path):
@@ -254,7 +257,7 @@ def run_variant(out, report, variant, save):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--output', type=Path, required=True)
-    p.add_argument('--worker-build', type=Path, default=DEFAULT_BUILD)
+    p.add_argument('--worker-build', type=Path)
     p.add_argument('--build-only', action='store_true')
     p.add_argument('--run-only', action='store_true')
     p.add_argument('--slots', type=int, choices=(16, 48, 128), default=16)
@@ -265,6 +268,8 @@ def main():
     p.add_argument('--retain-experts', choices=('off', 'on'), help='explicit opt-in on compatible new binaries')
     p.add_argument('--transport-probes', action='store_true')
     a = p.parse_args(); assert not (a.build_only and a.run_only)
+    if a.worker_build is None:
+        a.worker_build = evidence_root()/DEFAULT_BUILD_RUN
     out = a.output.resolve()
     if a.run_only:
         report = json.loads((out / 'report.json').read_text())

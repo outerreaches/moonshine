@@ -11,10 +11,11 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from mimo26_evidence import evidence_root
 
 p=argparse.ArgumentParser(description=__doc__);p.add_argument('--output',type=Path,required=True);a=p.parse_args()
 out=a.output;out.mkdir();repo=Path(__file__).resolve().parents[1]
-base=Path('/home/alex/Obsidian/beelink-knowledge/Projects/Moonshine/Evidence/mimo26-http-quarantine-20260922/run')
+base=evidence_root()/'mimo26-http-quarantine-20260922/run'
 def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
 r=dict(complete=False,passed=False,responses=[],memory=[])
 def save():(out/'report.json').write_text(json.dumps(r,indent=2)+'\n')
