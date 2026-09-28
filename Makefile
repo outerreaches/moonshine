@@ -1291,9 +1291,14 @@ test-mzg2-bundle:
 	PYTHONDONTWRITEBYTECODE=1 \
 		$(PYTHON) -m unittest -v tests/test_build_mzg2_bundle.py
 
+# Portable: no ROCm, no hipcc, no weights. Anything linked with $(HIPCC) belongs
+# in `test` or a phase target, not here -- test_glm53_static_bindings was in this
+# list and pulled in glm53_static_loader.o, which is a .cu. That built fine on a
+# developer box with ROCm installed and failed in CI, which is the only place the
+# claim "portable" was ever actually tested.
 test-cpu: $(PORTABLE_CPU_TESTS) test-glm53-phase4 test-glm53-phase5a \
 		tests/test_glm53_fp8_dynamic tests/test_glm53_process_memory \
-		tests/test_glm53_static_layout tests/test_glm53_static_bindings \
+		tests/test_glm53_static_layout \
 		test-cache-analyzer \
 	test-prefill-screen-analyzer test-anchor-recovery-analyzer \
 	test-mzg2-bundle
@@ -1310,7 +1315,6 @@ test-cpu: $(PORTABLE_CPU_TESTS) test-glm53-phase4 test-glm53-phase5a \
 	./tests/test_glm53_fp8_dynamic
 	./tests/test_glm53_process_memory
 	./tests/test_glm53_static_layout
-	./tests/test_glm53_static_bindings
 
 test-decode-cache-replay: tests/test_k3_expert_cache
 	@test -n "$(MOONSHINE_DECODE_TRACE)" || \
