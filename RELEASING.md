@@ -115,6 +115,22 @@ long as its prefill takes — deep prompts run tens of minutes — so check
 - **Toggling the expert kernel invalidates the prefix store**, by design — each
   arithmetic mode gets its own directory (`k1-tiled`, `k1-gemv`).
 
+### Two release names predate the pre-publication rewrite
+
+The first two MiMo releases were cut before history was rewritten to drop a
+committed build artifact and three weight-derived goldens, so the short commit in
+their directory names does not appear in the published history:
+
+| release name | pre-rewrite | published |
+|---|---|---|
+| `0.2.0-research-preview-98bf466-20260928T014626` | `98bf466` | `45aeb69` |
+| `0.2.0-research-preview-3ea7d65-20260927T205008` | `3ea7d65` | `912d615` |
+
+Nothing about the releases themselves changed: none of the removed paths is among
+the 151 pinned sources, so both still `verify` clean with good signatures. Only
+the name-to-commit link needs this table. Releases cut from here on name a commit
+that exists.
+
 ## Repository setup
 
 1. Use the public `outerreaches/moonshine` repository.
