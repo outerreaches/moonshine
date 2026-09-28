@@ -47,6 +47,10 @@ alone builds only the K3 binaries and the K3 instructions will not run the other
 If a command says `moonshine-server` it is the K3 engine. If it says
 `mimo26_server` it is MiMo. There is no GLM server.
 
+Everything else is indexed in [docs/](docs/README.md), which also explains two
+conventions these documents rely on: dated note titles and `Evidence/…` paths
+refer to engineering records kept outside this repository.
+
 ## What is Moonshine?
 
 Moonshine is a purpose-built inference engine for running the official Kimi K3

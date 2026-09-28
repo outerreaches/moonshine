@@ -1,5 +1,11 @@
 # MiMo local production candidate — qualification, not deployment
 
+> **`Evidence/…` paths below are not in this repository.** Qualification runs
+> produce reports, pinned builds and logs that are kept outside the tree; the
+> digests quoted here identify them, and `MOONSHINE_EVIDENCE_ROOT` is how the
+> gates in `tests/run_mimo26_*.py` locate a local copy. Read those references as
+> provenance for a claim, not as files to open.
+
 ## Current status — September 24 takeover
 
 No final production identity is promoted. Commit5881291 fixed an undersized

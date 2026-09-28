@@ -335,8 +335,9 @@ physical host/device use or evidence of no swapping. The 2026-09-22 follow-up
 probes at 144 and 96 slots were stopped by a zero-worker-swap guard during
 loading, before inference; those isolated runs do not invalidate the earlier
 context outputs, but a swap-free serving configuration needs separate
-qualification. See the vault's `MiMo Performance Takeover and Experiments
-2026-09-22` note and `Evidence/mimo26-takeover-20260922/` for pinned reports.
+qualification. The pinned reports for that run are held outside this repository
+under `mimo26-takeover-20260922/`, which `MOONSHINE_EVIDENCE_ROOT` locates for the
+gates that consume them.
 
 ## Running it
 
