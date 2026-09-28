@@ -6,6 +6,28 @@
 #include <stdlib.h>
 
 #define MIMO26_ROCM_THREADS 256u
+/*
+ * Value-loop unroll: how many value loads are outstanding per thread.
+ *
+ * Pass 3 runs on only 128 of the block's 256 threads -- four wavefronts -- so
+ * there is very little to hide the latency of a load whose address strides by
+ * kv_heads*V_DIM*2 bytes each iteration. More loads in flight per thread is the
+ * only lever that does not reorder the accumulation.
+ *
+ * Measured at a 131,072 history on an idle GPU:
+ *
+ *      4  0.04241 s
+ *      8  0.03434 s
+ *     16  0.03039 s   <- chosen
+ *     32  0.03005 s   (+1.1%, inside the noise band)
+ *     64  0.02941 s   (+2.1%, and a 63-slot scalar tail)
+ *
+ * 16 takes essentially all of it. Past that the gain is at or below this box's
+ * ~2.6% drift and the tail loop grows, which costs short histories.
+ */
+#ifndef MIMO26_VALUE_UNROLL
+#define MIMO26_VALUE_UNROLL 16u
+#endif
 #define MIMO26_ROCM_MAX_EXPERTS 1024u
 
 /*
@@ -437,22 +459,52 @@ __global__ static void mimo26_attention_decode_kernel(
      * rather than over history keeps every thread's summation in ascending
      * history order. The sink slot is excluded, so the probabilities that
      * survive deliberately sum to less than one. */
+    /*
+     * Unrolled four deep so four value loads are outstanding at once.
+     *
+     * Only 128 of the block's 256 threads run this loop -- it splits over the 128
+     * output dimensions, deliberately, so each thread's accumulation stays in
+     * ascending history order. That leaves four wavefronts to cover the latency
+     * of a load whose address strides by kv_heads*V_DIM*2 bytes every iteration,
+     * and the measured cost worked out at roughly 380 cycles per iteration, about
+     * DRAM latency. There was nothing in flight to hide it with.
+     *
+     * The loads are issued before any of the adds, and the adds still happen one
+     * at a time in ascending t, each guarded exactly as before. So the summation
+     * order is untouched and the result is bit-identical; the only change is how
+     * many requests are in flight. Loads are unconditional now, which is safe
+     * because every address was already in bounds for t < slot_total.
+     */
+    #define MIMO26_VALUE_AT(slot)                                               \
+        (((have_current && (slot) == history)                                   \
+              ? current_values + (uint64_t)kv_head * MIMO26_ROCM_V_DIM          \
+              : values + ((slot) * kv_heads + kv_head) * MIMO26_ROCM_V_DIM)[d])
     for (uint32_t d = tid; d < MIMO26_ROCM_V_DIM; d += blockDim.x) {
         float accumulator = 0.0f;
-        for (uint64_t t = 0; t < slot_total; t++) {
+        uint64_t t = 0;
+        for (; t + MIMO26_VALUE_UNROLL <= slot_total; t += MIMO26_VALUE_UNROLL) {
+            float p[MIMO26_VALUE_UNROLL], v[MIMO26_VALUE_UNROLL];
+            #pragma unroll
+            for (uint32_t u = 0; u < MIMO26_VALUE_UNROLL; u++) p[u] = row[t + u];
+            #pragma unroll
+            for (uint32_t u = 0; u < MIMO26_VALUE_UNROLL; u++)
+                v[u] = mimo26_bf16_to_f32_d(MIMO26_VALUE_AT(t + u));
+            #pragma unroll
+            for (uint32_t u = 0; u < MIMO26_VALUE_UNROLL; u++)
+                if (p[u] != 0.0f) accumulator += p[u] * v[u];
+        }
+        for (; t < slot_total; t++) {
             const float probability = row[t];
             if (probability == 0.0f) {
                 continue;
             }
-            const uint16_t *v_head =
-                (have_current && t == history)
-                    ? current_values + (uint64_t)kv_head * MIMO26_ROCM_V_DIM
-                    : values + (t * kv_heads + kv_head) * MIMO26_ROCM_V_DIM;
-            accumulator += probability * mimo26_bf16_to_f32_d(v_head[d]);
+            accumulator += probability *
+                           mimo26_bf16_to_f32_d(MIMO26_VALUE_AT(t));
         }
         out[(uint64_t)head * MIMO26_ROCM_V_DIM + d] =
             mimo26_f32_to_bf16_d(accumulator);
     }
+    #undef MIMO26_VALUE_AT
 }
 
 
