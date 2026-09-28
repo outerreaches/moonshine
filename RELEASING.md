@@ -55,22 +55,51 @@ kernels are not bit-identical and a reader cannot tell which ran from the binary
 
 ### 4. Sign, including the rollback target
 
+Load the key into the agent first — the packager captures `ssh-keygen`'s output, so
+an interactive passphrase prompt is at best awkward:
+
 ```sh
+eval "$(ssh-agent -s)" && ssh-add ~/.ssh/moonshine_signing
+
 python3 tools/mimo26_package.py sign <release-dir> --key ~/.ssh/moonshine_signing
-python3 tools/mimo26_package.py verify <release-dir>     --allowed-signers ~/.ssh/allowed_signers
+python3 tools/mimo26_package.py verify <release-dir> \
+    --allowed-signers ~/.ssh/allowed_signers --require-signature
 ```
 
 A detached `ssh-keygen -Y sign` over `manifest.sha256`, which covers the manifest
 and therefore the binary and all pinned sources. It does **not** attest the model
-weights; those carry their own manifest hash.
+weights; those carry their own manifest hash. The packager unseals and re-seals the
+0555 directory itself.
 
 Sign `previous` too, or a rollback lands on an unsigned release. Once both are
-signed the supervisor can take `--require-signature`.
+signed the supervisor takes `--allowed-signers` and `--require-signature`.
+
+Then prove the gate can refuse, rather than trusting a check that has only ever
+passed:
+
+```sh
+python3 tests/prove_mimo26_signature_gate.py \
+    --release-root /srv/modelstore/private/moonshine-releases/mimo26 \
+    --allowed-signers ~/.ssh/allowed_signers
+```
+
+Five cases against the supervisor's own `resolve_release()` on scratch copies:
+intact resolves; deleted signature, one flipped bit and a signature from an
+unlisted key are each refused; and a control confirms an unsigned release still
+resolves with the flag off, so the refusals belong to the flag and not to the
+copying. Check the exit status without a pipe.
 
 ### 5. Serve it
 
 Restart the supervisor; it re-resolves `current/` and re-verifies on every start.
+Add `--allowed-signers ~/.ssh/allowed_signers --require-signature` so an unsigned
+release cannot be served — `resolve_release` then reports `release_unusable` and the
+supervisor refuses to launch rather than starting something unattested.
 See [Running MiMo V2.6 Flash](README.md#running-mimo-v26-flash).
+
+**Wait for the slot to be idle.** One request holds the single execution slot for as
+long as its prefill takes — deep prompts run tens of minutes — so check
+`inflight` in the status file before restarting, or the restart kills a live request.
 
 ### Requirements that are easy to miss
 

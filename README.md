@@ -280,13 +280,32 @@ tree. The supervisor re-resolves `current/` on every start, verifies the release
 and checks the effective profile against `/health` after load:
 
 ```sh
-python3 tools/mimo26_supervise.py /srv/modelstore/models/XiaomiMiMo__MiMo-V2.6-Flash-RL     --release-root /srv/modelstore/private/moonshine-releases/mimo26     --port 8080     --request-deadline-seconds 1800     --kv-prefix-reuse on     --prefix-cache-dir /srv/modelstore/private/moonshine-prefix-checkpoints/mimo26-v2.6-flash     --prefix-cache-gib 24 --prefix-cache-entries 8     --status-file /run/user/1000/mimo26-status.json
+python3 tools/mimo26_supervise.py \
+    /srv/modelstore/models/XiaomiMiMo__MiMo-V2.6-Flash-RL \
+    --release-root /srv/modelstore/private/moonshine-releases/mimo26 \
+    --allowed-signers ~/.ssh/allowed_signers --require-signature \
+    --port 8080 \
+    --request-deadline-seconds 1800 \
+    --kv-prefix-reuse on \
+    --prefix-cache-dir /srv/modelstore/private/moonshine-prefix-checkpoints/mimo26-v2.6-flash \
+    --prefix-cache-gib 24 --prefix-cache-entries 8 \
+    --status-file /run/user/1000/mimo26-status.json
 ```
+
+`--require-signature` makes an unsigned or tampered release a refusal to launch
+(`release_unusable`) rather than a service started on something unattested. It needs
+`--allowed-signers`, and both `current` and `previous` must be signed or a rollback
+cannot start. See [RELEASING.md](RELEASING.md) for signing and for the proof that
+this gate can actually refuse.
 
 To run a build directly — for qualification or a bisect, not for production:
 
 ```sh
-./tools/mimo26_server /srv/modelstore/models/XiaomiMiMo__MiMo-V2.6-Flash-RL     --host 127.0.0.1 --port 8080     --slots 160 --context 131072 --prefill-chunk 128     --expert-lookahead on --expert-major on --retain-experts on     --kv-prefix-reuse on --request-deadline-seconds 1800
+./tools/mimo26_server /srv/modelstore/models/XiaomiMiMo__MiMo-V2.6-Flash-RL \
+    --host 127.0.0.1 --port 8080 \
+    --slots 160 --context 131072 --prefill-chunk 128 \
+    --expert-lookahead on --expert-major on --retain-experts on \
+    --kv-prefix-reuse on --request-deadline-seconds 1800
 ```
 
 The API is OpenAI chat-completions on `/v1/chat/completions`, plus `/health`.
