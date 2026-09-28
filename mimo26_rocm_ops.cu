@@ -410,6 +410,29 @@ __global__ static void mimo26_attention_decode_kernel(
     __syncthreads();
     const double total = shared_total;
 
+    /*
+     * Pass 2c: normalize once per slot, rather than once per slot PER OUTPUT
+     * DIMENSION.
+     *
+     * The divide and its two BF16 conversions used to sit inside the `d` loop
+     * below, so each slot's probability was recomputed 128 times -- 16.8M
+     * double-precision divisions per (head, query) at a 131,072 history, for
+     * 131,072 distinct values. Stage decomposition put 93-95% of the whole
+     * kernel's time after the scores pass, which is what sent us looking here.
+     *
+     * Bit-exact: same expression, same inputs, evaluated once instead of 128
+     * times. Every thread participates, and the sink slot at row[slot_total] is
+     * left alone -- the denominator has already consumed it and pass 3 excludes
+     * it deliberately, so the surviving probabilities sum to less than one.
+     */
+    for (uint64_t t = tid; t < slot_total; t += blockDim.x) {
+        row[t] = row[t] == 0.0f
+                     ? 0.0f
+                     : mimo26_bf16_to_f32_d(
+                           mimo26_f32_to_bf16_d((float)((double)row[t] / total)));
+    }
+    __syncthreads();
+
     /* Pass 3: value accumulation. Splitting over the 128 output dimensions
      * rather than over history keeps every thread's summation in ascending
      * history order. The sink slot is excluded, so the probabilities that
@@ -417,11 +440,7 @@ __global__ static void mimo26_attention_decode_kernel(
     for (uint32_t d = tid; d < MIMO26_ROCM_V_DIM; d += blockDim.x) {
         float accumulator = 0.0f;
         for (uint64_t t = 0; t < slot_total; t++) {
-            if (row[t] == 0.0f) {
-                continue;
-            }
-            const float probability = mimo26_bf16_to_f32_d(
-                mimo26_f32_to_bf16_d((float)((double)row[t] / total)));
+            const float probability = row[t];
             if (probability == 0.0f) {
                 continue;
             }

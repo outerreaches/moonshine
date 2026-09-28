@@ -141,6 +141,89 @@ static uint64_t production_width(uint64_t history, uint64_t chunk)
  *
  * MIMO26_DEEP_BENCH=<repeats> selects this instead of the correctness cases.
  */
+/*
+ * Where does the time go inside one attention call?
+ *
+ * The kernel has four stages, and the budget sweep showed the cost is not the
+ * sub-batch re-reads. mimo26_rocm_attention_scores runs stage 1 alone (it is the
+ * scores gate's entry point), so subtracting it from a full call at the same
+ * geometry separates:
+ *
+ *   stage 1  the 192-term QK dots, one slot per thread
+ *   stage 2  exponentials, elementwise
+ *   stage 2b the denominator -- summed in double by thread 0 ALONE, serially over
+ *            every slot. Its comment calls this "a saving of microseconds", which
+ *            was written when slots were few; at 131,072 it is 131,072 dependent
+ *            adds with 255 threads idle.
+ *   stage 3  value accumulation, split over only 128 output dims -- and it
+ *            recomputes each slot's probability once PER DIM, so the divide and
+ *            two BF16 conversions happen 128 times for every slot.
+ *
+ * Batch 1, because the scores entry point is fixed at one query. The ratio is
+ * what matters, not the absolute.
+ */
+static int decompose(unsigned repeats)
+{
+    static const uint64_t depths[] = {8192u, 16384u, 32768u, 65536u, 131072u};
+    const size_t kv_heads = 4u, kv_groups = (size_t)QH / 4u;
+    printf("one attention call, batch 1, global layer, %u repeats\n\n", repeats);
+    printf("%8s %11s %11s %11s %8s\n", "history", "stage1", "stages2+3",
+           "total", "2+3 share");
+    for (size_t d = 0; d < sizeof depths / sizeof *depths; d++) {
+        const uint64_t total = depths[d];
+        const size_t key_count = (size_t)total * kv_heads * QK;
+        const size_t value_count = (size_t)total * kv_heads * VD;
+        uint16_t *hk = (uint16_t *)malloc(key_count * 2);
+        uint16_t *hv = (uint16_t *)malloc(value_count * 2);
+        uint16_t *hq = (uint16_t *)malloc((size_t)QH * QK * 2);
+        if (!hk || !hv || !hq) return 2;
+        rng_state = 0xA11CEu + (uint32_t)d;
+        for (size_t i = 0; i < key_count; i++) hk[i] = mimo26_f32_to_bf16(next_uniform(-1.5f, 1.5f));
+        for (size_t i = 0; i < value_count; i++) hv[i] = mimo26_f32_to_bf16(next_uniform(-2.f, 2.f));
+        for (size_t i = 0; i < (size_t)QH * QK; i++) hq[i] = mimo26_f32_to_bf16(next_uniform(-1.5f, 1.5f));
+
+        void *dk = NULL, *dv = NULL, *dq = NULL, *dout = NULL;
+        float *scratch = NULL;
+        const uint64_t floats = mimo26_rocm_attention_scratch_floats(total);
+        HIP_OK(hipMalloc(&dk, key_count * 2));
+        HIP_OK(hipMalloc(&dv, value_count * 2));
+        HIP_OK(hipMalloc(&dq, (size_t)QH * QK * 2));
+        HIP_OK(hipMalloc(&dout, (size_t)QH * VD * 2));
+        HIP_OK(hipMalloc(&scratch, floats * sizeof(float)));
+        HIP_OK(hipMemcpy(dk, hk, key_count * 2, hipMemcpyHostToDevice));
+        HIP_OK(hipMemcpy(dv, hv, value_count * 2, hipMemcpyHostToDevice));
+        HIP_OK(hipMemcpy(dq, hq, (size_t)QH * QK * 2, hipMemcpyHostToDevice));
+        free(hk); free(hv); free(hq);
+
+        double t_scores = 0.0, t_full = 0.0;
+        for (unsigned r = 0; r < repeats + 1u; r++) {
+            HIP_OK(hipDeviceSynchronize());
+            double t0 = seconds_now();
+            if (!mimo26_rocm_attention_scores(dq, dk, NULL, NULL, scratch,
+                                              (uint32_t)kv_heads, (uint32_t)kv_groups,
+                                              0u, total, 0u, total - 1u,
+                                              mimo26_attention_scale(), NULL)) return 2;
+            HIP_OK(hipDeviceSynchronize());
+            const double s = seconds_now() - t0;
+            t0 = seconds_now();
+            if (!mimo26_rocm_attention_prefill(dout, dq, dk, dv, NULL, scratch, floats,
+                                               (uint32_t)kv_heads, (uint32_t)kv_groups,
+                                               0u, total, 0u, total - 1u, 1u,
+                                               mimo26_attention_scale(), NULL)) return 2;
+            HIP_OK(hipDeviceSynchronize());
+            const double f = seconds_now() - t0;
+            if (r > 0u) { t_scores += s; t_full += f; }
+        }
+        t_scores /= repeats; t_full /= repeats;
+        printf("%8llu %11.5f %11.5f %11.5f %7.0f%%\n",
+               (unsigned long long)total, t_scores, t_full - t_scores, t_full,
+               100.0 * (t_full - t_scores) / t_full);
+        HIP_OK(hipFree(dk)); HIP_OK(hipFree(dv)); HIP_OK(hipFree(dq));
+        HIP_OK(hipFree(dout)); HIP_OK(hipFree(scratch));
+    }
+    return 0;
+}
+
 static int bench(unsigned repeats)
 {
     static const uint64_t depths[] = {16384u, 32768u, 65536u, 131072u};
@@ -228,6 +311,11 @@ static int bench(unsigned repeats)
 
 int main(void)
 {
+    if (const char *d = getenv("MIMO26_DEEP_DECOMPOSE")) {
+        int devices = 0;
+        if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) return 2;
+        return decompose((unsigned)strtoul(d, NULL, 10));
+    }
     if (const char *b = getenv("MIMO26_DEEP_BENCH")) {
         int devices = 0;
         if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) return 2;
