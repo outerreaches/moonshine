@@ -135,9 +135,14 @@ that exists.
 
 1. Use the public `outerreaches/moonshine` repository.
 2. Use the display name **Moonshine** and this description: "Moonshine is an
-   experimental single-node SafeTensors/ROCm inference engine for Kimi K3 on
-   128 GB AMD Strix Halo, with NVMe-streamed MXFP4 experts and layer-major
-   prefill."
+   experimental single-node SafeTensors/ROCm inference engine for Kimi K3 and
+   MiMo V2.6 Flash on 128 GB AMD Strix Halo, with NVMe-streamed MXFP4 experts
+   and layer-major prefill."
+
+   The description named only K3 until MiMo became a served lane with its own
+   entry point and release process. Keep it in step with the lane table at the
+   top of the README; a description that omits a served lane sends readers to
+   the wrong binary.
 3. Enable private vulnerability reporting.
 4. Enable secret scanning and push protection.
 5. Protect `main` and require the portable CI workflow.

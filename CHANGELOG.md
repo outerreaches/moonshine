@@ -7,6 +7,46 @@ Semantic Versioning once its first research-preview tag is published.
 
 ### Added
 
+- **A second model lane: MiMo V2.6 Flash**, served by `tools/mimo26_server`
+  under `tools/mimo26_supervise.py`. It is built separately (`make
+  tools/mimo26_server`), is not in the default build, and shares no entry point
+  with the K3 engine. 310B total / 15B active MoE across 48 layers — nine global
+  full-attention layers at 4 KV heads and 39 sliding-window layers at 8 KV heads,
+  window 128 — with 256 experts, top-8 routing, asymmetric 192/128 QK/V head
+  dimensions and a 131,072-token context. OpenAI chat-completions on loopback;
+  decoding is greedy only, and `temperature`/`top_p` are *refused* rather than
+  ignored, so a silently-applied sampler cannot invalidate the kernels'
+  bit-exactness claims.
+- Three MXFP4 expert kernels: scalar `gemv_bf16`, two-dimensional
+  `gemv_rows_bf16`, and a tiled weight-reuse `gemm_bf16` selected by
+  `--expert-weight-reuse` (default on). The tiled kernel is deliberately *not*
+  gated on equality — a one-ULP arithmetic difference crosses top-k routing
+  boundaries and becomes a discrete behavioural change — so it was promoted on a
+  pre-registered quality screen instead.
+- Expert-major grouped prefill (`--expert-major`), expert lookahead, and expert
+  retention across requests.
+- Bounded attention scratch with sub-batched prefill, so a large advertised
+  context does not require scratch sized for it. The kernel strides by the
+  history it is passed, which makes sub-batching an identity rather than an
+  approximation; the gate is `memcmp` with no tolerance.
+- KV prefix reuse in two tiers — extension of a prefix already resident, and
+  durable `k3_prefix_bundle` checkpoints that survive restarts. A genuine
+  follow-up turn at 867 tokens reused 867 of 886 and ran 12.5× faster.
+- Resumable prefill. A checkpoint is published on a deadline stop, not only on
+  completion, so a prompt too long for one deadline converges across retries
+  rather than dying at the same token. Publication is guarded by worker idleness
+  and a position-equals-token-count check, and happens only at a chunk boundary —
+  the sole point at which a prefill is transactional across all 48 layers.
+- Immutable release packaging in `tools/mimo26_package.py`: sealed directories, a
+  manifest over the binary and every pinned source, detached `ssh-keygen -Y sign`
+  signatures, atomic activation with a rollback target, and activation that
+  refuses a report unless every check passed, a versioned mandatory set is
+  covered, and the intended profile is stated and matches.
+- `tests/prove_mimo26_signature_gate.py`, which drives the supervisor's own
+  release resolution against scratch copies to show the signature gate refuses a
+  deleted signature, a one-bit binary edit, and a signature from a key absent
+  from `allowed_signers` — with a control confirming those refusals belong to the
+  flag rather than to the copying.
 - Timestamped production lifecycle logging for request admission, exact prefix
   reuse or mismatch, throttled prefill progress, reasoning-to-response/tool
   decode transitions, 64-token decode heartbeats, completion, failures, and
@@ -149,8 +189,52 @@ Semantic Versioning once its first research-preview tag is published.
   the 51.370 GiB Q8 tier. The full model scan is intentionally not run beside a
   live service and still requires a later GPU-quantizer identity gate.
 
+### Changed
+
+- The MiMo attention kernel is **2.35× faster at a 131,072-token history and
+  3.59× at 32,768, bit-exact**. Two changes, both preserving the summation order
+  by construction: a softmax normalisation was hoisted out of the loop over the
+  128 output dimensions, where it had been recomputing each slot's probability
+  once per dimension; and the value loop was unrolled 16-deep so several loads
+  are outstanding while the additions still happen one at a time in ascending
+  history order. Because they provably do not move output, they shipped on a
+  byte-identity check against a reference captured before either change — 45
+  items of real generation, zero divergent — rather than on a quality screen.
+  A full-depth prefill goes from roughly 26 h to 18 h.
+- `finish_reason` now maps to the OpenAI wire schema. A deadline stop that
+  produced no tokens returns HTTP 504 with a typed error instead of a `length`
+  completion with an empty body, which clients had been surfacing as "output
+  token limit reached" on a request that had in fact timed out during prefill.
+- Health accounting reports evaluated tokens, and computes both rates from them,
+  so reuse is no longer counted as work performed.
+- `.gitignore` covers linked tools and gate binaries by **pattern** rather than
+  by an enumerated list. The list had silently omitted entries, which is how
+  build artifacts reached the index.
+- The `tests/run_mimo26_*.py` gates take `MOONSHINE_EVIDENCE_ROOT` instead of an
+  absolute path to the maintainer's notes tree, and refuse with an instruction
+  when it is unset.
+
+### Removed
+
+- Committed build artifacts, and the GLM Phase-4 goldens derived from official
+  `zai-org/GLM-5.3-Flash` weights. The goldens' provenance, digests, synthetic
+  input formulas and tolerances remain; the bytes are regenerated from the
+  caller's own checkpoint by `make` rules, which was verified to reproduce both
+  of them bit-identically against the recorded digests before they were deleted.
+  The one golden with no generator now skips loudly, naming the hash any
+  reconstruction must match. See `docs/glm53-phase4-goldens.md`.
+
 ### Fixed
 
+- Prefix-bundle checkpoint identity no longer mixes the expert-kernel mode into
+  `model_layout_crc64`. That field is the exported KV's own integrity check and
+  cannot carry a composite, so mixing one in refused every publish with
+  `checkpoint state identity is invalid` and disabled prefix publishing entirely
+  for a day, visible only as a counter stuck at zero. Incompatible arithmetic is
+  separated by directory instead, and declined publishes now say why.
+- `expert_weight_reuse` is assigned in the worker's config defaults. It had been
+  read from an uninitialised struct that happened to be zero, so a test passed
+  for the wrong reason.
 - Model standalone-bundle routed-prefill reads from embedded MZG2 spans and
   preserve a decoded-layout ordering key, allowing reset and durable-prefix
   prefill without requiring the omitted source expert tensor directory.
