@@ -32,6 +32,21 @@ release decisions. Exact source lineage, pinned revisions, design influences,
 and validation oracles are recorded in
 [Provenance and acknowledgements](docs/provenance.md) and [NOTICE](NOTICE).
 
+## Which model are you running?
+
+This tree contains **three model lanes at different maturities**, and they do not
+share an entry point. Read this before following any command below, because `make`
+alone builds only the K3 binaries and the K3 instructions will not run the others.
+
+| Lane | Entry point | Built by | State |
+|---|---|---|---|
+| **Kimi K3** | `moonshine-chat`, `moonshine-server` | `make` (default) | The engine this README documents throughout |
+| **MiMo V2.6 Flash** | `tools/mimo26_server`, `tools/mimo26_supervise.py` | `make tools/mimo26_server` — **not** in the default build | Served, immutable releases, qualified. See [Running MiMo V2.6 Flash](#running-mimo-v26-flash) |
+| **GLM 5.3 Flash** | none in this tree | component objects only | **Not servable from here.** See [GLM 5.3 Flash status](#glm-53-flash-status) |
+
+If a command says `moonshine-server` it is the K3 engine. If it says
+`mimo26_server` it is MiMo. There is no GLM server.
+
 ## What is Moonshine?
 
 Moonshine is a purpose-built inference engine for running the official Kimi K3
@@ -245,6 +260,76 @@ curl --max-time 0 http://127.0.0.1:8080/v1/chat/completions \
 
 Set `MOONSHINE_API_KEY` or pass `--api-key` to require bearer authentication.
 Moonshine refuses a non-loopback bind without a key.
+
+## Running MiMo V2.6 Flash
+
+A second engine in this tree: MiMo-V2.6-Flash-RL, 310B total / 15B active, 48
+layers, 256 experts top-8. Shares K3's expert cache, MXFP4 kernels, SafeTensors
+reader and prefix-bundle machinery; everything model-shaped is its own.
+
+**It is not in the default build.**
+
+```sh
+make tools/mimo26_server
+```
+
+### Serve it
+
+Production runs from an immutable release under a supervisor, not from the build
+tree. The supervisor re-resolves `current/` on every start, verifies the release,
+and checks the effective profile against `/health` after load:
+
+```sh
+python3 tools/mimo26_supervise.py /srv/modelstore/models/XiaomiMiMo__MiMo-V2.6-Flash-RL     --release-root /srv/modelstore/private/moonshine-releases/mimo26     --port 8080     --request-deadline-seconds 1800     --kv-prefix-reuse on     --prefix-cache-dir /srv/modelstore/private/moonshine-prefix-checkpoints/mimo26-v2.6-flash     --prefix-cache-gib 24 --prefix-cache-entries 8     --status-file /run/user/1000/mimo26-status.json
+```
+
+To run a build directly — for qualification or a bisect, not for production:
+
+```sh
+./tools/mimo26_server /srv/modelstore/models/XiaomiMiMo__MiMo-V2.6-Flash-RL     --host 127.0.0.1 --port 8080     --slots 160 --context 131072 --prefill-chunk 128     --expert-lookahead on --expert-major on --retain-experts on     --kv-prefix-reuse on --request-deadline-seconds 1800
+```
+
+The API is OpenAI chat-completions on `/v1/chat/completions`, plus `/health`.
+Decoding is **greedy only**: `temperature` and `top_p` are *refused*, not ignored,
+because a silently-ignored sampler would invalidate the kernel's bit-exactness
+guarantees.
+
+### Operational facts worth knowing before you run it
+
+- **Defaults are a qualified pairing.** 160 expert slots at a 131,072 context needs
+  ~108 GiB and clears an 8 GiB floor on an otherwise idle host. Stop other large
+  model processes first; the startup guard refuses rather than half-loading.
+- **Prefill slows with depth** — roughly 20 t/s shallow, ~9 t/s at 26K — so the
+  request deadline, not memory, is what bounds a long prompt. At 1800 s the
+  single-request ceiling is around 17.5K tokens.
+- **A prompt too long for one deadline converges across retries.** The evaluated
+  prefix is checkpointed, so retrying the same request resumes rather than
+  restarting. The response says which of those applies.
+- **A deadline reached before any token is generated returns HTTP 504**
+  (`deadline_exceeded`), not a truncated 200 — the message names elapsed time,
+  tokens evaluated and reused, and whether a retry can resume.
+- **Context is qualified end to end to 26,026 tokens.** The 131,072 ceiling is
+  covered only by synthetic attention bit-exactness and footprint arithmetic; a
+  full-depth prefill is tens of hours.
+
+## GLM 5.3 Flash status
+
+**GLM 5.3 Flash cannot be served from this tree.** What is here is component-level:
+24 sources (architecture, FP8 codec and oracle, expert plan and stream, manifest,
+dense/KDA/MHC ops) with object-file build rules and phase-gated tests
+(`make test-glm53-phase2` … `test-glm53-phase5d-kda`). There is no runner, server or
+chat binary, and nothing GLM is in the default build.
+
+The FP8 work that *is* qualified — strict manifest, exhaustive OCP E4M3FN oracle,
+two-extent expert plan, fused GEMV, bounded BF16-dequant prefill floor — is
+synthetic-qualified on gfx1151 and reusable; the checkpoint lives at
+`/srv/modelstore/models/glm53-flash` (306 GB).
+
+Active development is in a **separate worktree**,
+`moonshine-glm53-20260831`, branch `glm53/native-fp8-foundation-20260831`, tag
+`glm53-wip-20260921`. As of 2026-09-22 that lane is *prep-complete, awaiting a GPU
+window* — GPU bring-up has not started. Do not expect the sources here to be a
+complete or current picture of it.
 
 ## Optional features
 

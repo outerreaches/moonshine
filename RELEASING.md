@@ -1,5 +1,91 @@
 # Releasing Moonshine
 
+## Which lane are you releasing?
+
+Three lanes, three different answers. Everything below the "Repository setup"
+heading concerns **Kimi K3** unless a section says otherwise.
+
+| Lane | Release mechanism |
+|---|---|
+| **Kimi K3** | this document: clean-checkout qualification, then the public repo |
+| **MiMo V2.6 Flash** | `tools/mimo26_package.py` — immutable on-disk releases with evidence bound to the binary. See [Releasing MiMo V2.6 Flash](#releasing-mimo-v26-flash) |
+| **GLM 5.3 Flash** | **not releasable from this tree.** Component objects and phase tests only; no servable binary. Active work is in `moonshine-glm53-20260831` |
+
+## Releasing MiMo V2.6 Flash
+
+MiMo does not ship through the public repo. It ships as an **immutable on-disk
+release** whose qualification evidence is bound to the exact binary, because the
+serving profile matters as much as the code.
+
+### 1. Qualify the candidate
+
+Build, serve on the intended profile, and run the battery. The report records the
+binary's own hash by hashing the running inode, so it cannot later be attached to a
+different build:
+
+```sh
+make tools/mimo26_server
+./tools/mimo26_server /srv/modelstore/models/XiaomiMiMo__MiMo-V2.6-Flash-RL     --host 127.0.0.1 --port 8080 --slots 160 --context 131072     --prefill-chunk 128 --expert-lookahead on --expert-major on     --retain-experts on --kv-prefix-reuse on --request-deadline-seconds 1800
+python3 Scripts/mimo26-qualification/qualify.py --port 8080     --label <what-changed> --out results/<what-changed>.json
+```
+
+Eleven checks must pass. For a change that alters model output, that battery is
+**not sufficient** — see the quality-screen requirement below.
+
+### 2. Package
+
+```sh
+python3 tools/mimo26_package.py build     --root /srv/modelstore/private/moonshine-releases/mimo26     --qualification results/<what-changed>.json     --model /srv/modelstore/models/XiaomiMiMo__MiMo-V2.6-Flash-RL     --note "<one line on what changed>"
+```
+
+Refused on a dirty worktree, or if the report names a different binary. It prints
+any reason the report would fail activation **at this point**, while you are still
+looking, rather than after a signature exists.
+
+### 3. Activate, stating the profile
+
+```sh
+python3 tools/mimo26_package.py activate <release-dir>     --root /srv/modelstore/private/moonshine-releases/mimo26     --expect-profile "expert_weight_reuse=true,expert_major=true,expert_lookahead=true,retain_experts=true,kv_prefix_reuse=true,context=131072,expert_slots=160,prefill_chunk=128,request_deadline_seconds=1800"
+```
+
+Activation refuses unless every check passed, a versioned mandatory set is covered,
+and the intended profile is **stated and matches**. `--expect-profile` is required
+for any non-stock report, and the expert kernel must always be named — the two
+kernels are not bit-identical and a reader cannot tell which ran from the binary.
+
+### 4. Sign, including the rollback target
+
+```sh
+python3 tools/mimo26_package.py sign <release-dir> --key ~/.ssh/moonshine_signing
+python3 tools/mimo26_package.py verify <release-dir>     --allowed-signers ~/.ssh/allowed_signers
+```
+
+A detached `ssh-keygen -Y sign` over `manifest.sha256`, which covers the manifest
+and therefore the binary and all pinned sources. It does **not** attest the model
+weights; those carry their own manifest hash.
+
+Sign `previous` too, or a rollback lands on an unsigned release. Once both are
+signed the supervisor can take `--require-signature`.
+
+### 5. Serve it
+
+Restart the supervisor; it re-resolves `current/` and re-verifies on every start.
+See [Running MiMo V2.6 Flash](README.md#running-mimo-v26-flash).
+
+### Requirements that are easy to miss
+
+- **Keep a rollback target on a different commit.** A bulk retire once left two
+  builds of one commit, so `previous` pointed at an identical binary and rolling
+  back changed nothing. `list` prints the commit beside each release for this reason.
+- **A change that moves model output needs a quality screen**, not just the battery.
+  Pre-register the criteria and freeze the task set before either arm runs; see
+  `Scripts/mimo26-qualification/quality_screen.py`.
+- **A bit-exact change has a stronger check available**: run
+  `quality_screen.py --expect <previous results>` and require zero divergence. Both
+  attention-kernel changes shipped on that basis instead of a screen.
+- **Toggling the expert kernel invalidates the prefix store**, by design — each
+  arithmetic mode gets its own directory (`k1-tiled`, `k1-gemv`).
+
 ## Repository setup
 
 1. Use the public `outerreaches/moonshine` repository.
