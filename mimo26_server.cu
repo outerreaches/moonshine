@@ -2047,7 +2047,30 @@ static void handle_chat(server_runtime *runtime, int fd,
         next = mimo26_gpu_worker_argmax(logits);
         /* The prompt is now evaluated and nothing has been generated on top,
          * which is exactly the state a later turn can continue from. */
+        /*
+         * The WHOLE prompt, deliberately -- not capped.
+         *
+         * A capped prefix looks attractive, because a whole-prompt checkpoint is
+         * inadmissible for an IDENTICAL retry (exact-prefix admission needs
+         * PREFIX_RETRY_MIN_SUFFIX tokens of suffix). Measured at depth: such a
+         * retry reused 0 and re-prefilled for 944 s.
+         *
+         * But capping is unsound here, and the publisher's own position guard
+         * proves it: mimo26_gpu_worker_export_state takes no length, so it writes
+         * whatever the worker holds. Publishing count = position - 2 would record
+         * metadata claiming N-2 tokens against a state file holding N, and the
+         * guard refuses -- which it did, silently declining every publish until
+         * this was reverted.
+         *
+         * Serving an identical retry from a whole-prompt checkpoint needs
+         * TRUNCATING import, which does not exist. Left open. The case that
+         * actually matters is unaffected: the next TURN continues strictly after
+         * the assistant opener, so this prefix admits it.
+         */
         checkpoint = publish_prefix_checkpoint(runtime, prompt.ids, prompt.count);
+        checkpoint.resumable = checkpoint.stored &&
+                               checkpoint.retained + PREFIX_RETRY_MIN_SUFFIX <=
+                                   prompt.count;
     } else if (progress_context.evaluated > 0u) {
         /*
          * RESUMABLE PREFILL. The prefill ran out of time (or the client left)
@@ -2078,24 +2101,21 @@ static void handle_chat(server_runtime *runtime, int fd,
          * the absolute token sequence.
          */
         /*
-         * Cap the stored prefix so an IDENTICAL retry can actually use it.
+         * Exactly what was evaluated -- which equals the worker's position, so
+         * the publisher's guard admits it.
          *
-         * Exact-prefix admission needs at least K3_PREFIX_REUSE_MIN_SUFFIX (2)
-         * tokens after the retained prefix, so a checkpoint covering the whole
-         * prompt is inadmissible for a retry of that same prompt -- which is
-         * precisely the retry this path exists to help. Storing two tokens fewer
-         * costs two tokens of recomputation and makes the entry usable. It
-         * remains a valid prefix for a longer follow-up turn either way.
+         * An earlier version capped this to leave PREFIX_RETRY_MIN_SUFFIX tokens,
+         * so that an identical retry would be admissible. That is unsound for the
+         * same reason as the completed path above: export writes the worker's
+         * whole state, so a smaller recorded count contradicts the file. The cap
+         * never fired in testing because `evaluated` rarely reaches the end, and
+         * it would have silently declined the publish if it ever had.
          */
-        size_t retain = reuse + progress_context.evaluated;
-        if (retain + PREFIX_RETRY_MIN_SUFFIX > prompt.count) {
-            retain = prompt.count > PREFIX_RETRY_MIN_SUFFIX
-                         ? prompt.count - PREFIX_RETRY_MIN_SUFFIX : 0u;
-        }
-        checkpoint = publish_prefix_checkpoint(runtime, prompt.ids, retain);
+        checkpoint = publish_prefix_checkpoint(
+            runtime, prompt.ids, reuse + progress_context.evaluated);
         checkpoint.resumable = checkpoint.stored && checkpoint.retained > reuse &&
                                checkpoint.retained + PREFIX_RETRY_MIN_SUFFIX <=
-                                   prompt.count;
+                                   prompt.count;   /* honest, not enforced */
     }
     prefill_seconds = now_seconds() - prefill_started;
     /*
