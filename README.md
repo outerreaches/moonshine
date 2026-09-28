@@ -327,9 +327,24 @@ synthetic-qualified on gfx1151 and reusable; the checkpoint lives at
 
 Active development is in a **separate worktree**,
 `moonshine-glm53-20260831`, branch `glm53/native-fp8-foundation-20260831`, tag
-`glm53-wip-20260921`. As of 2026-09-22 that lane is *prep-complete, awaiting a GPU
-window* — GPU bring-up has not started. Do not expect the sources here to be a
-complete or current picture of it.
+`glm53-wip-20260921` (unmerged, never pushed). That lane carries 261 GLM files
+against the 90 here, so the sources in this tree are an early subset and not a
+current picture of it.
+
+What that lane can already do, so this section is not read as less than it is: all
+45 text layers execute natively in official FP8 on gfx1151, behind a single-slot
+localhost HTTP adapter (`glm53_server.py` plus a `moonshine-glm53-worker` binary),
+qualified at 128 prompt / 128 output tokens on the `context256` profile. It decodes
+at roughly **0.44 evaluations/s** — about 2.3 s per token — and a 2,331-token
+prefill measured 5,588 s, so context beyond a few hundred tokens is not currently
+practical.
+
+What has **not** started, as of 2026-09-22, is the final qualification campaign:
+lifecycle (G1), deployment and canary (G4), the 24 h soak (G5) and the release
+decision (G6) are written up and ready to execute but awaiting a GPU window, and
+two of their harnesses are not yet written. Streaming, concurrency, contexts past
+256, and independent quality are all open. GLM 5.3 Flash is therefore **out of
+scope for this release** and is the subject of the next one.
 
 ## Optional features
 
