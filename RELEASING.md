@@ -123,8 +123,8 @@ their directory names does not appear in the published history:
 
 | release name | pre-rewrite | published |
 |---|---|---|
-| `0.2.0-research-preview-98bf466-20260928T014626` | `98bf466` | `45aeb69` |
-| `0.2.0-research-preview-3ea7d65-20260927T205008` | `3ea7d65` | `912d615` |
+| `0.2.0-research-preview-98bf466-20260928T014626` | `98bf466` | `4b3e91d` |
+| `0.2.0-research-preview-3ea7d65-20260927T205008` | `3ea7d65` | `53f2bfa` |
 
 Nothing about the releases themselves changed: none of the removed paths is among
 the 151 pinned sources, so both still `verify` clean with good signatures. Only
