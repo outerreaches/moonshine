@@ -1,5 +1,7 @@
 # Moonshine
 
+Built and maintained by [Alex Mazurovsky](https://alexmaz.com/) — [Outer Reaches](https://outerreaches.space/).
+
 ## Acknowledgments
 
 Moonshine exists because Moonshot AI published the Kimi K3 architecture,
