@@ -54,6 +54,7 @@ typedef struct {
     uint64_t batch_workspace_bytes;
     uint64_t incremental_workspace_bytes;
     uint64_t mla_append_bytes;
+    uint64_t dsa_index_append_bytes;
 
     /* Full-store ceilings; runtime selected-union totals are in engine stats. */
     uint64_t routed_layer_payload_bytes;

@@ -5,6 +5,10 @@ Semantic Versioning once its first research-preview tag is published.
 
 ## [Unreleased]
 
+Unless an item explicitly says K3.1, the qualification results below describe
+historical Kimi K3 development. Preserve their recorded outcomes; do not use
+them as current K3.1 deployment, context, SDK, MZG2, or performance evidence.
+
 ### Added
 
 - Timestamped production lifecycle logging for request admission, exact prefix
@@ -151,6 +155,10 @@ Semantic Versioning once its first research-preview tag is published.
 
 ### Fixed
 
+- Pin and verify the standalone bundle's complete static-file SHA-256 and MZG2
+  inventory-manifest SHA-256 before GPU allocation. This closes silent
+  same-size static-payload or MZG2 inventory-manifest corruption while retaining
+  per-tile MZG2 checks as the runtime cache-commit boundary.
 - Model standalone-bundle routed-prefill reads from embedded MZG2 spans and
   preserve a decoded-layout ordering key, allowing reset and durable-prefix
   prefill without requiring the omitted source expert tensor directory.
@@ -170,6 +178,98 @@ Semantic Versioning once its first research-preview tag is published.
   backlog during a long inference request. Health/model discovery now remains
   responsive, abandoned streaming and JSON work releases the inference slot,
   and `SIGINT`/`SIGTERM` drains active inference before engine destruction.
+
+## [0.3.0-k3.1-research-preview] - 2026-11-06
+
+This entry cuts over the model profile and execution subsystems to Kimi K3.1
+Pro. Synthetic gates, full MZG2 conversion/verification, the real 8K Beelink
+canary, live agentic/API and state-v2 gates, the OpenAI SDK 2.52.0 fixture, and
+natural-text retrieval through 63,971 tokens pass. It remains a research preview:
+no context above 64K, continuous long-output profile, third-party agent client,
+or production soak is qualified.
+
+### Added
+
+- A fail-closed K3.1 configuration/profile loader pinned to
+  `moonshotai/Kimi-K3.1-Pro` at
+  `6d0a0202956796543364d666ab19c6ad1a494ee1`, with exact architecture, layer
+  placement, and DSA geometry checks. Older K3 configurations are rejected.
+- BF16 Gated DSA decode and prefill paths with indexer key LayerNorm, F32
+  scoring, stable causal top-k selection, and sparse MLA attention. Decode and
+  prefill share one persistent 128-element-per-token index-key cache.
+- DSA execution uses a BF16 index cache, skips indexer scoring/top-k when all
+  visible rows are required, uses the existing dense MLA path from the measured
+  768-row threshold, and gathers selected rows once above the 2,048-row sparse
+  window. On gfx1151 the 8K attention comparison improves 4.930 → 0.126 ms per
+  layer; the short real 128-token canary remains MoE-bound at 0.501 tok/s. Named
+  DSA steps preserve exact failure diagnostics, and `make bench-k31-dsa`
+  reproduces the kernel screen. BLAS-backed indexer scoring is implemented for
+  large windows: 1.094 → 0.075 ms at 8K, with a passing real 8K retrieval gate.
+- The opt-in KDA BLAS candidate passed real 8K retrieval and reduced prefill
+  1,068.850 → 809.570 seconds. It remains experimental pending numerical/state
+  qualification. Neutral route-index integration was reverted after measurement.
+  Event-overlap/QD4 scheduling was also reverted: its result was within noise and
+  hid GPU time in the host-side phase ledger.
+- State format v2 with occupied MLA and DSA index-key rows. V1 state files are
+  rejected; derived top-k indices and expert-cache/LRU state remain excluded.
+- An offline pinned-checkpoint inspector and deterministic capacity-safe
+  whole-layer sidecar placement planner, with synthetic fixtures.
+- Manifest-driven K3.1 static/MZG2 bundle and resumable conversion tooling.
+  Source/layout identities come from checkpoint inspection; DSA/indexer tensors
+  remain BF16, stale K3 artifacts are rejected, and native sidecars require an
+  explicit matching source manifest.
+
+### Changed
+
+- Public server, model discovery, request, and response identity now use
+  `moonshotai/Kimi-K3.1-Pro`; the version is
+  `0.3.0-k3.1-research-preview`.
+- Public reasoning effort is `low`, `high`, or `max`, default `max`. Public
+  `medium` is rejected even though the internal official-XTML renderer retains
+  it for format compatibility.
+- Chat Completions explicitly rejects image, audio, and other non-text content;
+  the public endpoint is text-only.
+
+### Verified
+
+- `make -j4 test-cpu`: PASS.
+- `make -j4 test`: PASS on AMD Radeon 8060S `gfx1151`.
+- DSA GPU tests cover LayerNorm/scoring, top-k boundaries, ties,
+  negative-infinity padding, sparse attention, and decode/prefill equivalence.
+- Generated K3.1 bundles round-trip through the native loader. Python and C
+  compute the same layout-plus-profile CRC64 fixture (`0e85db34387f4e0e`).
+- The CPU DSA oracle also passed ASan/UBSan.
+- Real 8K Beelink bundle load and generation: 102.243-second startup; 20 tokens
+  at 0.489 tok/s; normal `hello` response; 114 cached tokens on the follow-up.
+- A longer 128-token sustained decode completed at 0.501 tok/s with coherent
+  output and the expected `length` stop at the configured output cap.
+- Live tool calling and tool-result continuation passed, including 277 reused
+  tokens on the continuation. Structured JSON passed after raising the output
+  ceiling. Public medium/image/old-model rejection returned HTTP 400.
+- Real state-v2 checkpoints survived a process restart: two entries reloaded,
+  and the continuation reused 161 tokens with a normal response.
+- Checkpoint displacement/restart and state corruption fixtures passed. Header,
+  stale-model, payload and truncation rejection preserved exact continuation.
+- The isolated official OpenAI SDK fixture passed with `openai 2.52.0`.
+- The 15,993-token natural-text retrieval gate returned `saffron|7319|Nivens`
+  exactly. Prefill ran at 6.545 tok/s and 17-token decode at 0.478 tok/s.
+- The 31,999-token retrieval gate also returned `saffron|7319|Nivens` exactly;
+  prefill ran at 5.438 tok/s and 17-token decode at 0.462 tok/s.
+- The 63,971-token retrieval gate returned `saffron|7319|Nivens` exactly;
+  prefill ran at 4.397 tok/s and 17-token decode at 0.454 tok/s. Startup took
+  93.976 seconds, prefill 14,547.439 seconds, and 17-token decode 37.485
+  seconds. Reported prefill phases were KDA 2,585.803 seconds, DSA 8,101.056
+  seconds, expert stream 3,463.059 seconds, and MoE tail 248.327 seconds.
+
+Synthetic gates do not establish full-model quality, and the real canary is not
+production qualification. The official Python SDK fixture passed with
+`openai 2.52.0`. Official FP8/MXFP4 index-cache formats
+are not implemented or qualified; the current cache is BF16. Full K3.1 MZG2
+conversion and verification passed for all 92 layers and 82,432 experts, and the
+bundle completed the real 8K startup/generation/prefix-reuse canary. Natural-text
+retrieval is qualified only through the stated 63,971-token run; contexts above
+64K, continuous long-output performance, third-party agent clients, and a
+production soak remain open.
 
 ## [0.2.0-research-preview] - 2026-08-01
 

@@ -31,7 +31,7 @@ static bool cancel_after_first_prefill(
 
 int main(int argc, char **argv) {
     if (argc != 2) {
-        fprintf(stderr, "usage: %s /path/to/moonshotai__Kimi-K3\n",
+        fprintf(stderr, "usage: %s /path/to/moonshotai__Kimi-K3.1-Pro\n",
                 argv[0]);
         return 2;
     }

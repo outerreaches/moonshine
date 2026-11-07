@@ -1,6 +1,7 @@
 #include "k3_bundle.h"
 
 #include "k3_json.h"
+#include "k3_sha256.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -17,12 +18,10 @@
 
 enum { K3_BUNDLE_MANIFEST_MAX = 1024 * 1024 };
 
-static const char *K3_BUNDLE_SCHEMA = "moonshine-k3-mzg2-bundle-v1";
-static const char *K3_BUNDLE_BASE_MODEL = "moonshotai/Kimi-K3";
+static const char *K3_BUNDLE_SCHEMA = "moonshine-k31-mzg2-bundle-v1";
+static const char *K3_BUNDLE_BASE_MODEL = "moonshotai/Kimi-K3.1-Pro";
 static const char *K3_BUNDLE_BASE_REVISION =
-    "9f62e4e9fffbd0a83ddd60e1c209d828994b3569";
-static const char *K3_BUNDLE_SOURCE_MANIFEST =
-    "476fa0ba64e3233cbb9ca0642327361a73f6807e751edb071c92fa2216b202a4";
+    "6d0a0202956796543364d666ab19c6ad1a494ee1";
 static const char *K3_BUNDLE_EXPERT_NAMES[K3_BUNDLE_EXPERT_TENSORS] = {
     "w1.weight_packed", "w1.weight_scale",
     "w2.weight_packed", "w2.weight_scale",
@@ -224,10 +223,9 @@ bool k3_bundle_load(k3_bundle *bundle, const char *root,
         strcmp(schema, K3_BUNDLE_SCHEMA) == 0 && version == 1u &&
         strcmp(base_model, K3_BUNDLE_BASE_MODEL) == 0 &&
         strcmp(base_revision, K3_BUNDLE_BASE_REVISION) == 0 &&
-        strcmp(source_manifest, K3_BUNDLE_SOURCE_MANIFEST) == 0 &&
+        is_sha256(source_manifest) &&
         parse_hex_u64(layout_crc, &bundle->source_model_layout_crc64) &&
-        bundle->source_model_layout_crc64 ==
-            K3_BUNDLE_MODEL_LAYOUT_CRC64;
+        bundle->source_model_layout_crc64 != 0u;
     const int32_t static_store = k3_json_object_get(
         &document, document.root, "static_store");
     ok = ok && static_store >= 0 &&
@@ -237,27 +235,29 @@ bool k3_bundle_load(k3_bundle *bundle, const char *root,
         required_u64(&document, static_store, "payload_bytes", &bundle->static_payload_bytes) &&
         required_u64(&document, static_store, "file_bytes", &bundle->static_file_bytes) &&
         required_string(&document, static_store, "sha256", &static_sha, error, error_size) &&
-        bundle->static_tensor_count == K3_BUNDLE_STATIC_TENSORS &&
-        bundle->static_payload_bytes == K3_BUNDLE_STATIC_PAYLOAD_BYTES &&
+        bundle->static_tensor_count > 0u &&
+        bundle->static_payload_bytes > 0u &&
         bundle->static_file_bytes > bundle->static_payload_bytes &&
         is_sha256(static_sha) &&
         path_join(bundle->static_path, root, static_path) &&
         regular_file_size(bundle->static_path, bundle->static_file_bytes);
     const int32_t routed_store = k3_json_object_get(
         &document, document.root, "routed_store");
-    uint32_t layers = 0u, experts_per_layer = 0u, experts = 0u, tile_bytes = 0u;
+    uint32_t tile_bytes = 0u;
     ok = ok && routed_store >= 0 &&
         document.tokens[routed_store].type == K3_JSON_OBJECT &&
         required_string(&document, routed_store, "format", &routed_format, error, error_size) &&
         required_string(&document, routed_store, "path", &routed_path, error, error_size) &&
-        required_u32(&document, routed_store, "layers", &layers) &&
-        required_u32(&document, routed_store, "experts_per_layer", &experts_per_layer) &&
-        required_u32(&document, routed_store, "experts", &experts) &&
+        required_u32(&document, routed_store, "layers", &bundle->layers) &&
+        required_u32(&document, routed_store, "experts_per_layer", &bundle->experts_per_layer) &&
+        required_u32(&document, routed_store, "experts", &bundle->experts) &&
         required_u32(&document, routed_store, "tile_bytes", &tile_bytes) &&
         required_string(&document, routed_store, "manifest_sha256", &routed_sha, error, error_size) &&
-        strcmp(routed_format, "mzg2") == 0 && layers == K3_BUNDLE_LAYERS &&
-        experts_per_layer == K3_BUNDLE_EXPERTS_PER_LAYER &&
-        experts == K3_BUNDLE_EXPERTS && tile_bytes == K3_BUNDLE_TILE_BYTES &&
+        strcmp(routed_format, "mzg2") == 0 &&
+        bundle->layers > 0u && bundle->experts_per_layer > 0u &&
+        (uint64_t)bundle->experts ==
+            (uint64_t)bundle->layers * bundle->experts_per_layer &&
+        tile_bytes == K3_BUNDLE_TILE_BYTES &&
         is_sha256(routed_sha) &&
         path_join(bundle->mzg2_path, root, routed_path);
     struct stat routed_status;
@@ -287,6 +287,13 @@ bool k3_bundle_load(k3_bundle *bundle, const char *root,
             bytes == K3_BUNDLE_EXPERT_SIZES[index];
         free(name);
     }
+    if (ok) {
+        memcpy(bundle->static_sha256, static_sha, 65u);
+        memcpy(bundle->mzg2_manifest_sha256, routed_sha, 65u);
+        memcpy(bundle->source_manifest_sha256, source_manifest, 65u);
+        ok = path_join(bundle->mzg2_manifest_path, bundle->mzg2_path,
+                       "expert-store.json");
+    }
     if (!ok) bundle_error(error, error_size, "invalid standalone bundle manifest");
 
 cleanup:
@@ -296,4 +303,43 @@ cleanup:
     k3_json_document_free(&document);
     free(text);
     return ok;
+}
+
+bool k3_bundle_open_verified_static(const k3_bundle *bundle,
+                                    int *static_fd,
+                                    char *error,
+                                    size_t error_size) {
+    if (error && error_size) error[0] = ' ';
+    if (static_fd) *static_fd = -1;
+    if (!bundle || !static_fd) {
+        bundle_error(error, error_size,
+                     "invalid bundle artifact verification arguments");
+        return false;
+    }
+    const int fd = open(
+        bundle->static_path,
+        O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    struct stat status;
+    if (fd < 0 || fstat(fd, &status) != 0 ||
+        !S_ISREG(status.st_mode) ||
+        (uint64_t)status.st_size != bundle->static_file_bytes) {
+        const int saved = errno;
+        if (fd >= 0) close(fd);
+        bundle_error(error, error_size,
+                     "open verified bundle static file: %s",
+                     strerror(saved ? saved : EINVAL));
+        return false;
+    }
+    if (!k3_sha256_fd_matches(fd,
+                              bundle->static_path,
+                              bundle->static_sha256,
+                              error, error_size) ||
+        !k3_sha256_file_matches(bundle->mzg2_manifest_path,
+                                bundle->mzg2_manifest_sha256,
+                                error, error_size)) {
+        close(fd);
+        return false;
+    }
+    *static_fd = fd;
+    return true;
 }

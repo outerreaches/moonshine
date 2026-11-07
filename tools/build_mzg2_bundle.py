@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the source-precision static tier for a standalone Moonshine MZG2 bundle."""
+"""Build the source-precision static tier for a standalone Kimi K3.1 MZG2 bundle."""
 
 from __future__ import annotations
 
@@ -14,18 +14,26 @@ import subprocess
 import sys
 from typing import BinaryIO
 
-PINNED_SHARDS = 96
-PINNED_TENSORS = 2_460
-PINNED_PAYLOAD_BYTES = 113_509_540_864
-PINNED_SOURCE_MANIFEST_SHA256 = (
-    "476fa0ba64e3233cbb9ca0642327361a73f6807e751edb071c92fa2216b202a4"
+from k31_checkpoint import (
+    ARCHITECTURE,
+    EXPERT_LAYOUT,
+    EXPERT_SPAN_BYTES,
+    MODEL_TYPE,
+    OFFICIAL_EXPERTS_PER_LAYER,
+    OFFICIAL_ROUTED_LAYERS,
+    OFFICIAL_SHARDS,
+    SCHEMA as CHECKPOINT_SCHEMA,
+    UPSTREAM_ID,
+    UPSTREAM_REVISION,
+    canonical_json,
+    inspect_checkpoint,
 )
-STATIC_SCHEMA = "moonshine-k3-static-pack-v1"
-DTYPE_CODE = {"BF16": 1, "F32": 2, "U8": 3}
-CRC64_POLYNOMIAL = 0x42F0E1EBA9EA3693
-BUNDLE_SCHEMA = "moonshine-k3-mzg2-bundle-v1"
-BASE_MODEL = "moonshotai/Kimi-K3"
-BASE_REVISION = "9f62e4e9fffbd0a83ddd60e1c209d828994b3569"
+
+STATIC_SCHEMA = "moonshine-k31-static-pack-v1"
+BUNDLE_SCHEMA = "moonshine-k31-mzg2-bundle-v1"
+MZG2_STORE_SCHEMA = "moonshine-k31-mzg2-full-v1"
+BASE_MODEL = UPSTREAM_ID
+BASE_REVISION = UPSTREAM_REVISION
 CHUNK_BYTES = 16 * 1024 * 1024
 AUXILIARY_FILES = (
     ("config.json", "config.json"),
@@ -34,15 +42,7 @@ AUXILIARY_FILES = (
     ("tiktoken.model", "tiktoken.model"),
     ("encoding_k3.py", "encoding_k3.py"),
     ("LICENSE", "LICENSE"),
-    ("manifest.tsv", "source-manifest.tsv"),
-)
-EXPERT_LAYOUT = (
-    ("w1.weight_packed", 0, 5_505_024),
-    ("w1.weight_scale", 5_505_024, 344_064),
-    ("w2.weight_packed", 5_849_088, 5_505_024),
-    ("w2.weight_scale", 11_354_112, 344_064),
-    ("w3.weight_packed", 11_698_176, 5_505_024),
-    ("w3.weight_scale", 17_203_200, 344_064),
+    ("model.safetensors.index.json", "model.safetensors.index.json"),
 )
 HEADER_ALIGNMENT = 4096
 
@@ -60,6 +60,7 @@ def atomic_json(path: Path, value: object) -> None:
         os.fsync(stream.fileno())
     os.replace(temporary, path)
 
+
 def fsync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -76,83 +77,6 @@ def fsync_file(path: Path) -> None:
         os.close(descriptor)
 
 
-
-def crc64_table() -> list[int]:
-    mask = (1 << 64) - 1
-    table: list[int] = []
-    for value in range(256):
-        crc = value << 56
-        for _ in range(8):
-            crc = (
-                ((crc << 1) & mask) ^ CRC64_POLYNOMIAL
-                if crc & (1 << 63)
-                else (crc << 1) & mask
-            )
-        table.append(crc)
-    return table
-
-
-CRC64_TABLE = crc64_table()
-
-
-def crc64_update(crc: int, data: bytes) -> int:
-    mask = (1 << 64) - 1
-    for byte in data:
-        crc = CRC64_TABLE[((crc >> 56) ^ byte) & 0xFF] ^ ((crc << 8) & mask)
-    return crc
-
-
-def crc64_integer(crc: int, value: int, byte_count: int) -> int:
-    return crc64_update(crc, value.to_bytes(byte_count, "little"))
-
-
-def source_model_layout_crc64(model: Path) -> int:
-    shard_metadata: list[tuple[int, int]] = []
-    tensors: list[tuple[str, int, int, int, int, int, list[int]]] = []
-    for shard_index, shard in enumerate(shard_paths(model)):
-        data_offset, header = load_header(shard)
-        shard_metadata.append((shard.stat().st_size, data_offset))
-        for name, raw_meta in header.items():
-            if name == "__metadata__" or not isinstance(raw_meta, dict):
-                continue
-            offsets = raw_meta.get("data_offsets")
-            shape = raw_meta.get("shape")
-            dtype = raw_meta.get("dtype")
-            size = tensor_bytes(raw_meta)
-            if (
-                not isinstance(offsets, list)
-                or not isinstance(shape, list)
-                or dtype not in DTYPE_CODE
-            ):
-                raise ValueError(f"invalid source tensor metadata: {name}")
-            tensors.append((
-                name,
-                data_offset + offsets[0],
-                size,
-                shard_index,
-                len(shape),
-                DTYPE_CODE[dtype],
-                shape,
-            ))
-    tensors.sort(key=lambda item: item[0])
-    crc = crc64_integer(0, len(shard_metadata), 8)
-    for file_bytes, data_offset in shard_metadata:
-        crc = crc64_integer(crc, file_bytes, 8)
-        crc = crc64_integer(crc, data_offset, 8)
-    crc = crc64_integer(crc, len(tensors), 8)
-    for name, physical_offset, size, shard, ndim, dtype, shape in tensors:
-        encoded = name.encode()
-        crc = crc64_integer(crc, len(encoded), 8)
-        crc = crc64_update(crc, encoded)
-        crc = crc64_integer(crc, physical_offset, 8)
-        crc = crc64_integer(crc, size, 8)
-        crc = crc64_integer(crc, shard, 2)
-        crc = crc64_integer(crc, ndim, 4)
-        crc = crc64_integer(crc, dtype, 4)
-        for dimension in shape:
-            crc = crc64_integer(crc, int(dimension), 8)
-    return crc
-
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -161,11 +85,8 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def shard_paths(model: Path) -> list[Path]:
-    return sorted(model.glob("model-*.safetensors"))
-
-
 def load_header(path: Path) -> tuple[int, dict[str, object]]:
+    """Read a SafeTensors header, used for generated static-pack verification."""
     with path.open("rb") as stream:
         prefix = stream.read(8)
         if len(prefix) != 8:
@@ -182,72 +103,216 @@ def load_header(path: Path) -> tuple[int, dict[str, object]]:
     return 8 + header_bytes, value
 
 
-def tensor_bytes(meta: dict[str, object]) -> int:
-    offsets = meta.get("data_offsets")
+def _integer(value: object) -> bool:
+    return type(value) is int
+
+
+def _valid_digest(value: object) -> bool:
+    if not isinstance(value, str) or len(value) != 64:
+        return False
+    try:
+        int(value, 16)
+    except ValueError:
+        return False
+    return value == value.lower()
+
+
+def validate_source_manifest(source: object) -> None:
+    """Validate the inspector contract consumed by all bundle stages."""
+    if not isinstance(source, dict) or source.get("schema") != CHECKPOINT_SCHEMA:
+        raise ValueError("source is not a K3.1 checkpoint inspection manifest")
+    upstream = source.get("upstream")
+    if upstream != {
+        "id": UPSTREAM_ID,
+        "revision": UPSTREAM_REVISION,
+        "architecture": ARCHITECTURE,
+        "model_type": MODEL_TYPE,
+    }:
+        raise ValueError("source checkpoint model identity mismatch")
+    if source.get("verification") not in {"metadata-only", "full-sha256"}:
+        raise ValueError("invalid source checkpoint verification mode")
+    if not _valid_digest(source.get("source_layout_sha256")):
+        raise ValueError("invalid source layout SHA-256")
+    layout_crc = source.get("source_model_layout_crc64")
+    if not isinstance(layout_crc, str) or len(layout_crc) != 16:
+        raise ValueError("invalid source model layout CRC64")
+    try:
+        if int(layout_crc, 16) == 0 or layout_crc != layout_crc.lower():
+            raise ValueError("invalid source model layout CRC64")
+    except ValueError as error:
+        raise ValueError("invalid source model layout CRC64") from error
+
+    integer_fields = (
+        "tensor_count", "total_bytes", "file_bytes",
+        "static_tensor_count", "static_bytes",
+    )
+    if any(not _integer(source.get(name)) or int(source[name]) < 0 for name in integer_fields):
+        raise ValueError("invalid source checkpoint inventory counts")
+
+    raw_shards = source.get("shards")
+    if not isinstance(raw_shards, list) or not raw_shards:
+        raise ValueError("source checkpoint has no shard metadata")
+    shards: dict[str, dict[str, object]] = {}
+    for record in raw_shards:
+        if not isinstance(record, dict) or not isinstance(record.get("name"), str):
+            raise ValueError("invalid source shard record")
+        name = str(record["name"])
+        if name in shards or Path(name).name != name:
+            raise ValueError("duplicate or unsafe source shard name")
+        if any(
+            not _integer(record.get(field)) or int(record[field]) < 0
+            for field in ("bytes", "header_bytes", "data_offset", "tensor_count")
+        ):
+            raise ValueError("invalid source shard metadata")
+        if (
+            int(record["bytes"]) <= 0
+            or int(record["data_offset"]) != int(record["header_bytes"]) + 8
+            or int(record["data_offset"]) > int(record["bytes"])
+        ):
+            raise ValueError("invalid source shard offsets")
+        shards[name] = record
     if (
-        not isinstance(offsets, list)
-        or len(offsets) != 2
-        or not all(isinstance(item, int) for item in offsets)
-        or offsets[0] < 0
-        or offsets[1] < offsets[0]
+        sum(int(record["tensor_count"]) for record in raw_shards) != source["tensor_count"]
+        or sum(int(record["bytes"]) for record in raw_shards) != source["file_bytes"]
     ):
-        raise ValueError("invalid SafeTensors data_offsets")
-    return offsets[1] - offsets[0]
+        raise ValueError("source shard totals do not match checkpoint inventory")
 
+    geometry = source.get("expert_geometry")
+    if not isinstance(geometry, dict):
+        raise ValueError("missing K3.1 expert geometry")
+    geometry_fields = (
+        "routed_layers", "experts_per_layer", "expert_count",
+        "tensors_per_expert", "bytes_per_expert", "routed_tensor_count",
+        "routed_bytes",
+    )
+    if any(
+        not _integer(geometry.get(field)) or int(geometry[field]) < 0
+        for field in geometry_fields
+    ):
+        raise ValueError("invalid K3.1 expert geometry")
+    if geometry["bytes_per_expert"] != EXPERT_SPAN_BYTES:
+        raise ValueError(
+            f"expert span mismatch: {geometry['bytes_per_expert']} != {EXPERT_SPAN_BYTES}"
+        )
+    experts = int(geometry["routed_layers"]) * int(geometry["experts_per_layer"])
+    if (
+        geometry["expert_count"] != experts
+        or geometry["tensors_per_expert"] != len(EXPERT_LAYOUT)
+        or geometry["routed_tensor_count"] != experts * len(EXPERT_LAYOUT)
+        or geometry["routed_bytes"] != experts * EXPERT_SPAN_BYTES
+    ):
+        raise ValueError("inconsistent K3.1 routed expert inventory")
+    layout = geometry.get("tensor_layout")
+    if not isinstance(layout, list) or len(layout) != len(EXPERT_LAYOUT):
+        raise ValueError("invalid K3.1 expert tensor layout")
+    offset = 0
+    for record, (expected_name, expected_bytes) in zip(layout, EXPERT_LAYOUT):
+        if (
+            not isinstance(record, dict)
+            or record.get("name") != expected_name
+            or record.get("dtype") != "U8"
+            or record.get("offset") != offset
+            or record.get("bytes") != expected_bytes
+        ):
+            raise ValueError("K3.1 expert tensor layout mismatch")
+        offset += expected_bytes
+    if offset != EXPERT_SPAN_BYTES:
+        raise ValueError("K3.1 expert layout does not fill the exact expert span")
 
-def is_required_tensor(name: str) -> bool:
-    return name.startswith("language_model.") and \
-        ".block_sparse_moe.experts." not in name
-
-
-def discover_static_tensors(model: Path) -> list[dict[str, object]]:
-    tensors: list[dict[str, object]] = []
+    static = source.get("static_tensors")
+    if not isinstance(static, list) or len(static) != source["static_tensor_count"]:
+        raise ValueError("static tensor inventory count mismatch")
     seen: set[str] = set()
-    for shard_index, shard in enumerate(shard_paths(model)):
-        data_offset, header = load_header(shard)
-        file_bytes = shard.stat().st_size
-        for name, raw_meta in header.items():
-            if name == "__metadata__" or not is_required_tensor(name):
-                continue
-            if name in seen or not isinstance(raw_meta, dict):
-                raise ValueError(f"duplicate/invalid required tensor: {name}")
-            meta = dict(raw_meta)
-            offsets = meta.get("data_offsets")
-            size = tensor_bytes(meta)
-            assert isinstance(offsets, list)
-            physical_offset = data_offset + offsets[0]
-            if physical_offset + size > file_bytes:
-                raise ValueError(f"tensor exceeds source shard: {name}")
-            dtype = meta.get("dtype")
-            shape = meta.get("shape")
-            if (
-                dtype not in {"BF16", "F32"}
-                or not isinstance(shape, list)
-                or not shape
-                or not all(
-                    isinstance(value, int) and value > 0 for value in shape
-                )
-            ):
-                raise ValueError(f"unsupported required tensor: {name}")
-            elements = 1
-            for dimension in shape:
-                elements *= dimension
-            scalar_bytes = 2 if dtype == "BF16" else 4
-            if elements * scalar_bytes != size:
-                raise ValueError(
-                    f"required tensor shape/size mismatch: {name}"
-                )
-            tensors.append({
-                "name": name,
-                "dtype": dtype,
-                "shape": shape,
-                "bytes": size,
-                "source_shard": shard_index,
-                "source_path": str(shard),
-                "source_offset": physical_offset,
-            })
-            seen.add(name)
-    tensors.sort(key=lambda item: str(item["name"]))
+    static_bytes = 0
+    for tensor in static:
+        if not isinstance(tensor, dict):
+            raise ValueError("invalid static tensor record")
+        name = tensor.get("name")
+        dtype = tensor.get("dtype")
+        shape = tensor.get("shape")
+        size = tensor.get("bytes")
+        shard_name = tensor.get("source_shard")
+        offsets = tensor.get("data_offsets")
+        source_offset = tensor.get("source_offset")
+        if (
+            not isinstance(name, str)
+            or not name.startswith("language_model.")
+            or name in seen
+            or dtype not in {"BF16", "F32"}
+            or not isinstance(shape, list)
+            or not shape
+            or any(not _integer(value) or value <= 0 for value in shape)
+            or not _integer(size)
+            or int(size) <= 0
+            or not isinstance(shard_name, str)
+            or shard_name not in shards
+            or not isinstance(offsets, list)
+            or len(offsets) != 2
+            or any(not _integer(value) for value in offsets)
+            or not _integer(source_offset)
+        ):
+            raise ValueError("invalid K3.1 static tensor inventory")
+        start, end = offsets
+        shard = shards[shard_name]
+        if (
+            start < 0
+            or end != start + int(size)
+            or source_offset != int(shard["data_offset"]) + start
+            or int(source_offset) + int(size) > int(shard["bytes"])
+        ):
+            raise ValueError(f"invalid static tensor source span: {name}")
+        elements = 1
+        for dimension in shape:
+            elements *= int(dimension)
+        if elements * (2 if dtype == "BF16" else 4) != size:
+            raise ValueError(f"static tensor shape/size mismatch: {name}")
+        seen.add(name)
+        static_bytes += int(size)
+    if static_bytes != source["static_bytes"]:
+        raise ValueError("static tensor inventory byte count mismatch")
+    if (
+        int(source["static_tensor_count"]) + int(geometry["routed_tensor_count"])
+            > int(source["tensor_count"])
+        or int(source["static_bytes"]) + int(geometry["routed_bytes"])
+            > int(source["total_bytes"])
+    ):
+        raise ValueError("checkpoint inventory is smaller than its static and routed tiers")
+
+
+def inspect_source(
+    model: Path,
+    *,
+    verify_sha256: bool = False,
+    expected_shards: int = OFFICIAL_SHARDS,
+    expected_routed_layers: int = OFFICIAL_ROUTED_LAYERS,
+    expected_experts_per_layer: int = OFFICIAL_EXPERTS_PER_LAYER,
+) -> dict[str, object]:
+    source = inspect_checkpoint(
+        model,
+        verify_sha256=verify_sha256,
+        expected_shards=expected_shards,
+        expected_routed_layers=expected_routed_layers,
+        expected_experts_per_layer=expected_experts_per_layer,
+    )
+    validate_source_manifest(source)
+    return source
+
+
+def static_tensors_from_source(
+    model: Path,
+    source: dict[str, object],
+) -> list[dict[str, object]]:
+    validate_source_manifest(source)
+    tensors: list[dict[str, object]] = []
+    for record in source["static_tensors"]:
+        assert isinstance(record, dict)
+        item = dict(record)
+        item["source_path"] = str(model / str(record["source_shard"]))
+        tensors.append(item)
+    if not tensors:
+        raise ValueError("empty static tensor inventory")
+    if sum(int(item["bytes"]) for item in tensors) != source["static_bytes"]:
+        raise ValueError("unexpected static payload bytes")
     return tensors
 
 
@@ -259,12 +324,11 @@ def make_static_header(
     planned: list[dict[str, object]] = []
     for source in tensors:
         size = int(source["bytes"])
-        entry = {
+        metadata[str(source["name"])] = {
             "dtype": source["dtype"],
             "shape": source["shape"],
             "data_offsets": [cursor, cursor + size],
         }
-        metadata[str(source["name"])] = entry
         planned.append({**source, "output_offset": cursor})
         cursor += size
     encoded = json.dumps(metadata, separators=(",", ":"), sort_keys=True).encode()
@@ -313,9 +377,7 @@ def verify_tensor(
             left = source.read(request)
             right = output.read(request)
             if len(left) != request or len(right) != request or left != right:
-                raise ValueError(
-                    f"static tensor verification failed: {source_path}"
-                )
+                raise ValueError(f"static tensor verification failed: {source_path}")
             source_digest.update(left)
             output_digest.update(right)
             remaining -= request
@@ -327,97 +389,87 @@ def verify_tensor(
     return digest
 
 
-def validate_source_manifest(
-    model: Path,
-    expected_sha256: str | None,
-    *,
-    verify_shard_hashes: bool = False,
+def _progress_identity(
+    source: dict[str, object],
+    planned: list[dict[str, object]],
 ) -> str:
-    if expected_sha256 is None:
-        return "synthetic"
-    manifest_path = model / "manifest.tsv"
-    digest = sha256_file(manifest_path)
-    if digest != expected_sha256:
-        raise ValueError("source manifest SHA-256 mismatch")
-    entries: dict[str, tuple[int, str]] = {}
-    for line in manifest_path.read_text().splitlines():
-        parts = line.split("\t")
-        if len(parts) != 3 or not parts[1].isdigit() or len(parts[2]) != 64:
-            raise ValueError("invalid source manifest entry")
-        entries[parts[0]] = (int(parts[1]), parts[2])
-    paths = shard_paths(model)
-    if len(entries) != len(paths):
-        raise ValueError("source manifest shard count mismatch")
-    for path in paths:
-        entry = entries.get(path.name)
-        if entry is None or entry[0] != path.stat().st_size:
-            raise ValueError(
-                f"source shard size/manifest mismatch: {path.name}"
+    records = [
+        {
+            key: item[key]
+            for key in (
+                "name", "dtype", "shape", "bytes", "source_shard",
+                "source_offset", "output_offset",
             )
-        if verify_shard_hashes and sha256_file(path) != entry[1]:
-            raise ValueError(f"source shard SHA-256 mismatch: {path.name}")
-    return digest
+        }
+        for item in planned
+    ]
+    return hashlib.sha256(canonical_json({
+        "source_layout_sha256": source["source_layout_sha256"],
+        "static_tensors": records,
+    }).encode("utf-8")).hexdigest()
 
 
-def validate_inventory(
-    tensors: list[dict[str, object]],
-    expected_shards: int | None,
-    expected_tensors: int | None,
-    expected_payload_bytes: int | None,
-) -> None:
-    if not tensors:
-        raise ValueError("empty static tensor inventory")
-    payload_bytes = sum(int(item["bytes"]) for item in tensors)
-    model_root = Path(str(tensors[0]["source_path"])).parent
-    if expected_shards is not None and len(shard_paths(model_root)) != expected_shards:
-        raise ValueError("unexpected source shard count")
-    if expected_tensors is not None and len(tensors) != expected_tensors:
-        raise ValueError("unexpected static tensor count")
-    if expected_payload_bytes is not None and payload_bytes != expected_payload_bytes:
-        raise ValueError("unexpected static payload bytes")
+def _source_fields(source: dict[str, object]) -> dict[str, object]:
+    return {
+        "source_layout_sha256": source["source_layout_sha256"],
+        "source_manifest_sha256": source["source_layout_sha256"],
+        "source_model_layout_crc64": source["source_model_layout_crc64"],
+        "source_checkpoint_schema": source["schema"],
+        "source_verification": source["verification"],
+        "source_tensor_count": source["tensor_count"],
+        "source_total_bytes": source["total_bytes"],
+        "source_file_bytes": source["file_bytes"],
+        "source_shard_count": len(source["shards"]),
+        "source_shards": source["shards"],
+    }
 
 
 def build_static_pack(
     model: Path,
     output: Path,
     *,
-    expected_shards: int | None = PINNED_SHARDS,
-    expected_tensors: int | None = PINNED_TENSORS,
-    expected_payload_bytes: int | None = PINNED_PAYLOAD_BYTES,
-    expected_source_manifest_sha256: str | None =
-        PINNED_SOURCE_MANIFEST_SHA256,
+    source_manifest: dict[str, object] | None = None,
+    expected_shards: int = OFFICIAL_SHARDS,
+    expected_routed_layers: int = OFFICIAL_ROUTED_LAYERS,
+    expected_experts_per_layer: int = OFFICIAL_EXPERTS_PER_LAYER,
+    verify_source_hashes: bool = False,
 ) -> dict[str, object]:
-    source_manifest_sha256 = validate_source_manifest(
-        model, expected_source_manifest_sha256
+    if output.exists():
+        raise ValueError(f"published static pack already exists: {output}")
+    source = source_manifest if source_manifest is not None else inspect_source(
+        model,
+        verify_sha256=verify_source_hashes,
+        expected_shards=expected_shards,
+        expected_routed_layers=expected_routed_layers,
+        expected_experts_per_layer=expected_experts_per_layer,
     )
-    tensors = discover_static_tensors(model)
-    validate_inventory(
-        tensors, expected_shards, expected_tensors, expected_payload_bytes
-    )
-    source_model_crc64 = source_model_layout_crc64(model)
+    tensors = static_tensors_from_source(model, source)
     header, planned = make_static_header(tensors)
     partial = output.with_name(output.name + ".partial")
     progress_path = output.with_name(output.name + ".progress.json")
-    identity = hashlib.sha256(
-        json.dumps(
-            [{key: item[key] for key in ("name", "dtype", "shape", "bytes", "source_shard", "source_offset")} for item in planned],
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
+    identity = _progress_identity(source, planned)
     completed: list[dict[str, object]] = []
     if partial.exists() or progress_path.exists():
         if not partial.exists() or not progress_path.exists():
             raise ValueError("incomplete static-pack resume pair")
         progress = json.loads(progress_path.read_text())
-        if progress.get("schema") != STATIC_SCHEMA or progress.get("identity") != identity:
+        if (
+            progress.get("schema") != STATIC_SCHEMA
+            or progress.get("identity") != identity
+            or progress.get("source_layout_sha256") != source["source_layout_sha256"]
+        ):
             raise ValueError("static-pack progress identity mismatch")
-        completed = list(progress.get("completed", []))
+        raw_completed = progress.get("completed")
+        if not isinstance(raw_completed, list) or len(raw_completed) > len(planned):
+            raise ValueError("invalid static-pack completed inventory")
+        completed = raw_completed
         with partial.open("rb") as output_stream:
             if output_stream.read(len(header)) != header:
                 raise ValueError("static-pack partial header mismatch")
             for index, record in enumerate(completed):
                 item = planned[index]
+                if not isinstance(record, dict) or not _valid_digest(record.get("sha256")):
+                    raise ValueError("invalid static-pack completed tensor record")
                 digest = verify_tensor(
                     Path(str(item["source_path"])),
                     int(item["source_offset"]),
@@ -437,14 +489,15 @@ def build_static_pack(
         atomic_json(progress_path, {
             "schema": STATIC_SCHEMA,
             "identity": identity,
+            "source_layout_sha256": source["source_layout_sha256"],
             "completed": [],
         })
     with partial.open("r+b", buffering=0) as destination:
         for index in range(len(completed), len(planned)):
             item = planned[index]
-            with Path(str(item["source_path"])).open("rb", buffering=0) as source:
+            with Path(str(item["source_path"])).open("rb", buffering=0) as source_stream:
                 digest = copy_tensor(
-                    source,
+                    source_stream,
                     destination,
                     int(item["source_offset"]),
                     len(header) + int(item["output_offset"]),
@@ -457,21 +510,27 @@ def build_static_pack(
                 atomic_json(progress_path, {
                     "schema": STATIC_SCHEMA,
                     "identity": identity,
+                    "source_layout_sha256": source["source_layout_sha256"],
                     "completed": completed,
                 })
         destination.flush()
         os.fsync(destination.fileno())
+    if len(completed) != len(planned):
+        raise ValueError("static-pack conversion did not complete")
     with partial.open("rb") as output_stream:
         for index, item in enumerate(planned):
+            record = completed[index]
+            if not isinstance(record, dict):
+                raise ValueError("invalid completed static tensor")
             verify_tensor(
                 Path(str(item["source_path"])),
                 int(item["source_offset"]),
                 output_stream,
                 len(header) + int(item["output_offset"]),
                 int(item["bytes"]),
-                str(completed[index]["sha256"]),
+                str(record["sha256"]),
             )
-    expected_file_bytes = len(header) + sum(int(item["bytes"]) for item in planned)
+    expected_file_bytes = len(header) + int(source["static_bytes"])
     if partial.stat().st_size != expected_file_bytes:
         raise ValueError("static-pack file size mismatch")
     file_sha256 = sha256_file(partial)
@@ -482,11 +541,10 @@ def build_static_pack(
         "version": 1,
         "base_model": BASE_MODEL,
         "base_revision": BASE_REVISION,
-        "source_manifest_sha256": source_manifest_sha256,
+        **_source_fields(source),
         "path": output.name,
-        "tensor_count": len(planned),
-        "payload_bytes": sum(int(item["bytes"]) for item in planned),
-        "source_model_layout_crc64": f"{source_model_crc64:016x}",
+        "tensor_count": source["static_tensor_count"],
+        "payload_bytes": source["static_bytes"],
         "file_bytes": expected_file_bytes,
         "sha256": file_sha256,
         "header_bytes": len(header),
@@ -501,22 +559,36 @@ def verify_static_pack(
     output: Path,
     manifest_path: Path,
     *,
-    expected_shards: int | None = PINNED_SHARDS,
-    expected_tensors: int | None = PINNED_TENSORS,
-    expected_payload_bytes: int | None = PINNED_PAYLOAD_BYTES,
-    expected_source_manifest_sha256: str | None =
-        PINNED_SOURCE_MANIFEST_SHA256,
+    source_manifest: dict[str, object] | None = None,
+    expected_shards: int = OFFICIAL_SHARDS,
+    expected_routed_layers: int = OFFICIAL_ROUTED_LAYERS,
+    expected_experts_per_layer: int = OFFICIAL_EXPERTS_PER_LAYER,
+    verify_source_hashes: bool = False,
 ) -> dict[str, object]:
-    source_manifest_sha256 = validate_source_manifest(
-        model, expected_source_manifest_sha256
+    source = source_manifest if source_manifest is not None else inspect_source(
+        model,
+        verify_sha256=verify_source_hashes,
+        expected_shards=expected_shards,
+        expected_routed_layers=expected_routed_layers,
+        expected_experts_per_layer=expected_experts_per_layer,
     )
     manifest = json.loads(manifest_path.read_text())
-    if manifest.get("schema") != STATIC_SCHEMA or manifest.get("version") != 1:
-        raise ValueError("invalid static-store manifest")
-    if manifest.get("source_manifest_sha256") != source_manifest_sha256:
-        raise ValueError("static-store source manifest mismatch")
-    tensors = discover_static_tensors(model)
-    validate_inventory(tensors, expected_shards, expected_tensors, expected_payload_bytes)
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema") != STATIC_SCHEMA
+        or manifest.get("version") != 1
+        or manifest.get("base_model") != BASE_MODEL
+        or manifest.get("base_revision") != BASE_REVISION
+    ):
+        raise ValueError("invalid K3.1 static-store manifest")
+    if manifest.get("source_layout_sha256") != source["source_layout_sha256"]:
+        raise ValueError("static-store source layout mismatch")
+    tensors = static_tensors_from_source(model, source)
+    if (
+        manifest.get("tensor_count") != source["static_tensor_count"]
+        or manifest.get("payload_bytes") != source["static_bytes"]
+    ):
+        raise ValueError("static-store manifest inventory mismatch")
     header, planned = make_static_header(tensors)
     records = manifest.get("tensors")
     if not isinstance(records, list) or len(records) != len(planned):
@@ -536,7 +608,10 @@ def verify_static_pack(
                 int(item["bytes"]),
                 str(record.get("sha256")),
             )
-    if output.stat().st_size != manifest.get("file_bytes"):
+    if (
+        output.stat().st_size != manifest.get("file_bytes")
+        or manifest.get("file_bytes") != len(header) + int(source["static_bytes"])
+    ):
         raise ValueError("static-store verified size mismatch")
     if sha256_file(output) != manifest.get("sha256"):
         raise ValueError("static-store file SHA-256 mismatch")
@@ -546,24 +621,28 @@ def verify_static_pack(
 def validate_mzg2_store(
     root: Path,
     *,
-    expected_layers: int = 92,
-    expected_experts: int = 82_432,
-    expected_source_manifest_sha256: str =
-        PINNED_SOURCE_MANIFEST_SHA256,
+    source_layout_sha256: str,
+    expected_layers: int,
+    expected_experts_per_layer: int,
     verify_hashes: bool = True,
 ) -> dict[str, object]:
-    manifest_path = root / "expert-store.json"
-    manifest = json.loads(manifest_path.read_text())
+    manifest = json.loads((root / "expert-store.json").read_text())
+    expected_experts = expected_layers * expected_experts_per_layer
     if (
-        manifest.get("schema") != "moonshine-mzg2-full-v1"
+        not isinstance(manifest, dict)
+        or manifest.get("schema") != MZG2_STORE_SCHEMA
         or manifest.get("version") != 2
-        or manifest.get("source_manifest_sha256")
-            != expected_source_manifest_sha256
+        or manifest.get("base_model") != BASE_MODEL
+        or manifest.get("base_revision") != BASE_REVISION
+        or manifest.get("source_layout_sha256") != source_layout_sha256
         or manifest.get("layers") != expected_layers
+        or manifest.get("experts_per_layer") != expected_experts_per_layer
         or manifest.get("experts") != expected_experts
+        or manifest.get("expert_span_bytes") != EXPERT_SPAN_BYTES
+        or manifest.get("raw_bytes") != expected_experts * EXPERT_SPAN_BYTES
         or manifest.get("tile_bytes") != 16_384
     ):
-        raise ValueError("invalid MZG2 full-store manifest")
+        raise ValueError("invalid or stale K3.1 MZG2 full-store manifest")
     files = manifest.get("files")
     if not isinstance(files, list) or len(files) != expected_layers:
         raise ValueError("invalid MZG2 sidecar inventory")
@@ -576,16 +655,17 @@ def validate_mzg2_store(
         size = record.get("bytes")
         digest = record.get("sha256")
         if (
-            not isinstance(layer, int)
+            not _integer(layer)
+            or not isinstance(layer, int)
             or layer < 1
             or layer > expected_layers
             or layer in seen
             or not isinstance(relative, str)
             or relative != f"layer-{layer:03d}.mzg2"
+            or not _integer(size)
             or not isinstance(size, int)
             or size <= 0
-            or not isinstance(digest, str)
-            or len(digest) != 64
+            or not _valid_digest(digest)
         ):
             raise ValueError("invalid MZG2 sidecar record")
         path = root / relative
@@ -594,14 +674,16 @@ def validate_mzg2_store(
         if verify_hashes and sha256_file(path) != digest:
             raise ValueError(f"MZG2 sidecar SHA-256 mismatch: {relative}")
         seen.add(layer)
+    if seen != set(range(1, expected_layers + 1)):
+        raise ValueError("incomplete MZG2 layer coverage")
     return manifest
 
 
-def link_mzg2_store(source: Path, destination: Path) -> None:
+def link_mzg2_store(source: Path, destination: Path, layers: int) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source / "expert-store.json", destination / "expert-store.json")
     fsync_file(destination / "expert-store.json")
-    for layer in range(1, 93):
+    for layer in range(1, layers + 1):
         source_file = source / f"layer-{layer:03d}.mzg2"
         destination_file = destination / source_file.name
         if destination_file.exists():
@@ -612,6 +694,7 @@ def link_mzg2_store(source: Path, destination: Path) -> None:
                 raise ValueError(f"existing MZG2 link differs: {destination_file}")
             continue
         os.link(source_file, destination_file)
+
 
 def copy_auxiliary_files(model: Path, output: Path) -> dict[str, str]:
     result: dict[str, str] = {}
@@ -637,25 +720,30 @@ def write_bundle_manifest(
     static_manifest: dict[str, object],
     mzg2_manifest: dict[str, object],
     auxiliary: dict[str, str],
+    source_manifest: dict[str, object],
 ) -> dict[str, object]:
+    validate_source_manifest(source_manifest)
+    geometry = source_manifest["expert_geometry"]
+    assert isinstance(geometry, dict)
+    if (
+        static_manifest.get("source_layout_sha256")
+            != source_manifest["source_layout_sha256"]
+        or mzg2_manifest.get("source_layout_sha256")
+            != source_manifest["source_layout_sha256"]
+    ):
+        raise ValueError("bundle tiers have different source checkpoint identities")
     routed_manifest_path = output / "expert-store-mzg2" / "expert-store.json"
     manifest = {
         "schema": BUNDLE_SCHEMA,
         "version": 1,
         "base_model": BASE_MODEL,
         "base_revision": BASE_REVISION,
-        "license": "kimi-k3",
-        "source_manifest_sha256": PINNED_SOURCE_MANIFEST_SHA256,
-        "source_model_layout_crc64":
-            static_manifest["source_model_layout_crc64"],
+        "license": "kimi-k3.1",
+        **_source_fields(source_manifest),
         "static_store": {
             key: static_manifest[key]
             for key in (
-                "path",
-                "tensor_count",
-                "payload_bytes",
-                "file_bytes",
-                "sha256",
+                "path", "tensor_count", "payload_bytes", "file_bytes", "sha256",
             )
         },
         "routed_store": {
@@ -664,14 +752,20 @@ def write_bundle_manifest(
             "layers": mzg2_manifest["layers"],
             "experts_per_layer": mzg2_manifest["experts_per_layer"],
             "experts": mzg2_manifest["experts"],
+            "expert_span_bytes": mzg2_manifest["expert_span_bytes"],
             "tile_bytes": mzg2_manifest["tile_bytes"],
             "manifest_sha256": sha256_file(routed_manifest_path),
         },
+        "expert_geometry": geometry,
         "expert_layout": {
-            "bytes": 17_547_264,
+            "bytes": geometry["bytes_per_expert"],
             "tensors": [
-                {"name": name, "offset": offset, "bytes": size}
-                for name, offset, size in EXPERT_LAYOUT
+                {
+                    "name": record["name"],
+                    "offset": record["offset"],
+                    "bytes": record["bytes"],
+                }
+                for record in geometry["tensor_layout"]
             ],
         },
         "auxiliary_sha256": auxiliary,
@@ -689,24 +783,37 @@ def build_bundle(
 ) -> dict[str, object]:
     if output.exists():
         raise ValueError(f"published output already exists: {output}")
-    validate_source_manifest(
-        model,
-        PINNED_SOURCE_MANIFEST_SHA256,
-        verify_shard_hashes=True,
-    )
+    native_transcoder = Path(__file__).resolve().with_name("transcode_mzg2_layer")
+    if reuse_mzg2 is None and not native_transcoder.is_file():
+        raise ValueError(
+            f"native transcoder is missing: {native_transcoder}; "
+            "run `make tools/transcode_mzg2_layer` before bundle conversion"
+        )
+    source = inspect_source(model, verify_sha256=True)
     partial = output.with_name(output.name + ".partial")
     partial.mkdir(parents=True, exist_ok=True)
     static_path = partial / "model-static.safetensors"
     if static_path.exists():
         static_manifest = verify_static_pack(
-            model, static_path, partial / "static-store.json"
+            model,
+            static_path,
+            partial / "static-store.json",
+            source_manifest=source,
         )
     else:
-        static_manifest = build_static_pack(model, static_path)
+        static_manifest = build_static_pack(model, static_path, source_manifest=source)
     mzg2_path = partial / "expert-store-mzg2"
+    geometry = source["expert_geometry"]
+    assert isinstance(geometry, dict)
     if reuse_mzg2 is not None:
-        validate_mzg2_store(reuse_mzg2, verify_hashes=False)
-        link_mzg2_store(reuse_mzg2, mzg2_path)
+        validate_mzg2_store(
+            reuse_mzg2,
+            source_layout_sha256=str(source["source_layout_sha256"]),
+            expected_layers=int(geometry["routed_layers"]),
+            expected_experts_per_layer=int(geometry["experts_per_layer"]),
+            verify_hashes=False,
+        )
+        link_mzg2_store(reuse_mzg2, mzg2_path, int(geometry["routed_layers"]))
     elif not mzg2_path.exists():
         tool = Path(__file__).resolve().with_name("transcode_mzg2_full.py")
         subprocess.run(
@@ -722,10 +829,16 @@ def build_bundle(
             ],
             check=True,
         )
-    mzg2_manifest = validate_mzg2_store(mzg2_path, verify_hashes=True)
+    mzg2_manifest = validate_mzg2_store(
+        mzg2_path,
+        source_layout_sha256=str(source["source_layout_sha256"]),
+        expected_layers=int(geometry["routed_layers"]),
+        expected_experts_per_layer=int(geometry["experts_per_layer"]),
+        verify_hashes=True,
+    )
     auxiliary = copy_auxiliary_files(model, partial)
     manifest = write_bundle_manifest(
-        partial, static_manifest, mzg2_manifest, auxiliary
+        partial, static_manifest, mzg2_manifest, auxiliary, source
     )
     fsync_file(partial / "moonshine-bundle.json")
     fsync_directory(partial / "expert-store-mzg2")
@@ -741,17 +854,18 @@ def verify_bundle(
     *,
     model: Path | None,
     verify_hashes: bool,
+    source_manifest: dict[str, object] | None = None,
 ) -> dict[str, object]:
     manifest = json.loads((root / "moonshine-bundle.json").read_text())
     if (
-        manifest.get("schema") != BUNDLE_SCHEMA
+        not isinstance(manifest, dict)
+        or manifest.get("schema") != BUNDLE_SCHEMA
         or manifest.get("version") != 1
         or manifest.get("base_model") != BASE_MODEL
         or manifest.get("base_revision") != BASE_REVISION
-        or manifest.get("source_manifest_sha256")
-            != PINNED_SOURCE_MANIFEST_SHA256
+        or not _valid_digest(manifest.get("source_layout_sha256"))
     ):
-        raise ValueError("invalid standalone bundle manifest")
+        raise ValueError("invalid K3.1 standalone bundle manifest")
     static = manifest.get("static_store")
     if not isinstance(static, dict):
         raise ValueError("missing static store manifest")
@@ -760,22 +874,62 @@ def verify_bundle(
         raise ValueError("bundle static file size mismatch")
     if verify_hashes and sha256_file(static_path) != static.get("sha256"):
         raise ValueError("bundle static file SHA-256 mismatch")
+    static_manifest = json.loads((root / "static-store.json").read_text())
+    if (
+        not isinstance(static_manifest, dict)
+        or static_manifest.get("schema") != STATIC_SCHEMA
+        or static_manifest.get("source_layout_sha256")
+            != manifest["source_layout_sha256"]
+        or any(static_manifest.get(key) != static.get(key) for key in (
+            "path", "tensor_count", "payload_bytes", "file_bytes", "sha256",
+        ))
+    ):
+        raise ValueError("bundle and static-store manifests disagree")
+
+    source = source_manifest
     if model is not None:
-        verify_static_pack(model, static_path, root / "static-store.json")
+        source = source if source is not None else inspect_source(model)
+        if source["source_layout_sha256"] != manifest["source_layout_sha256"]:
+            raise ValueError("bundle source checkpoint mismatch")
+        verify_static_pack(
+            model,
+            static_path,
+            root / "static-store.json",
+            source_manifest=source,
+        )
+    elif source_manifest is not None:
+        raise ValueError("a source manifest requires the source model path")
+
     routed = manifest.get("routed_store")
     if not isinstance(routed, dict):
         raise ValueError("missing routed store manifest")
-    mzg2_root = root / str(routed.get("path"))
-    mzg2 = validate_mzg2_store(mzg2_root, verify_hashes=verify_hashes)
-    if sha256_file(mzg2_root / "expert-store.json") != routed.get(
-        "manifest_sha256"
+    geometry = source["expert_geometry"] if source is not None else routed
+    assert isinstance(geometry, dict)
+    expected_layers = geometry.get("routed_layers", geometry.get("layers"))
+    expected_experts = geometry.get("experts_per_layer")
+    if not _integer(expected_layers) or not _integer(expected_experts):
+        raise ValueError("invalid bundle routed geometry")
+    if source is not None and (
+        routed.get("layers") != expected_layers
+        or routed.get("experts_per_layer") != expected_experts
     ):
+        raise ValueError("bundle routed geometry differs from source checkpoint")
+    mzg2_root = root / str(routed.get("path"))
+    mzg2 = validate_mzg2_store(
+        mzg2_root,
+        source_layout_sha256=str(manifest["source_layout_sha256"]),
+        expected_layers=int(expected_layers),
+        expected_experts_per_layer=int(expected_experts),
+        verify_hashes=verify_hashes,
+    )
+    if sha256_file(mzg2_root / "expert-store.json") != routed.get("manifest_sha256"):
         raise ValueError("bundle MZG2 manifest SHA-256 mismatch")
-    for name, digest in manifest.get("auxiliary_sha256", {}).items():
+    auxiliary = manifest.get("auxiliary_sha256")
+    if not isinstance(auxiliary, dict):
+        raise ValueError("invalid bundle auxiliary inventory")
+    for name, digest in auxiliary.items():
         path = root / name
-        if not path.is_file() or (
-            verify_hashes and sha256_file(path) != digest
-        ):
+        if not path.is_file() or (verify_hashes and sha256_file(path) != digest):
             raise ValueError(f"bundle auxiliary mismatch: {name}")
     return {"bundle": manifest, "mzg2": mzg2}
 
@@ -785,6 +939,7 @@ def parse_args() -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command", required=True)
     inspect = subparsers.add_parser("inspect")
     inspect.add_argument("--model", required=True, type=Path)
+    inspect.add_argument("--verify-sha256", action="store_true")
     build = subparsers.add_parser("build-static")
     build.add_argument("--model", required=True, type=Path)
     build.add_argument("--out", required=True, type=Path)
@@ -807,19 +962,17 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     if args.command == "inspect":
-        source_manifest = validate_source_manifest(
-            args.model, PINNED_SOURCE_MANIFEST_SHA256
-        )
-        tensors = discover_static_tensors(args.model)
-        validate_inventory(
-            tensors, PINNED_SHARDS, PINNED_TENSORS, PINNED_PAYLOAD_BYTES
-        )
+        source = inspect_source(args.model, verify_sha256=args.verify_sha256)
         print(json.dumps({
-            "source_manifest_sha256": source_manifest,
-            "source_model_layout_crc64":
-                f"{source_model_layout_crc64(args.model):016x}",
-            "tensor_count": len(tensors),
-            "payload_bytes": sum(int(item["bytes"]) for item in tensors),
+            "base_model": BASE_MODEL,
+            "base_revision": BASE_REVISION,
+            "source_layout_sha256": source["source_layout_sha256"],
+            "source_tensor_count": source["tensor_count"],
+            "source_total_bytes": source["total_bytes"],
+            "source_shard_count": len(source["shards"]),
+            "tensor_count": source["static_tensor_count"],
+            "payload_bytes": source["static_bytes"],
+            "expert_geometry": source["expert_geometry"],
         }, sort_keys=True))
         return 0
     if args.command == "build-static":
@@ -828,7 +981,8 @@ def main() -> int:
             args.model, args.out / "model-static.safetensors"
         )
         print(json.dumps({key: manifest[key] for key in (
-            "tensor_count", "payload_bytes", "file_bytes", "sha256"
+            "tensor_count", "payload_bytes", "file_bytes", "sha256",
+            "source_layout_sha256",
         )}, sort_keys=True))
         return 0
     if args.command == "verify-static":

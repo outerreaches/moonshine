@@ -91,6 +91,16 @@ bool k3_st_model_open_file(k3_st_model *model,
                            char        *error,
                            size_t       error_size);
 
+/*
+ * Parse one SafeTensors file from an already verified descriptor. Ownership of
+ * fd transfers to the model on every call, including failure.
+ */
+bool k3_st_model_open_file_fd(k3_st_model *model,
+                              const char  *path,
+                              int          fd,
+                              char        *error,
+                              size_t       error_size);
+
 void k3_st_model_close(k3_st_model *model);
 
 const k3_st_tensor *k3_st_find(const k3_st_model *model, const char *name);

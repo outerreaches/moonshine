@@ -1,5 +1,10 @@
 # Filled-context qualification
 
+> **Historical Kimi K3 record.** These outputs, memory ledgers, and timings are
+> not K3.1 Pro evidence. Current K3.1 natural-text retrieval through 63,971
+> tokens is documented separately; it does not convert this historical
+> repeated-prompt filled-context record into a K3.1 result.
+
 Moonshine separates configured context capacity from the number of positions
 actually filled. A large allocation proves only that the state fits; a filled
 run is required to measure prefill scaling and lock the model result.

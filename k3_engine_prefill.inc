@@ -19,6 +19,9 @@ typedef struct {
     void *scratch[K3_ENGINE_SCRATCH_COUNT];
     void *moe_scratch[K3_ENGINE_MOE_SCRATCH_COUNT];
     void *mla_scratch[K3_ENGINE_MLA_SCRATCH_COUNT];
+    void *dsa_query;
+    void *dsa_raw_keys;
+    void *dsa_head_weights;
     void *attn_res_blocks;
     void *auxiliary_workspace;
 
@@ -285,6 +288,18 @@ static bool prefill_workspace_create(
         workspace->mla_scratch[index] = prefill_take(
             &cursor, &remaining, mla_sizes[index]);
     }
+    workspace->dsa_query = prefill_take(
+        &cursor, &remaining,
+        (uint64_t)tokens * engine->model_profile.dsa.index_num_heads *
+            engine->model_profile.dsa.index_head_dim * sizeof(uint16_t));
+    workspace->dsa_raw_keys = prefill_take(
+        &cursor, &remaining,
+        (uint64_t)tokens * engine->model_profile.dsa.index_head_dim *
+            sizeof(uint16_t));
+    workspace->dsa_head_weights = prefill_take(
+        &cursor, &remaining,
+        (uint64_t)tokens * engine->model_profile.dsa.index_num_heads *
+            sizeof(uint16_t));
     const uint64_t route_count =
         (uint64_t)tokens * K3_ENGINE_TOP_K;
     workspace->route_ids_device =
@@ -651,54 +666,97 @@ static bool prefill_mla_attention(
     PREFILL_MLA_WEIGHT(kv_b, "self_attn.kv_b_proj.weight");
     PREFILL_MLA_WEIGHT(gate, "self_attn.g_proj.weight");
     PREFILL_MLA_WEIGHT(o_proj, "self_attn.o_proj.weight");
+    PREFILL_MLA_WEIGHT(index_q, "self_attn.indexer.wq_b.weight");
+    PREFILL_MLA_WEIGHT(index_key, "self_attn.indexer.wk.weight");
+    PREFILL_MLA_WEIGHT(index_weights, "self_attn.indexer.weights_proj.weight");
+    PREFILL_MLA_WEIGHT(index_norm, "self_attn.indexer.k_norm.weight");
+    PREFILL_MLA_WEIGHT(index_bias, "self_attn.indexer.k_norm.bias");
 #undef PREFILL_MLA_WEIGHT
     const uint32_t tokens = workspace->token_count;
     const uint32_t mla_index =
         layer == 92u ? 23u : layer / 4u;
-    const uint64_t cache_layer_bytes =
-        (uint64_t)engine->context *
-        K3_ENGINE_MLA_CACHE_DIM * sizeof(uint16_t);
+    uint64_t mla_offset = 0u;
+    uint64_t index_offset = 0u;
+    if (tokens == 0u || tokens > engine->context ||
+        position > engine->context - tokens ||
+        !k31_dsa_cache_offsets(
+            &engine->dsa_memory, mla_index, position + tokens - 1u,
+            &mla_offset, &index_offset)) {
+        engine_error(error, error_size,
+                     "layer-%u DSA prefill cache addressing failed", layer);
+        return false;
+    }
     uint8_t *cache = (uint8_t *)engine->mla_cache +
-        (uint64_t)mla_index * cache_layer_bytes;
+        (uint64_t)mla_index * engine->dsa_memory.mla_layer_bytes;
+    uint8_t *index_cache = (uint8_t *)engine->index_key_cache +
+        (uint64_t)mla_index * engine->dsa_memory.index_layer_bytes;
+    uint16_t *index_rows = (uint16_t *)index_cache +
+        (uint64_t)position * engine->model_profile.dsa.index_head_dim;
     uint8_t *packed_key =
         engine->mla_packed_keys +
         (uint64_t)mla_index *
             K3_ENGINE_MLA_PACKED_ELEMENTS *
             sizeof(uint16_t);
-    uint8_t *attention_workspace =
-        (uint8_t *)engine->workspace;
-    void *scores = attention_workspace;
-    void *probabilities = attention_workspace +
+    uint8_t *attention_workspace = (uint8_t *)engine->workspace;
+    void *index_scores = attention_workspace;
+    void *selected_ids = attention_workspace +
+        (uint64_t)engine->context * sizeof(float);
+    void *scores = (uint8_t *)selected_ids +
+        (uint64_t)engine->model_profile.dsa.index_topk * sizeof(uint32_t);
+    void *probabilities = (uint8_t *)scores +
         (uint64_t)K3_ENGINE_HEADS *
-            engine->context * sizeof(float);
-    void *latent = attention_workspace +
+            engine->model_profile.dsa.index_topk * sizeof(float);
+    void *latent = (uint8_t *)probabilities +
         (uint64_t)K3_ENGINE_HEADS *
-            engine->context *
-            (sizeof(float) + sizeof(uint16_t));
+            engine->model_profile.dsa.index_topk * sizeof(uint16_t);
+    void *gathered = (uint8_t *)latent +
+        (uint64_t)K3_ENGINE_HEADS * K3_ENGINE_MLA_LATENT * sizeof(uint16_t);
+    void *index_dots = (uint8_t *)gathered +
+        (uint64_t)engine->model_profile.dsa.index_topk *
+            K3_ENGINE_MLA_CACHE_DIM * sizeof(uint16_t);
+    const bool needs_topk =
+        position + tokens > engine->model_profile.dsa.index_topk;
 
-    if (!k3_static_weight_gemm_bf16(
-            q_a, workspace->mla_scratch[A_MLA_Q_A],
-            normalized, tokens, NULL) ||
-        !k3_rocm_rms_norm_bf16(
-            workspace->mla_scratch[A_MLA_Q_A_NORM],
-            workspace->mla_scratch[A_MLA_Q_A],
-            q_a_norm->data, tokens,
-            K3_ENGINE_MLA_Q_LORA, 1e-5f, NULL) ||
-        !k3_static_weight_gemm_bf16(
-            q_b, workspace->mla_scratch[A_MLA_Q],
-            workspace->mla_scratch[A_MLA_Q_A_NORM],
-            tokens, NULL) ||
-        !k3_static_weight_gemm_bf16(
-            kv_a, workspace->mla_scratch[A_MLA_KV],
-            normalized, tokens, NULL) ||
-        !k3_static_weight_gemm_bf16(
-            gate, workspace->mla_scratch[A_MLA_GATE],
-            normalized, tokens, NULL)) {
-        engine_error(error, error_size,
-                     "layer-%u MLA batch projection failed",
-                     layer);
-        return false;
+#define PREFILL_DSA_STEP(label, expression)                                 \
+    do {                                                                    \
+        if (!(expression)) {                                                \
+            const hipError_t step_status = hipStreamSynchronize(NULL);       \
+            engine_error(error, error_size,                                 \
+                         "layer-%u DSA %s projection failed: %s",           \
+                         layer, label, hipGetErrorString(step_status));       \
+            return false;                                                   \
+        }                                                                   \
+    } while (0)
+    PREFILL_DSA_STEP("q_a", k3_static_weight_gemm_bf16(
+        q_a, workspace->mla_scratch[A_MLA_Q_A], normalized, tokens, NULL));
+    PREFILL_DSA_STEP("q_a_norm", k3_rocm_rms_norm_bf16(
+        workspace->mla_scratch[A_MLA_Q_A_NORM],
+        workspace->mla_scratch[A_MLA_Q_A], q_a_norm->data, tokens,
+        K3_ENGINE_MLA_Q_LORA, 1e-5f, NULL));
+    PREFILL_DSA_STEP("q_b", k3_static_weight_gemm_bf16(
+        q_b, workspace->mla_scratch[A_MLA_Q],
+        workspace->mla_scratch[A_MLA_Q_A_NORM], tokens, NULL));
+    PREFILL_DSA_STEP("kv_a", k3_static_weight_gemm_bf16(
+        kv_a, workspace->mla_scratch[A_MLA_KV], normalized, tokens, NULL));
+    if (needs_topk) {
+        PREFILL_DSA_STEP("index_q", k3_static_weight_gemm_bf16(
+            index_q, workspace->dsa_query,
+            workspace->mla_scratch[A_MLA_Q_A_NORM], tokens, NULL));
     }
+    PREFILL_DSA_STEP("index_key", k3_static_weight_gemm_bf16(
+        index_key, workspace->dsa_raw_keys, normalized, tokens, NULL));
+    if (needs_topk) {
+        PREFILL_DSA_STEP("index_weights", k3_static_weight_gemm_bf16(
+            index_weights, workspace->dsa_head_weights,
+            normalized, tokens, NULL));
+    }
+    PREFILL_DSA_STEP("index_layernorm", k31_dsa_layer_norm_bf16(
+        index_rows, workspace->dsa_raw_keys, index_norm->data,
+        index_bias->data, tokens, engine->model_profile.dsa.index_head_dim,
+        1e-5f, NULL));
+    PREFILL_DSA_STEP("gate", k3_static_weight_gemm_bf16(
+        gate, workspace->mla_scratch[A_MLA_GATE], normalized, tokens, NULL));
+#undef PREFILL_DSA_STEP
     for (uint32_t token = 0u; token < tokens; token++) {
         uint16_t *cache_row = (uint16_t *)cache +
             (uint64_t)(position + token) *
@@ -707,44 +765,66 @@ static bool prefill_mla_attention(
             (const uint16_t *)prefill_const_slice(
                 workspace->mla_scratch[A_MLA_KV],
                 token, K3_ENGINE_MLA_CACHE_DIM);
-        if (!k3_rocm_rms_norm_bf16(
-                cache_row, kv_row, kv_a_norm->data,
-                1u, K3_ENGINE_MLA_LATENT, 1e-5f, NULL) ||
-            hipMemcpyAsync(
-                cache_row + K3_ENGINE_MLA_LATENT,
-                kv_row + K3_ENGINE_MLA_LATENT,
-                64u * sizeof(uint16_t),
-                hipMemcpyDeviceToDevice, NULL) != hipSuccess ||
-            !k3_rocm_mla_absorb_q_bf16(
-                prefill_slice(
-                    workspace->mla_scratch[A_MLA_ABSORBED_Q],
-                    token,
-                    (uint64_t)K3_ENGINE_HEADS *
-                        K3_ENGINE_MLA_CACHE_DIM),
+        const uint32_t visible_tokens = position + token + 1u;
+        const uint32_t selected_count =
+            visible_tokens < engine->model_profile.dsa.index_topk ?
+                visible_tokens : engine->model_profile.dsa.index_topk;
+        const bool token_needs_topk =
+            visible_tokens > engine->model_profile.dsa.index_topk;
+#define PREFILL_DSA_CAUSAL_STEP(label, expression)                          \
+    do {                                                                    \
+        if (!(expression)) {                                                \
+            const hipError_t step_status = hipStreamSynchronize(NULL);       \
+            engine_error(error, error_size,                                 \
+                         "layer-%u DSA %s failed at token %u: %s",          \
+                         layer, label, token, hipGetErrorString(step_status)); \
+            return false;                                                   \
+        }                                                                   \
+    } while (0)
+        PREFILL_DSA_CAUSAL_STEP("cache_norm", k3_rocm_rms_norm_bf16(
+            cache_row, kv_row, kv_a_norm->data, 1u,
+            K3_ENGINE_MLA_LATENT, 1e-5f, NULL));
+        PREFILL_DSA_CAUSAL_STEP("cache_tail", hipMemcpyAsync(
+            cache_row + K3_ENGINE_MLA_LATENT,
+            (const uint16_t *)kv_row + K3_ENGINE_MLA_LATENT,
+            64u * sizeof(uint16_t), hipMemcpyDeviceToDevice, NULL) == hipSuccess);
+        PREFILL_DSA_CAUSAL_STEP("absorb_q", k3_rocm_mla_absorb_q_bf16(
+            prefill_slice(
+                workspace->mla_scratch[A_MLA_ABSORBED_Q], token,
+                (uint64_t)K3_ENGINE_HEADS * K3_ENGINE_MLA_CACHE_DIM),
+            prefill_const_slice(
+                workspace->mla_scratch[A_MLA_Q], token, K3_ENGINE_MLA_Q),
+            packed_key, K3_ENGINE_HEADS, NULL));
+        if (token_needs_topk) {
+            PREFILL_DSA_CAUSAL_STEP("index_scores", launch_dsa_index_scores(
+                engine, index_scores, index_dots,
                 prefill_const_slice(
-                    workspace->mla_scratch[A_MLA_Q],
-                    token, K3_ENGINE_MLA_Q),
-                packed_key, K3_ENGINE_HEADS, NULL) ||
-            !k3_rocm_blas_mla_attention_bf16(
-                engine->blas, latent, scores, probabilities,
+                    workspace->dsa_query, token,
+                    (uint64_t)engine->model_profile.dsa.index_num_heads *
+                        engine->model_profile.dsa.index_head_dim),
+                index_cache,
                 prefill_const_slice(
-                    workspace->mla_scratch[A_MLA_ABSORBED_Q],
-                    token,
-                    (uint64_t)K3_ENGINE_HEADS *
-                        K3_ENGINE_MLA_CACHE_DIM),
-                cache, K3_ENGINE_HEADS,
-                position + token + 1u, NULL) ||
-            !k3_rocm_mla_decompress_v_bf16(
-                prefill_slice(
-                    workspace->mla_scratch[A_MLA_VALUE],
-                    token, K3_ENGINE_KDA_INNER),
-                latent, kv_b->data, K3_ENGINE_HEADS, NULL)) {
-            engine_error(
-                error, error_size,
-                "layer-%u MLA causal scan failed at token %u",
-                layer, token);
-            return false;
+                    workspace->dsa_head_weights, token,
+                    engine->model_profile.dsa.index_num_heads),
+                visible_tokens));
+            PREFILL_DSA_CAUSAL_STEP("topk", k31_dsa_topk_f32(
+                selected_ids, index_scores, visible_tokens,
+                engine->model_profile.dsa.index_topk,
+                engine->dsa_topk_workspace,
+                engine->dsa_topk_workspace_bytes, NULL));
         }
+        PREFILL_DSA_CAUSAL_STEP("attention", launch_dsa_value_attention(
+            engine, latent, scores, probabilities, gathered,
+            prefill_const_slice(
+                workspace->mla_scratch[A_MLA_ABSORBED_Q], token,
+                (uint64_t)K3_ENGINE_HEADS * K3_ENGINE_MLA_CACHE_DIM),
+            cache, token_needs_topk ? selected_ids : NULL, selected_count));
+        PREFILL_DSA_CAUSAL_STEP("decompress_v", k3_rocm_mla_decompress_v_bf16(
+            prefill_slice(
+                workspace->mla_scratch[A_MLA_VALUE], token,
+                K3_ENGINE_KDA_INNER),
+            latent, kv_b->data, K3_ENGINE_HEADS, NULL));
+#undef PREFILL_DSA_CAUSAL_STEP
     }
     if (!k3_rocm_sigmoid_mul_bf16(
             workspace->mla_scratch[A_MLA_GATED],
@@ -757,7 +837,7 @@ static bool prefill_mla_attention(
             workspace->mla_scratch[A_MLA_GATED],
             tokens, NULL)) {
         engine_error(error, error_size,
-                     "layer-%u MLA batch output failed", layer);
+                     "layer-%u DSA batch output failed", layer);
         return false;
     }
     return true;
@@ -774,16 +854,27 @@ static bool prefill_attention(
         k3_engine_prefill_stats *stats,
         char *error,
         size_t error_size) {
-    const bool is_mla =
-        layer % 4u == 3u || layer == 92u;
-    return is_mla ?
-        prefill_mla_attention(
-            engine, workspace, layer, position,
-            normalized, attention, error, error_size) :
-        prefill_kda_attention(
+    const bool is_dsa =
+        engine->model_profile.attention_by_layer[layer] == K31_ATTENTION_DSA;
+    if (!is_dsa) {
+        return prefill_kda_attention(
             engine, workspace, layer, position,
             normalized, attention, backend, stats,
             error, error_size);
+    }
+    const bool ok = prefill_mla_attention(
+        engine, workspace, layer, position,
+        normalized, attention, error, error_size);
+    if (ok && stats) {
+        for (uint32_t token = 0u; token < workspace->token_count; token++) {
+            const uint32_t visible = position + token + 1u;
+            if (visible <= engine->model_profile.dsa.index_topk) continue;
+            stats->dsa_indexer_calls++;
+            stats->dsa_topk_calls++;
+            stats->dsa_selected_rows += engine->model_profile.dsa.index_topk;
+        }
+    }
+    return ok;
 }
 
 static bool prefill_layer0(
@@ -2438,6 +2529,9 @@ extern "C" bool k3_engine_get_state_digest(
         !prefill_hash_device_bytes(
             engine->mla_cache, engine->mla_cache_bytes,
             &digest->mla_cache_hash, error, error_size) ||
+        !prefill_hash_device_bytes(
+            engine->index_key_cache, engine->index_key_cache_bytes,
+            &digest->dsa_index_cache_hash, error, error_size) ||
         !prefill_hash_device_bytes(
             engine->attn_res_blocks,
             8u * K3_ENGINE_HIDDEN * sizeof(uint16_t),

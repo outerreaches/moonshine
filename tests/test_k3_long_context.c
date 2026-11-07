@@ -19,9 +19,9 @@
 
 enum {
     K3_RETRIEVAL_DEFAULT_CONTEXT = 16384,
-    K3_RETRIEVAL_MAX_CONTEXT = 32768,
+    K3_RETRIEVAL_MAX_CONTEXT = 65536,
     K3_RETRIEVAL_DEFAULT_TARGET = 16000,
-    K3_RETRIEVAL_MAX_TARGET = 32000,
+    K3_RETRIEVAL_MAX_TARGET = 64000,
     K3_RETRIEVAL_MIN_TARGET = 512,
     K3_RETRIEVAL_MAX_GENERATED = 64,
 };
@@ -222,7 +222,7 @@ int main(int argc, char **argv) {
     if (argc < 2 || argc > 3 ||
         (argc == 3 && strcmp(argv[2], "--plan") != 0)) {
         fprintf(stderr,
-                "usage: %s /path/to/moonshotai__Kimi-K3 [--plan]\n",
+                "usage: %s /path/to/moonshotai__Kimi-K3.1-Pro [--plan]\n",
                 argv[0]);
         return 2;
     }
@@ -245,6 +245,18 @@ int main(int argc, char **argv) {
     const uint32_t minimum_prompt = target_prompt - 200u;
     k3_prefill_projection_backend range_backend =
         K3_PREFILL_PROJECTION_DEFAULT;
+    uint32_t expert_slots = 32u;
+    const char *expert_text = getenv("MOONSHINE_RETRIEVAL_EXPERTS");
+    if (expert_text != NULL && expert_text[0] != '\0') {
+        char *end = NULL;
+        const unsigned long parsed = strtoul(expert_text, &end, 10);
+        if (end == NULL || *end != '\0' || parsed == 0u || parsed > 896u) {
+            fprintf(stderr, "invalid MOONSHINE_RETRIEVAL_EXPERTS: %s\n",
+                    expert_text);
+            return 2;
+        }
+        expert_slots = (uint32_t)parsed;
+    }
     const char *backend_text = getenv("MOONSHINE_RETRIEVAL_BACKEND");
     if (backend_text != NULL && backend_text[0] != '\0') {
         if (strcmp(backend_text, "kda-blas") != 0) {
@@ -270,7 +282,7 @@ int main(int argc, char **argv) {
           error);
 
     uint32_t low = 8u;
-    uint32_t high = 1024u;
+    uint32_t high = target_prompt;
     while (low < high) {
         const uint32_t candidate = low + (high - low + 1u) / 2u;
         uint32_t alpha = 0u;
@@ -314,7 +326,7 @@ int main(int argc, char **argv) {
                   alpha_record == 49u && bravo_record == 195u &&
                   charlie_record == 341u && prompt_size == 69938u,
               "default retrieval prompt construction changed");
-    } else if (target_prompt == K3_RETRIEVAL_MAX_TARGET) {
+    } else if (target_prompt == 32000u) {
         CHECK(tokens.count == 31999u && low == 781u &&
                   alpha_record == 98u && bravo_record == 391u &&
                   charlie_record == 684u && prompt_size == 139990u,
@@ -343,7 +355,7 @@ int main(int argc, char **argv) {
         .context = target_prompt > K3_RETRIEVAL_DEFAULT_TARGET ?
             K3_RETRIEVAL_MAX_CONTEXT : K3_RETRIEVAL_DEFAULT_CONTEXT,
         .sequential_prefill_limit = K3_CHAT_MEASURED_SEQUENTIAL_LIMIT,
-        .experts_per_layer = 32u,
+        .experts_per_layer = (uint16_t)expert_slots,
         .staging_slots = 16u,
         .q8_projections = true,
         .range_backend = range_backend,

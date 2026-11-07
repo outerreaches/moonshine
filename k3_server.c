@@ -1699,12 +1699,22 @@ static void log_result(const request_observer *observer,
             SERVER_LOG_INFO, "request.state.digest",
             observer->completion_id,
             "position=%u kda=%016llx conv=%016llx "
-            "mla=%016llx attnres=%016llx",
+            "mla=%016llx dsa_index=%016llx attnres=%016llx",
             result->state_digest.token_position,
             (unsigned long long)result->state_digest.kda_state_hash,
             (unsigned long long)result->state_digest.kda_conv_hash,
             (unsigned long long)result->state_digest.mla_cache_hash,
+            (unsigned long long)result->state_digest.dsa_index_cache_hash,
             (unsigned long long)result->state_digest.attn_res_hash);
+    }
+    if (result->decode_stats.dsa_topk_calls != 0u) {
+        server_log(
+            SERVER_LOG_INFO, "request.dsa",
+            observer->completion_id,
+            "indexer_calls=%llu topk_calls=%llu selected_rows=%llu",
+            (unsigned long long)result->decode_stats.dsa_indexer_calls,
+            (unsigned long long)result->decode_stats.dsa_topk_calls,
+            (unsigned long long)result->decode_stats.dsa_selected_rows);
     }
     if (result->decode_stats.steps != 0u) {
         uint64_t hits = 0u;
@@ -2472,7 +2482,8 @@ int main(int argc, char **argv) {
         SERVER_LOG_INFO, "server.ready", NULL,
         "listen=http://%s:%u model=%s version=%s context=%u "
         "max_output=%u load=%.3fs static=%.3f_GiB cache=%.3f_GiB "
-        "state=%.3f_GiB slots=1 auth=%s range_backend=%s experts=%s "
+        "state=%.3f_GiB dsa_index=%.3f_GiB dsa_workspace=%.3f_GiB "
+        "slots=1 auth=%s range_backend=%s experts=%s "
         "model_source=%s checkpoints=%s checkpoint_entries=%zu",
         config.host, config.port, MOONSHINE_MODEL_ID,
         MOONSHINE_VERSION, config.context,
@@ -2482,6 +2493,8 @@ int main(int argc, char **argv) {
             (1024.0 * 1024.0 * 1024.0),
         (double)stats.cache_bytes / (1024.0 * 1024.0 * 1024.0),
         (double)stats.state_bytes / (1024.0 * 1024.0 * 1024.0),
+        (double)stats.index_cache_bytes / (1024.0 * 1024.0 * 1024.0),
+        (double)stats.dsa_workspace_bytes / (1024.0 * 1024.0 * 1024.0),
         config.api_key == NULL ? "off" : "on",
         config.range_backend == K3_PREFILL_PROJECTION_DEFAULT ?
             "default" : "kda-blas",

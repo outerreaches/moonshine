@@ -34,7 +34,7 @@ enum {
     K3_PROFILE_STEPS = 3,
 };
 
-static const uint32_t k_token_counts[] = {8192u, 16384u, 32768u};
+static const uint32_t k_token_counts[] = {26u, 94u, 8192u, 16384u, 32768u};
 static const uint32_t k_tiles[] = {16u, 32u, 64u};
 
 static uint32_t blocks_for(uint64_t count) {

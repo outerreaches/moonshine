@@ -39,6 +39,7 @@ static bool digest_equal(const k3_engine_state_digest *left,
            left->kda_state_hash == right->kda_state_hash &&
            left->kda_conv_hash == right->kda_conv_hash &&
            left->mla_cache_hash == right->mla_cache_hash &&
+           left->dsa_index_cache_hash == right->dsa_index_cache_hash &&
            left->attn_res_hash == right->attn_res_hash;
 }
 

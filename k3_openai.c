@@ -530,8 +530,14 @@ static bool decode_content_parts(
             k3_json_object_get(document, part, "type");
         if (!k3_json_string_equal(document, type, "text") &&
             !k3_json_string_equal(document, type, "input_text")) {
+            char *decoded_type = NULL;
+            (void)k3_json_string_dup(
+                document, type, &decoded_type, NULL, 0u);
             set_error(error, error_size,
-                      "only text content parts are supported");
+                      "message content part type \"%s\" is not supported; "
+                      "Kimi K3.1 Pro accepts only text content",
+                      decoded_type == NULL ? "?" : decoded_type);
+            free(decoded_type);
             free(builder.data);
             return false;
         }
@@ -1299,12 +1305,11 @@ bool k3_openai_parse_chat_request(
                 &document, reasoning_effort,
                 &decoded_effort, error, error_size) ||
             (strcmp(decoded_effort, "low") != 0 &&
-             strcmp(decoded_effort, "medium") != 0 &&
              strcmp(decoded_effort, "high") != 0 &&
              strcmp(decoded_effort, "max") != 0)) {
             free(decoded_effort);
             set_error(error, error_size,
-                      "reasoning_effort must be low, medium, high, or max");
+                      "reasoning_effort must be low, high, or max");
             goto cleanup;
         }
         free(request->reasoning_effort);

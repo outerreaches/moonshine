@@ -1,5 +1,9 @@
 # 64K output and medium-reasoning qualification
 
+> **Historical Kimi K3 0.2.0 record.** This is not evidence for K3.1 Pro 0.3.0.
+> In particular, public K3.1 reasoning effort is `low`/`high`/`max`; the
+> historical `medium` acceptance below does not apply to the current API.
+
 Date: 2026-08-01
 
 This gate qualifies a 65,536-token maximum request budget and K3's native

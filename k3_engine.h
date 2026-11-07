@@ -18,6 +18,8 @@ typedef struct {
     k3_static_store_stats static_store;
     uint64_t cache_bytes;
     uint64_t state_bytes;
+    uint64_t index_cache_bytes;
+    uint64_t dsa_workspace_bytes;
     uint64_t staging_bytes;
     uint32_t cache_slots;
     uint32_t staging_slots;
@@ -65,6 +67,9 @@ typedef struct {
     uint64_t capture;
     uint64_t steps;
     uint64_t trace_rows;
+    uint64_t dsa_indexer_calls;
+    uint64_t dsa_topk_calls;
+    uint64_t dsa_selected_rows;
     double   wall_seconds;
     k3_engine_decode_layer_stats layer[K3_ENGINE_DECODE_LAYER_COUNT];
 } k3_engine_decode_stats;
@@ -79,6 +84,9 @@ typedef struct {
     uint64_t unique_experts_across_layers;
     uint32_t min_unique_experts_per_layer;
     uint32_t max_unique_experts_per_layer;
+    uint64_t dsa_indexer_calls;
+    uint64_t dsa_topk_calls;
+    uint64_t dsa_selected_rows;
     double   layer0_seconds;
     double   attention_seconds;
     double   kda_attention_seconds;
@@ -105,6 +113,7 @@ typedef struct {
     uint64_t kda_state_hash;
     uint64_t kda_conv_hash;
     uint64_t mla_cache_hash;
+    uint64_t dsa_index_cache_hash;
     uint64_t attn_res_hash;
     uint32_t token_position;
 } k3_engine_state_digest;
@@ -439,8 +448,9 @@ k3_engine_state_import_result k3_engine_import_state_checked(
 
 /*
  * Atomically export only semantic continuation state: KDA recurrence and
- * convolution, occupied MLA rows, AttnRes blocks, and token position.
- * Derived MLA packed keys and routed-expert cache/LRU state are excluded.
+ * convolution, occupied MLA and DSA index-key rows, AttnRes blocks, and token
+ * position. Derived MLA packed keys, top-k indices and routed-expert cache/LRU
+ * state are excluded.
  */
 bool k3_engine_export_state(
         const k3_engine          *engine,

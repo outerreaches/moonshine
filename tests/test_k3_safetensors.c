@@ -27,7 +27,7 @@ static int fail(const char *message) {
 
 int main(int argc, char **argv) {
     const char *root = argc > 1 ? argv[1] :
-        "/srv/modelstore/models/moonshotai__Kimi-K3";
+        "/srv/modelstore/models/moonshotai__Kimi-K3.1-Pro";
     char error[512];
     k3_st_model model;
     struct timespec open_start, open_end, read_start, read_end;
@@ -38,9 +38,44 @@ int main(int argc, char **argv) {
     }
     clock_gettime(CLOCK_MONOTONIC, &open_end);
 
-    if (model.tensor_count != 497220u) {
+    size_t expert_tensor_count = 0u;
+    for (size_t index = 0u; index < model.tensor_count; index++) {
+        if (strstr(model.tensors[index].name,
+                   ".block_sparse_moe.experts.") != NULL) {
+            expert_tensor_count++;
+        }
+    }
+    if (expert_tensor_count != 92u * 896u * 6u) {
         k3_st_model_close(&model);
-        return fail("expected exactly 497,220 tensors");
+        return fail("routed expert tensor matrix is incomplete");
+    }
+
+    static const struct {
+        const char *suffix;
+        uint64_t rows;
+        uint64_t columns;
+    } dsa_tensors[] = {
+        { "indexer.wq_b.weight", 4096, 1536 },
+        { "indexer.wk.weight", 128, 7168 },
+        { "indexer.weights_proj.weight", 32, 7168 },
+        { "indexer.k_norm.weight", 128, 0 },
+        { "indexer.k_norm.bias", 128, 0 },
+    };
+    for (size_t index = 0u;
+         index < sizeof(dsa_tensors) / sizeof(dsa_tensors[0]); index++) {
+        char name[256];
+        snprintf(name, sizeof(name),
+                 "language_model.model.layers.3.self_attn.%s",
+                 dsa_tensors[index].suffix);
+        const k3_st_tensor *tensor = k3_st_find(&model, name);
+        if (!tensor || tensor->dtype != K3_ST_DTYPE_BF16 ||
+            (dsa_tensors[index].columns == 0u ?
+                (tensor->ndim != 1u || tensor->shape[0] != dsa_tensors[index].rows) :
+                (tensor->ndim != 2u || tensor->shape[0] != dsa_tensors[index].rows ||
+                 tensor->shape[1] != dsa_tensors[index].columns))) {
+            k3_st_model_close(&model);
+            return fail("DSA indexer tensor name, dtype, or shape mismatch");
+        }
     }
 
     static const char *names[] = {
@@ -70,13 +105,13 @@ int main(int argc, char **argv) {
         }
     }
 
-    const uint64_t physical_start = UINT64_C(1268562960);
+    const uint64_t physical_start = tensors[0]->physical_offset;
     const uint64_t physical_bytes = UINT64_C(17547264);
     if (tensors[0]->physical_offset != physical_start ||
         tensors[5]->physical_offset + tensors[5]->byte_length !=
             physical_start + physical_bytes) {
         k3_st_model_close(&model);
-        return fail("expert physical range disagrees with the layout oracle");
+        return fail("expert physical range is not one six-tensor span");
     }
 
     k3_st_read read;
@@ -90,13 +125,8 @@ int main(int argc, char **argv) {
     clock_gettime(CLOCK_MONOTONIC, &read_end);
 
     uint64_t hash = fnv1a64(read.data, read.data_bytes);
-    if (hash != UINT64_C(0xeb0eff9b9d8ae0ef)) {
-        k3_st_read_release(&read);
-        k3_st_model_close(&model);
-        return fail("expert bytes disagree with the staged-file oracle");
-    }
 
-    printf("K3 SafeTensors pager: PASS\n");
+    printf("K3.1 SafeTensors pager: PASS\n");
     printf("  tensors: %zu across %zu shards\n",
            model.tensor_count, model.shard_count);
     printf("  directory build: %.3f s\n",

@@ -6,7 +6,7 @@ for ordinary `journalctl`, `grep`, and log-forwarder ingestion. The values in
 this abbreviated field-shape example are illustrative:
 
 ```text
-2026-08-02T03:15:04.506Z INFO  request.start             id=chatcmpl-moonshine-... peer=192.0.2.10 stream=yes messages=3 max_output=65536 reasoning=medium tools=47 tool_choice=auto parallel_tools=yes format=text
+2026-08-02T03:15:04.506Z INFO  request.start             id=chatcmpl-moonshine-... peer=192.0.2.10 stream=yes messages=3 max_output=65536 reasoning=high tools=47 tool_choice=auto parallel_tools=yes format=text
 2026-08-02T03:15:04.532Z INFO  request.prefill.start     id=chatcmpl-moonshine-... prompt=3946 evaluated=33 reused=3913 reuse=hit strategy=layer-major
 2026-08-02T03:15:48.274Z INFO  request.prefill.complete  id=chatcmpl-moonshine-... evaluated=33 reused=3913 seconds=43.742 rate=0.754_tok/s read=0.000_GiB workspace_borrow=0.000_GiB
 2026-08-02T03:15:48.274Z INFO  request.decode.start       id=chatcmpl-moonshine-... phase=reasoning max_output=65536
@@ -23,7 +23,7 @@ disable terminal color explicitly.
 | Event | Meaning |
 |---|---|
 | `server.load.start` | Effective model path and memory/scheduling configuration before engine creation. |
-| `server.ready` | Listener, version, context/output ceilings, load time, and memory tiers after successful startup. |
+| `server.ready` | Listener, version, context/output ceilings, load time, memory tiers, and separate DSA index-cache/workspace sizes after successful startup. |
 | `request.start` | Validated request envelope plus queue wait/origin. It records counts and policy, never message content. |
 | `request.prefill.start` | Exact prompt accounting and reuse decision before reset, workspace admission, or inference. |
 | `request.prefix.miss` | A retained state existed but the candidate was not an exact extension; includes retained/matched/candidate token counts. |
@@ -32,7 +32,8 @@ disable terminal color explicitly.
 | `request.decode.start` | Decode began in the reasoning or response/tool region. |
 | `request.decode.phase` | Thinking closed and generation entered the response-or-tool region. Tool payloads are structurally buffered until they parse and validate. |
 | `request.decode.progress` | A heartbeat every 64 model-produced tokens, including the current region and decode elapsed time. |
-| `request.state.digest` | Non-cryptographic causal-state comparison fingerprints emitted only with `--decode-state-digest`; expensive and intended for paired qualification. |
+| `request.state.digest` | Non-cryptographic causal-state comparison fingerprints emitted only with `--decode-state-digest`; includes KDA, convolution, MLA, DSA index-key cache, and AttnRes. Expensive and intended for paired qualification. |
+| `request.dsa` | DSA indexer/top-k call counts and selected-row total emitted after decode when DSA top-k work occurred. |
 | `request.decode.io` | Per-request decode I/O/timing aggregate emitted only when decode diagnostics are enabled. |
 | `request.complete` | Final prompt/decode/total and separate queue timing, finish reason, forced-trailer count, output byte counts, tool-call count, client state, and cache counters. |
 | `request.queued` / `request.dequeue` | One completion was transferred during terminal checkpoint export, then handed to inference after export; records only peer, phase, occupancy, and wait. |
@@ -142,7 +143,7 @@ atomically published mode `0600`.
 `--decode-state-digest` adds `request.state.digest` before the final
 `request.complete` event. It computes deterministic 64-bit FNV-1a comparison
 fingerprints over the complete causal-state regions after decode. Matching all
-four values and position is a useful paired qualification gate, but the hashes
+five values and position is a useful paired qualification gate, but the hashes
 are non-cryptographic, collision-prone in principle, and not an independent
 proof of state equality. Digest computation is deliberately outside the decode
 timer and is too expensive for normal service. `request.decode.io` appears in
@@ -200,12 +201,13 @@ artifacts.
 For systemd, keep standard error attached to the journal. For a manual run:
 
 ```sh
-./moonshine-server /path/to/moonshotai__Kimi-K3 [options] \
+./moonshine-server /path/to/moonshotai__Kimi-K3.1-Pro [options] \
   2>>moonshine.log
 ```
 
 SSE progress comments remain part of the client-facing compatibility surface.
-Some clients, including the qualified Hermes configuration, do not count SSE
-comments as parsed model-output activity; their read and stale-stream timeouts
-must still follow the deployment guidance in
-[Deployment profiles](deployment-profiles.md).
+Some clients, including the historically qualified K3 Hermes configuration, do
+not count SSE comments as parsed model-output activity; their read and
+stale-stream timeouts must still follow the deployment guidance in
+[Deployment profiles](deployment-profiles.md). No current K3.1 Hermes
+qualification is claimed.

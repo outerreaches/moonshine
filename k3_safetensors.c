@@ -14,6 +14,9 @@
 #ifndef O_DIRECT
 #define O_DIRECT 0
 #endif
+#ifndef O_NOFOLLOW
+#define O_NOFOLLOW 0
+#endif
 
 typedef struct {
     const char *p;
@@ -437,24 +440,31 @@ static bool k3_st_model_prepare(k3_st_model *model,
 static bool k3_st_model_open_shard(k3_st_model *model,
                                    size_t index,
                                    const char *source_path,
+                                   int source_fd,
                                    char *error,
                                    size_t error_size) {
-    if (!model || index >= model->shard_count || !source_path) return false;
+    if (!model || index >= model->shard_count || !source_path) {
+        if (source_fd >= 0) close(source_fd);
+        return false;
+    }
     char *path = strdup(source_path);
     if (!path) {
+        if (source_fd >= 0) close(source_fd);
         k3_set_error(error, error_size, "out of memory allocating path");
         return false;
     }
     k3_st_shard *shard = &model->shards[index];
     shard->path = path;
-    shard->fd = open(path, O_RDONLY | O_CLOEXEC);
+    shard->fd = source_fd >= 0 ? source_fd : open(
+        path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (shard->fd < 0) {
         k3_set_error(error, error_size, "open %s: %s",
                      path, strerror(errno));
         return false;
     }
     struct stat st;
-    if (fstat(shard->fd, &st) != 0 || st.st_size < 8) {
+    if (fstat(shard->fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+        st.st_size < 8) {
         k3_set_error(error, error_size, "stat %s: %s",
                      path, strerror(errno));
         return false;
@@ -495,7 +505,20 @@ static bool k3_st_model_open_shard(k3_st_model *model,
     free(header);
     if (!parsed) return false;
     if (O_DIRECT != 0) {
-        shard->direct_fd = open(path, O_RDONLY | O_CLOEXEC | O_DIRECT);
+        shard->direct_fd = open(
+            path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | O_DIRECT);
+        if (shard->direct_fd >= 0) {
+            struct stat direct_status;
+            if (fstat(shard->direct_fd, &direct_status) != 0 ||
+                !S_ISREG(direct_status.st_mode) ||
+                direct_status.st_dev != st.st_dev ||
+                direct_status.st_ino != st.st_ino ||
+                direct_status.st_size != st.st_size) {
+                k3_set_error(error, error_size,
+                             "direct-I/O identity mismatch: %s", path);
+                return false;
+            }
+        }
     }
     return true;
 }
@@ -539,7 +562,7 @@ bool k3_st_model_open(k3_st_model *model,
         snprintf(path, path_bytes, "%s/model-%05zu-of-%06zu.safetensors",
                  root, i + 1u, shard_count);
         const bool opened = k3_st_model_open_shard(
-            model, i, path, error, error_size);
+            model, i, path, -1, error, error_size);
         free(path);
         if (!opened) goto fail;
     }
@@ -562,7 +585,33 @@ bool k3_st_model_open_file(k3_st_model *model,
         return false;
     }
     if (!k3_st_model_prepare(model, 1u, error, error_size) ||
-        !k3_st_model_open_shard(model, 0u, path, error, error_size) ||
+        !k3_st_model_open_shard(model, 0u, path, -1, error, error_size) ||
+        !k3_st_model_finish_open(model, error, error_size)) {
+        k3_st_model_close(model);
+        return false;
+    }
+    return true;
+}
+
+bool k3_st_model_open_file_fd(k3_st_model *model,
+                              const char *path,
+                              int fd,
+                              char *error,
+                              size_t error_size) {
+    if (error && error_size) error[0] = ' ';
+    if (!model || !path || path[0] == ' ' || fd < 0) {
+        if (fd >= 0) close(fd);
+        k3_set_error(error, error_size,
+                     "invalid verified single-file model-open arguments");
+        return false;
+    }
+    if (!k3_st_model_prepare(model, 1u, error, error_size)) {
+        close(fd);
+        k3_st_model_close(model);
+        return false;
+    }
+    if (!k3_st_model_open_shard(
+            model, 0u, path, fd, error, error_size) ||
         !k3_st_model_finish_open(model, error, error_size)) {
         k3_st_model_close(model);
         return false;

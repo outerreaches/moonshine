@@ -22,12 +22,25 @@ constexpr uint32_t kLayers = 92u;
 constexpr uint32_t kExperts = 896u;
 constexpr uint32_t kMaxFiles = kLayers;
 
-const uint8_t kPinnedManifestSha256[32] = {
-    0x47, 0x6f, 0xa0, 0xba, 0x64, 0xe3, 0x23, 0x3c,
-    0xbb, 0x9c, 0xa0, 0x64, 0x23, 0x27, 0x36, 0x1a,
-    0x73, 0xf6, 0x80, 0x7e, 0x75, 0x1e, 0xdb, 0x07,
-    0x1c, 0x92, 0xfa, 0x22, 0x16, 0xb2, 0x02, 0xa4,
-};
+bool parse_manifest_sha256(const char *text, uint8_t output[32]) {
+    if (!text || !output || strlen(text) != 64u) return false;
+    for (uint32_t index = 0u; index < 32u; ++index) {
+        for (uint32_t nibble = 0u; nibble < 2u; nibble++) {
+            const char value = text[index * 2u + nibble];
+            if (!((value >= '0' && value <= '9') ||
+                  (value >= 'a' && value <= 'f'))) {
+                return false;
+            }
+        }
+        char digits[3] = { text[index * 2u], text[index * 2u + 1u], '\0' };
+        char *end = nullptr;
+        errno = 0;
+        const unsigned long value = strtoul(digits, &end, 16);
+        if (errno != 0 || end != digits + 2 || value > 0xffu) return false;
+        output[index] = static_cast<uint8_t>(value);
+    }
+    return true;
+}
 
 struct StoreFile {
     int fd;
@@ -278,6 +291,7 @@ __global__ void decode_tiles_kernel(
 
 bool load_file(StoreImpl *store,
                const char *path,
+               const uint8_t expected_manifest[32],
                char *error,
                size_t error_size) {
     int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -307,7 +321,7 @@ bool load_file(StoreImpl *store,
         header.max_block_bytes % K3_MZG2_ALIGNMENT != 0u ||
         header.data_offset > static_cast<uint64_t>(status.st_size) ||
         memcmp(header.source_manifest_sha256,
-               kPinnedManifestSha256, sizeof(kPinnedManifestSha256)) != 0) {
+               expected_manifest, 32u) != 0) {
         const int saved = errno;
         if (direct_fd >= 0) close(direct_fd);
         if (fd >= 0) close(fd);
@@ -385,9 +399,16 @@ struct k3_mzg2_store : StoreImpl {};
 
 extern "C" bool k3_mzg2_store_open_path(
         k3_mzg2_store **out, const char *path,
+        const char *source_manifest_sha256,
         char *error, size_t error_size) {
     if (out) *out = nullptr;
     if (error && error_size) error[0] = '\0';
+    uint8_t expected_manifest[32];
+    if (!out || !parse_manifest_sha256(source_manifest_sha256, expected_manifest)) {
+        set_error(error, error_size,
+                  "MZG2 source manifest must be 64 lowercase hex digits");
+        return false;
+    }
     if (!out) {
         set_error(error, error_size, "invalid MZG2 store output");
         return false;
@@ -423,7 +444,7 @@ extern "C" bool k3_mzg2_store_open_path(
         return false;
     }
     if (S_ISREG(root_status.st_mode)) {
-        if (!load_file(store, path, error, error_size)) {
+        if (!load_file(store, path, expected_manifest, error, error_size)) {
             k3_mzg2_store_destroy(store);
             return false;
         }
@@ -434,7 +455,8 @@ extern "C" bool k3_mzg2_store_open_path(
                 sidecar, sizeof(sidecar), "%s/layer-%03u.mzg2",
                 path, layer);
             if (length < 0 || static_cast<size_t>(length) >= sizeof(sidecar) ||
-                !load_file(store, sidecar, error, error_size)) {
+                !load_file(store, sidecar, expected_manifest,
+                           error, error_size)) {
                 k3_mzg2_store_destroy(store);
                 return false;
             }
@@ -468,7 +490,9 @@ extern "C" bool k3_mzg2_store_open_optional(
     }
     const char *path = getenv("MOONSHINE_MZG2_STORE");
     if (!path || path[0] == '\0' || strcmp(path, "off") == 0) return true;
-    return k3_mzg2_store_open_path(out, path, error, error_size);
+    const char *manifest = getenv("MOONSHINE_SOURCE_MANIFEST_SHA256");
+    return k3_mzg2_store_open_path(
+        out, path, manifest, error, error_size);
 }
 
 extern "C" void k3_mzg2_store_destroy(k3_mzg2_store *store) {

@@ -12,8 +12,8 @@
 extern "C" {
 #endif
 
-#define MOONSHINE_MODEL_ID "moonshine"
-#define MOONSHINE_SYSTEM_FINGERPRINT "moonshine-q8-greedy"
+#define MOONSHINE_MODEL_ID "moonshotai/Kimi-K3.1-Pro"
+#define MOONSHINE_SYSTEM_FINGERPRINT "moonshine-k3.1-pro-q8-greedy"
 
 typedef struct {
     char            *model;

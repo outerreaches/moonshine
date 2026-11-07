@@ -88,7 +88,7 @@ static float random_input(void) {
 
 int main(int argc, char **argv) {
     const char *root = argc > 1 ? argv[1] :
-        "/srv/modelstore/models/moonshotai__Kimi-K3";
+        "/srv/modelstore/models/moonshotai__Kimi-K3.1-Pro";
     const bool plan_only =
         argc > 2 && strcmp(argv[2], "plan") == 0;
     if (argc > 3 || (argc > 2 && !plan_only)) {
