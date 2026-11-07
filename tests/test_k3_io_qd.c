@@ -404,7 +404,7 @@ static bool build_requests(const k3_st_model *model,
 
 int main(int argc, char **argv) {
     const char *root = argc > 1 ? argv[1] :
-        "/srv/modelstore/models/moonshotai__Kimi-K3";
+        "/srv/modelstore/models/moonshotai__Kimi-K3.1-Pro";
     uint32_t operation_count = K3_DEFAULT_OPS;
     if (argc > 2) {
         char *end = NULL;

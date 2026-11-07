@@ -82,7 +82,7 @@ def main() -> None:
         },
     }]
     first_stream = client.chat.completions.create(
-        model="moonshine",
+        model="moonshotai/Kimi-K3.1-Pro",
         messages=messages,
         tools=tools,
         tool_choice="required",
@@ -130,7 +130,7 @@ def main() -> None:
         },
     ])
     second_stream = client.chat.completions.create(
-        model="moonshine",
+        model="moonshotai/Kimi-K3.1-Pro",
         messages=messages,
         tools=tools,
         tool_choice="auto",

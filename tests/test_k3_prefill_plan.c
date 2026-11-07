@@ -21,7 +21,8 @@ static const uint64_t K3_PHYSICAL_READ_BYTES =
     UINT64_C(1446793422960);
 static const uint32_t K3_PHYSICAL_LAYER_SEGMENTS = 92u;
 static const uint64_t K3_CACHE_32_BYTES = UINT64_C(51659145216);
-static const uint64_t K3_ONE_TOKEN_WORKSPACE = UINT64_C(1116360);
+static const uint64_t K3_ONE_TOKEN_WORKSPACE =
+    UINT64_C(1116360) + (32u * 128u + 128u + 32u) * sizeof(uint16_t);
 static const uint64_t K3_KDA_DEQUANT_WORKSPACE =
     UINT64_C(176160768);
 
@@ -70,6 +71,9 @@ static int check_chunk(
     CHECK(plan.mla_append_bytes ==
               (uint64_t)chunk * 24u * 576u * sizeof(uint16_t),
           "MLA append ledger");
+    CHECK(plan.dsa_index_append_bytes ==
+              (uint64_t)chunk * 24u * 128u * sizeof(uint16_t),
+          "DSA index-key append ledger");
     CHECK(plan.staging_window_bytes ==
               UINT64_C(2) * UINT64_C(17551360) &&
           plan.registered_staging_bytes ==
@@ -118,7 +122,7 @@ static int check_chunk(
 
 int main(int argc, char **argv) {
     const char *root = argc > 1 ? argv[1] :
-        "/srv/modelstore/models/moonshotai__Kimi-K3";
+        "/srv/modelstore/models/moonshotai__Kimi-K3.1-Pro";
     if (argc > 2) {
         fprintf(stderr, "usage: %s [MODEL_ROOT]\n", argv[0]);
         return 2;

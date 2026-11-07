@@ -22,6 +22,9 @@ enum {
     K3_PREFILL_MLA_Q = 96 * 192,
     K3_PREFILL_MLA_CACHE_DIM = 576,
     K3_PREFILL_MLA_LAYERS = 24,
+    K3_PREFILL_DSA_QUERY = 32 * 128,
+    K3_PREFILL_DSA_KEY = 128,
+    K3_PREFILL_DSA_HEADS = 32,
     K3_PREFILL_EXPERT_TENSORS = 6,
     K3_PREFILL_STAGING_BYTES = 17551360,
 };
@@ -229,7 +232,9 @@ static bool derive_workspace(uint32_t chunk_tokens,
          K3_PREFILL_MLA_CACHE_DIM +
          (uint64_t)K3_PREFILL_HEADS *
              K3_PREFILL_MLA_CACHE_DIM +
-         3u * K3_PREFILL_KDA_INNER) * bf16;
+         3u * K3_PREFILL_KDA_INNER +
+         K3_PREFILL_DSA_QUERY + K3_PREFILL_DSA_KEY +
+         K3_PREFILL_DSA_HEADS) * bf16;
     const uint64_t route_per_token =
         (uint64_t)K3_PREFILL_TOP_K *
         (sizeof(uint32_t) + sizeof(float));
@@ -291,11 +296,16 @@ static bool derive_workspace(uint32_t chunk_tokens,
     plan->incremental_workspace_bytes =
         plan->batch_workspace_bytes > one_token_workspace ?
             plan->batch_workspace_bytes - one_token_workspace : 0u;
+    if (!multiply_u64(
+            (uint64_t)chunk_tokens * K3_PREFILL_MLA_LAYERS,
+            K3_PREFILL_MLA_CACHE_DIM * bf16,
+            &plan->mla_append_bytes)) {
+        return false;
+    }
     return multiply_u64(
-        (uint64_t)chunk_tokens *
-            K3_PREFILL_MLA_LAYERS,
-        K3_PREFILL_MLA_CACHE_DIM * bf16,
-        &plan->mla_append_bytes);
+        (uint64_t)chunk_tokens * K3_PREFILL_MLA_LAYERS,
+        K3_PREFILL_DSA_KEY * bf16,
+        &plan->dsa_index_append_bytes);
 }
 
 bool k3_prefill_plan_build_with_aux_workspace(

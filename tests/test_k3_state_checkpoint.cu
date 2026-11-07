@@ -20,6 +20,7 @@ static bool digest_equal(
         left->kda_state_hash == right->kda_state_hash &&
         left->kda_conv_hash == right->kda_conv_hash &&
         left->mla_cache_hash == right->mla_cache_hash &&
+        left->dsa_index_cache_hash == right->dsa_index_cache_hash &&
         left->attn_res_hash == right->attn_res_hash &&
         left->token_position == right->token_position;
 }
@@ -88,7 +89,7 @@ static bool write_file_bytes(const char *path,
 
 int main(int argc, char **argv) {
     const char *root = argc > 1 ? argv[1] :
-        "/srv/modelstore/models/moonshotai__Kimi-K3";
+        "/srv/modelstore/models/moonshotai__Kimi-K3.1-Pro";
     const char *state_directory =
         argc > 2 ? argv[2] : "/tmp";
     if (argc > 3) {
@@ -194,9 +195,11 @@ int main(int argc, char **argv) {
         UINT64_C(20348928) +
         UINT64_C(24) * UINT64_C(2) *
             UINT64_C(576) * sizeof(uint16_t) +
+        UINT64_C(24) * UINT64_C(2) *
+            UINT64_C(128) * sizeof(uint16_t) +
         UINT64_C(8) * UINT64_C(7168) *
             sizeof(uint16_t);
-    CHECK(exported.format_version == 1u &&
+    CHECK(exported.format_version == 2u &&
               exported.context == 8192u &&
               exported.token_position == 2u &&
               exported.q8_projections &&

@@ -29,6 +29,10 @@ mimo26-eval-tokens.txt
 tests/test_k3_*
 !tests/test_k3_*.c
 !tests/test_k3_*.cu
+tests/test_k31_*
+!tests/test_k31_*.c
+!tests/test_k31_*.cu
+!tests/test_k31_*.py
 tests/test_glm53_*
 !tests/test_glm53_*.c
 !tests/test_glm53_*.cu
@@ -40,6 +44,7 @@ tests/test_mimo26_*
 __pycache__/
 *.pyc
 .venv-sdk/
+.venv-hf/
 moonshine-pre-public-history-*.bundle
 .DS_Store
 .*.swp

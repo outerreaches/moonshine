@@ -126,7 +126,12 @@ K3_OBJS := \
 	k3_prefill_route_index.o \
 	k3_rocm_ops.o \
 	k3_safetensors.o \
-	k3_tokenizer.o
+	k3_sha256.o \
+	k3_tokenizer.o \
+	k31_dsa_memory.o \
+	k31_dsa_reference.o \
+	k31_dsa_rocm.o \
+	k31_model.o
 
 PORTABLE_CPU_TESTS := \
 	tests/test_k3_expert_cache \
@@ -140,7 +145,11 @@ PORTABLE_CPU_TESTS := \
 	tests/test_k3_json \
 	tests/test_k3_openai \
 	tests/test_k3_server_slot \
-	tests/test_k3_safetensors_file
+	tests/test_k3_safetensors_file \
+	tests/test_k3_sha256 \
+	tests/test_k31_dsa_memory \
+	tests/test_k31_dsa_reference \
+	tests/test_k31_model
 
 MODEL_CPU_TESTS := \
 	tests/test_k3_prefill_plan \
@@ -154,6 +163,10 @@ ASSET_TESTS := \
 	tests/test_k3_tokenizer
 
 ROCM_TESTS := \
+	tests/test_k31_engine_profile \
+	tests/test_k31_identity \
+	tests/test_k31_mzg2_identity \
+	tests/test_k31_dsa_rocm \
 	tests/test_k3_cache_registration \
 	tests/test_k3_dense_mlp \
 	tests/test_k3_embedding_output \
@@ -201,7 +214,9 @@ ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS) \
 	test-mla-batch-determinism test-mla-batch-kernels \
 	test-moe-tail-profile test-decode-cache-replay test-cache-analyzer \
 	test-prefill-screen-analyzer test-anchor-recovery-analyzer \
+	bench-k31-dsa \
 	test-static-q8-screen test-mzg-transcoder test-mzg2-bundle \
+	test-k31-checkpoint test-placement test-k31-bundle-roundtrip \
 	test-reduction-qualification test-openai-sdk \
 	test-glm53-phase2 test-glm53-phase3 test-glm53-phase4 \
 	test-glm53-phase4-official test-glm53-phase5a \
@@ -246,34 +261,38 @@ help:
 	@echo " All lanes -- general and Kimi K3 tests:"
 	@echo "  make test-cpu                Run portable tests without ROCm or weights"
 	@echo "  make test                    Run model-free CPU/ROCm tests"
+	@echo "  make bench-k31-dsa          Profile DSA kernels at real 8K shapes"
 	@echo "  make test-openai-sdk         Run the optional official Python SDK SSE fixture"
 	@echo "  make test-mzg-transcoder     Run MZG format/transcoder tests (python-zstandard)"
+	@echo "  make test-mzg2-bundle       Run model-free MZG2 bundle and resume tests"
+	@echo "  make test-k31-checkpoint    Run synthetic K3.1 checkpoint inspection tests"
+	@echo "  make test-placement        Run weighted sidecar placement tests"
 	@echo "  make test-static-q8-screen  Run model-free Q8 codec tests and build the offline screen"
-	@echo "  make test-model-layout MOONSHINE_MODEL=/path/to/Kimi-K3"
+	@echo "  make test-model-layout MOONSHINE_MODEL=/path/to/Kimi-K3.1-Pro"
 	@echo "                               Validate the pinned 96-shard layout and plan"
-	@echo "  make test-model-components MOONSHINE_MODEL=/path/to/Kimi-K3"
+	@echo "  make test-model-components MOONSHINE_MODEL=/path/to/Kimi-K3.1-Pro"
 	@echo "                               Run bounded real-weight component oracles"
-	@echo "  make test-engine-init MOONSHINE_MODEL=/path/to/Kimi-K3 MOONSHINE_CONTEXT=8192"
+	@echo "  make test-engine-init MOONSHINE_MODEL=/path/to/Kimi-K3.1-Pro MOONSHINE_CONTEXT=8192"
 	@echo "                               Allocate and validate the selected context"
-	@echo "  make test-engine-hello MOONSHINE_MODEL=/path/to/Kimi-K3 MOONSHINE_CONTEXT=8192"
+	@echo "  make test-engine-hello MOONSHINE_MODEL=/path/to/Kimi-K3.1-Pro MOONSHINE_CONTEXT=8192"
 	@echo "                               Run the locked greedy hello at the selected context"
-	@echo "  make test-chat-hello MOONSHINE_MODEL=/path/to/Kimi-K3"
+	@echo "  make test-chat-hello MOONSHINE_MODEL=/path/to/Kimi-K3.1-Pro"
 	@echo "                               Run native tokenizer-to-text chat end to end"
-	@echo "  make test-state-checkpoint MOONSHINE_MODEL=/path/to/Kimi-K3"
+	@echo "  make test-state-checkpoint MOONSHINE_MODEL=/path/to/Kimi-K3.1-Pro"
 	@echo "                               Prove checksummed export/import continuation"
-	@echo "  make test-tokenizer MOONSHINE_MODEL=/path/to/Kimi-K3"
+	@echo "  make test-tokenizer MOONSHINE_MODEL=/path/to/Kimi-K3.1-Pro"
 	@echo "                               Check native tokenizer and XTML parity"
-	@echo "  make test-prefill-2 MOONSHINE_MODEL=/path/to/Kimi-K3"
+	@echo "  make test-prefill-2 MOONSHINE_MODEL=/path/to/Kimi-K3.1-Pro"
 	@echo "                               Compare two-token range and sequential state"
-	@echo "  make test-prefill-scale MOONSHINE_MODEL=/path/to/Kimi-K3 MOONSHINE_PREFILL_TOKENS=512"
+	@echo "  make test-prefill-scale MOONSHINE_MODEL=/path/to/Kimi-K3.1-Pro MOONSHINE_PREFILL_TOKENS=512"
 	@echo "                               Run the default layer-major scale fixture"
-	@echo "  make test-prefill-kda-blas MOONSHINE_MODEL=/path/to/Kimi-K3 MOONSHINE_PREFILL_TOKENS=8192"
+	@echo "  make test-prefill-kda-blas MOONSHINE_MODEL=/path/to/Kimi-K3.1-Pro MOONSHINE_PREFILL_TOKENS=8192"
 	@echo "                               Run the diagnostic KDA hipBLAS candidate"
-	@echo "  make test-prefill-crossover MOONSHINE_MODEL=/path/to/Kimi-K3 MOONSHINE_CROSSOVER_TOKENS='2 4 8 16'"
+	@echo "  make test-prefill-crossover MOONSHINE_MODEL=/path/to/Kimi-K3.1-Pro MOONSHINE_CROSSOVER_TOKENS='2 4 8 16'"
 	@echo "                               Compare exact warm sequential/range suffixes"
 	@echo "  make test-prefill-gemm-shapes"
 	@echo "                               Screen exact MXFP4 expert tiles at production scale"
-	@echo "  make test-long-context-retrieval MOONSHINE_MODEL=/path/to/Kimi-K3 MOONSHINE_RETRIEVAL_TARGET=512|16000|32000"
+	@echo "  make test-long-context-retrieval MOONSHINE_MODEL=/path/to/Kimi-K3.1-Pro MOONSHINE_RETRIEVAL_TARGET=512|16000|32000|64000"
 	@echo "                               Run a deterministic natural-text gate"
 	@echo "  make test-mla-batch-determinism"
 	@echo "                               Compare looped and strided-batched MLA GEMMs"
@@ -287,7 +306,7 @@ help:
 	@echo "  make test-cache-analyzer"
 	@echo "                               Run portable offline cache-analysis tests"
 	@echo "       MOONSHINE_CACHE_ANALYZER_GOLDEN_RUN=/path/to/accepted-run adds offline goldens"
-	@echo "  make test-reduction-qualification MOONSHINE_MODEL=/path/to/Kimi-K3"
+	@echo "  make test-reduction-qualification MOONSHINE_MODEL=/path/to/Kimi-K3.1-Pro"
 	@echo "                               Run the MXFP4 reduction-change gate bundle"
 	@echo "  make clean                  Remove local build products"
 
@@ -313,7 +332,7 @@ k3_prefix_catalog.o: k3_prefix_catalog.c k3_prefix_catalog.h \
 	k3_engine.h k3_prefix_reuse.h
 k3_prefill_route_index.o: k3_prefill_route_index.c \
 	k3_prefill_route_index.h
-k3_bundle.o: k3_bundle.c k3_bundle.h k3_json.h
+k3_bundle.o: k3_bundle.c k3_bundle.h k3_json.h k3_sha256.h
 k3_prefix_reuse.o: k3_prefix_reuse.c k3_prefix_reuse.h
 k3_chat_cli.o: k3_chat_cli.c k3_chat.h k3_engine.h moonshine_version.h
 k3_server.o: k3_server.c k3_server_slot.h k3_chat.h k3_json.h k3_openai.h \
@@ -332,7 +351,12 @@ k3_mzg2.o: k3_mzg2.cu k3_mzg2.h
 k3_json.o: k3_json.c k3_json.h
 k3_openai.o: k3_openai.c k3_openai.h k3_json.h k3_chat.h
 k3_rocm_ops.o: k3_rocm_ops.cu k3_rocm_ops.h
+k31_dsa_reference.o: k31_dsa_reference.c k31_dsa_reference.h
+k31_dsa_rocm.o: k31_dsa_rocm.cu k31_dsa_rocm.h
+k31_dsa_memory.o: k31_dsa_memory.c k31_dsa_memory.h
+k31_model.o: k31_model.c k31_model.h k3_json.h
 k3_safetensors.o: k3_safetensors.c k3_safetensors.h
+k3_sha256.o: k3_sha256.c k3_sha256.h
 k3_tokenizer.o: k3_tokenizer.c k3_tokenizer.h
 glm53_arch_math.o: glm53_arch_math.c glm53_arch_math.h
 glm53_arch_math.o: CFLAGS += -fno-fast-math
@@ -447,6 +471,14 @@ tests/test_k3_prefix_checkpoint.o: tests/test_k3_prefix_checkpoint.c k3_chat.h
 tests/test_k3_server_slot.o: tests/test_k3_server_slot.c k3_server_slot.h
 tests/test_k3_safetensors_file.o: tests/test_k3_safetensors_file.c \
 	k3_safetensors.h
+tests/test_k3_sha256.o: tests/test_k3_sha256.c k3_sha256.h
+tests/test_k31_model.o: tests/test_k31_model.c k31_model.h
+tests/test_k31_dsa_memory.o: tests/test_k31_dsa_memory.c k31_dsa_memory.h
+tests/test_k31_dsa_reference.o: tests/test_k31_dsa_reference.c k31_dsa_reference.h
+tests/test_k31_dsa_rocm.o: tests/test_k31_dsa_rocm.cu k31_dsa_rocm.h
+tests/test_k31_mzg2_identity.o: tests/test_k31_mzg2_identity.c k3_mzg2.h
+tests/test_k31_identity.o: tests/test_k31_identity.c k31_identity.h
+tests/test_k31_engine_profile.o: tests/test_k31_engine_profile.c k3_engine.h
 tests/test_k3_mzg_store.o: tests/test_k3_mzg_store.c k3_mzg.h k3_safetensors.h
 tests/test_k3_prefix_reuse.o: tests/test_k3_prefix_reuse.c k3_prefix_reuse.h
 tests/test_k3_prefix_catalog.o: tests/test_k3_prefix_catalog.c \
@@ -461,10 +493,13 @@ tests/test_k3_prefill_timeline.o: tests/test_k3_prefill_timeline.c \
 tests/test_k3_tokenizer.o: tests/test_k3_tokenizer.c k3_tokenizer.h
 tools/transcode_mzg2_layer.o: tools/transcode_mzg2_layer.cu \
 	k3_mzg2.h k3_safetensors.h
+tools/bench_k31_dsa.o: tools/bench_k31_dsa.cu k31_dsa_rocm.h
 tools/screen_static_q8.o: tools/screen_static_q8.c \
 	k3_q8_codec.h k3_static_store.h k3_safetensors.h
 
 tools/transcode_mzg2_layer: tools/transcode_mzg2_layer.o k3_safetensors.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tools/bench_k31_dsa: tools/bench_k31_dsa.o k31_dsa_rocm.o k3_rocm_ops.o
 	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
 tools/screen_static_q8: tools/screen_static_q8.o k3_q8_codec.o \
 		k3_static_layout.o k3_safetensors.o
@@ -740,7 +775,19 @@ tests/test_glm53_official_projection: \
 		k3_safetensors.o k3_json.o
 	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
 
-tests/test_k3_bundle: tests/test_k3_bundle.o k3_bundle.o k3_json.o
+tests/test_k3_bundle: tests/test_k3_bundle.o k3_bundle.o k3_json.o k3_sha256.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+tests/test_k3_sha256: tests/test_k3_sha256.o k3_sha256.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+tests/test_k31_dsa_reference: tests/test_k31_dsa_reference.o k31_dsa_reference.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+tests/test_k31_dsa_memory: tests/test_k31_dsa_memory.o k31_dsa_memory.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+tests/test_k31_model: tests/test_k31_model.o k31_model.o k3_json.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 tests/test_k3_expert_cache: tests/test_k3_expert_cache.o k3_expert_cache.o
@@ -877,6 +924,8 @@ moonshine-server: k3_server.o k3_server_slot.o libmoonshine.a
 $(ROCM_TESTS): %: %.o libmoonshine.a
 	$(HIPCC) $(HIPFLAGS) -o $@ $< libmoonshine.a $(ROCM_LDLIBS)
 
+bench-k31-dsa: tools/bench_k31_dsa
+	./tools/bench_k31_dsa
 test-glm53-phase2: $(GLM53_CPU_TESTS)
 	./tests/test_glm53_manifest
 	./tests/test_glm53_expert_plan
@@ -1291,6 +1340,17 @@ test-mzg2-bundle:
 	PYTHONDONTWRITEBYTECODE=1 \
 		$(PYTHON) -m unittest -v tests/test_build_mzg2_bundle.py
 
+test-k31-checkpoint:
+	PYTHONDONTWRITEBYTECODE=1 \
+		$(PYTHON) -m unittest -v tests/test_k31_checkpoint.py
+
+test-placement:
+	PYTHONDONTWRITEBYTECODE=1 \
+		$(PYTHON) -m unittest -v tests/test_moonshine_placement.py
+
+test-k31-bundle-roundtrip: tests/test_k3_bundle
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/test_k31_bundle_roundtrip.py
+
 # Portable: no ROCm, no hipcc, no weights. Anything linked with $(HIPCC) belongs
 # in `test` or a phase target, not here -- test_glm53_static_bindings was in this
 # list and pulled in glm53_static_loader.o, which is a .cu. That built fine on a
@@ -1301,8 +1361,14 @@ test-cpu: $(PORTABLE_CPU_TESTS) test-glm53-phase4 test-glm53-phase5a \
 		tests/test_glm53_static_layout \
 		test-cache-analyzer \
 	test-prefill-screen-analyzer test-anchor-recovery-analyzer \
-	test-mzg2-bundle
+	test-mzg2-bundle test-k31-checkpoint test-placement test-k31-bundle-roundtrip
 	./tests/test_k3_expert_cache
+	./tests/test_k3_bundle
+	./tests/test_k3_safetensors_file
+	./tests/test_k3_sha256
+	./tests/test_k31_dsa_memory
+	./tests/test_k31_dsa_reference
+	./tests/test_k31_model
 	./tests/test_k3_prefix_bundle
 	./tests/test_k3_prefix_reuse
 	./tests/test_k3_prefix_catalog
@@ -1354,6 +1420,7 @@ test: \
 	test-glm53-phase5c \
 	test-glm53-phase5d-kda \
 	tests/test_k3_expert_cache \
+	tests/test_k31_dsa_rocm \
 	tests/test_k3_prefix_reuse \
 	tests/test_k3_json \
 	tests/test_k3_openai \
@@ -1363,6 +1430,7 @@ test: \
 	tests/test_k3_mla_decode \
 	tests/test_k3_prefill_ops
 	./tests/test_k3_expert_cache
+	./tests/test_k31_dsa_rocm
 	./tests/test_k3_prefix_reuse
 	./tests/test_k3_json
 	./tests/test_k3_openai
@@ -1379,9 +1447,14 @@ test-openai-sdk:
 
 check-model:
 	@test -n "$(MOONSHINE_MODEL)" || \
-		{ echo "error: set MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3"; exit 2; }
-	@test -f "$(MOONSHINE_MODEL)/model-00001-of-000096.safetensors" || \
-		{ echo "error: MOONSHINE_MODEL is not the expected 96-shard SafeTensors tree"; exit 2; }
+		{ echo "error: set MOONSHINE_MODEL=/path/to/moonshotai__Kimi-K3.1-Pro"; exit 2; }
+	@test -f "$(MOONSHINE_MODEL)/config.json" || \
+		{ echo "error: MOONSHINE_MODEL lacks config.json"; exit 2; }
+	@if test ! -f "$(MOONSHINE_MODEL)/model-00001-of-000096.safetensors" && \
+		test ! -f "$(MOONSHINE_MODEL)/moonshine-bundle.json"; then \
+		echo "error: MOONSHINE_MODEL is neither a 96-shard tree nor a Moonshine bundle"; \
+		exit 2; \
+	fi
 
 test-model-layout: check-model \
 	tests/test_k3_safetensors tests/test_k3_prefill_plan
@@ -1479,6 +1552,7 @@ clean:
 	rm -f libmoonshine.a moonshine-chat moonshine-server \
 		k3_chat_cli.o k3_server.o k3_server_slot.o k3_q8_codec.o \
 		tools/transcode_mzg2_layer tools/transcode_mzg2_layer.o \
+		tools/bench_k31_dsa tools/bench_k31_dsa.o \
 		tools/screen_static_q8 tools/screen_static_q8.o \
 		$(K3_OBJS) $(GLM53_OBJS) tests/*.o $(ALL_TESTS)
 

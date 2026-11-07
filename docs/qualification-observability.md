@@ -1,5 +1,8 @@
 # Production lifecycle logging qualification
 
+> **Historical Kimi K3 0.2.0 record.** This gate does not qualify K3.1 Pro
+> 0.3.0, its DSA events/state, or any current deployment profile.
+
 Date: 2026-08-10
 
 This gate qualifies the request lifecycle logging added at commit `45a7232`

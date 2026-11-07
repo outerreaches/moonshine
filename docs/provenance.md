@@ -35,16 +35,30 @@ No third-party source tree is vendored in this repository.
 
 ## Model and architecture references
 
-The engine implements the tensor layout and graph described by:
+The current 0.3.0 profile implements the tensor layout and graph described by
+the [official Kimi K3.1 Pro model release](https://huggingface.co/moonshotai/Kimi-K3.1-Pro),
+pinned at `6d0a0202956796543364d666ab19c6ad1a494ee1`. Its fail-closed loader
+requires `KimiK31ForConditionalGeneration`, model type `kimi_k31`, and the
+released 69-KDA/24-Gated-DSA layer placement and indexer geometry.
 
-- the [official Kimi K3 model release](https://huggingface.co/moonshotai/Kimi-K3),
-  pinned locally at
-  `9f62e4e9fffbd0a83ddd60e1c209d828994b3569`;
-- the [official Moonshot Kimi K3 reference repository](https://github.com/MoonshotAI/Kimi-K3),
-  inspected at `7c5be9599120d7993748de66a76128614f15f210`.
+The DSA implementation also records algorithm references to SGLang's
+[DSA indexer](https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/attention/dsa/dsa_indexer.py)
+and [paged-MQA test oracle](https://github.com/sgl-project/sglang/blob/main/python/sglang/test/kernels/paged_mqa.py),
+and vLLM's
+[paged-MQA CPU kernel](https://github.com/vllm-project/vllm/blob/main/csrc/cpu/sgl-kernels/paged_mqa_logits.cpp).
+These are algorithm/validation references, not runtime dependencies or evidence
+of full-checkpoint equivalence.
 
-The model weights are not included and are not covered by this repository's
-MIT license.
+Earlier releases implemented the
+[official Kimi K3 model release](https://huggingface.co/moonshotai/Kimi-K3) at
+`9f62e4e9fffbd0a83ddd60e1c209d828994b3569`, with the
+[official Moonshot Kimi K3 reference repository](https://github.com/MoonshotAI/Kimi-K3)
+inspected at `7c5be9599120d7993748de66a76128614f15f210`. Those pinned K3
+references remain provenance for the historical implementation; they are not
+the current K3.1 model identity.
+
+Model weights are not included and are not covered by this repository's MIT
+license.
 
 ### GLM 5.3 Flash, and model-derived goldens
 
@@ -131,8 +145,8 @@ provided corroborating exact-prefix designs.
 
 Moonshine applies the invariant independently: token identity authorizes reuse,
 while boundaries only choose checkpoint placement. Its implementation is a
-bounded durable disk bundle for KDA, convolution, MLA, AttnRes, token, and
-directive state. It does not vendor or copy FreeToken, SGLang, or vLLM cache
+bounded durable disk bundle for KDA, convolution, MLA, DSA index-key, AttnRes,
+token, and directive state. It does not vendor or copy FreeToken, SGLang, or vLLM
 source and does not depend on those projects at runtime.
 
 ## GPU entropy-code influence
@@ -169,13 +183,21 @@ changed; upstream source is context, not a claim that Ubuntu's running kernel
 is byte-identical. The local trace, not source inspection alone, identifies
 the observed order-10 AMDGPU/TTM reclaim callers.
 
-The standalone MZG2 bundle is a derived representation of the pinned official
-Kimi K3 weights: non-routed language tensors retain exact source BF16/F32 bytes,
-while routed experts retain the qualified MZG2 canonicalization of redundant
-MXFP4 negative zero. Generated bundles are governed by the Kimi K3 License and
-are not part of this repository's MIT-licensed source distribution. Bundle
-manifests preserve the official revision, source-manifest identity, and original
-model-layout CRC.
+The historical standalone MZG2 bundle is a derived representation of the pinned
+official Kimi K3 weights: non-routed language tensors retain exact source
+BF16/F32 bytes, while routed experts retain the qualified K3 MZG2
+canonicalization of redundant MXFP4 negative zero. Generated bundles are
+governed by the corresponding upstream model license and are not part of this
+repository's MIT-licensed source distribution. Bundle manifests preserve the
+official revision, source-manifest identity, and original model-layout CRC.
+
+K3.1 MZG2 integration and synthetic converter/resume and native identity tests
+are complete. Manifests carry the source layout SHA-256 and a shared
+layout-plus-profile CRC64; a generated manifest round-trips through the native
+loader, and the Python/C fixture computes the same CRC. Full K3.1 conversion and
+verification passed for all 92 routed layers and 82,432 experts; the verified
+bundle passed the real 8K canary and natural-context gates through 63,971 tokens.
+Contexts above 64K and production deployment remain open.
 
 ## Platform dependencies
 

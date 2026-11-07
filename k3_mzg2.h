@@ -105,11 +105,13 @@ typedef struct {
 
 /*
  * MOONSHINE_MZG2_STORE selects an absolute partial-layer sidecar or a complete
- * sidecar directory. Unset/off leaves the qualified SafeTensor fallback
- * unchanged. MZG2 and MZG1 selection remain mutually exclusive.
+ * sidecar directory. Unset/off leaves the SafeTensor fallback unchanged.
+ * MOONSHINE_SOURCE_MANIFEST_SHA256 is required with a selected store and must
+ * match every sidecar. MZG2 and MZG1 remain mutually exclusive.
  */
 bool k3_mzg2_store_open_path(k3_mzg2_store **out,
                              const char *path,
+                             const char *source_manifest_sha256,
                              char *error,
                              size_t error_size);
 

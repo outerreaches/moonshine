@@ -1,5 +1,5 @@
 enum {
-    K3_STATE_FORMAT_VERSION = 1,
+    K3_STATE_FORMAT_VERSION = 2,
     K3_STATE_HEADER_BYTES = 256,
     K3_STATE_ENDIAN_MARKER = 0x01020304,
     K3_STATE_FLAG_Q8_PROJECTIONS = 1,
@@ -23,6 +23,7 @@ enum {
     K3_STATE_OFF_KDA_CONV_BYTES = 72,
     K3_STATE_OFF_MLA_BYTES = 80,
     K3_STATE_OFF_ATTN_RES_BYTES = 88,
+    K3_STATE_OFF_INDEX_BYTES = 96,
     K3_STATE_OFF_HEADER_CRC = 104,
 };
 
@@ -40,6 +41,7 @@ typedef struct {
     uint64_t kda_state_bytes;
     uint64_t kda_conv_bytes;
     uint64_t mla_bytes;
+    uint64_t index_bytes;
     uint64_t attn_res_bytes;
     uint64_t file_bytes;
 } k3_state_metadata;
@@ -158,7 +160,8 @@ static void state_crc_u64(
  * directory define the state ABI identity.
  */
 static uint64_t engine_model_layout_crc64(
-        const k3_st_model *model) {
+        const k3_st_model *model,
+        const k31_model_profile *profile) {
     uint64_t table[256];
     state_crc64_table(table);
     uint64_t crc = 0u;
@@ -191,7 +194,30 @@ static uint64_t engine_model_layout_crc64(
                 table, &crc, tensor->shape[dimension]);
         }
     }
+    if (!profile || !profile->model_id || !profile->model_revision) return 0u;
+    const char *identity[] = {
+        profile->model_id,
+        profile->model_revision,
+    };
+    for (uint32_t part = 0u; part < 2u; part++) {
+        const size_t bytes = strlen(identity[part]);
+        state_crc_u64(table, &crc, bytes);
+        crc = state_crc64_update(table, crc, identity[part], bytes);
+    }
+    state_crc_u32(table, &crc, profile->dsa.index_topk);
+    state_crc_u32(table, &crc, profile->dsa.index_head_dim);
+    state_crc_u32(table, &crc, profile->dsa.index_num_heads);
+    state_crc_u32(table, &crc, profile->dsa.index_rope_dim);
+    state_crc_u32(table, &crc, profile->dsa.index_k_norm_type);
+    state_crc_u32(table, &crc, profile->dsa.index_topk_freq);
+    state_crc_u32(table, &crc, profile->dsa.index_skip_topk_offset);
     return crc;
+}
+
+extern "C" uint64_t k31_model_layout_crc64(
+        const k3_st_model *model,
+        const k31_model_profile *profile) {
+    return engine_model_layout_crc64(model, profile);
 }
 
 static bool state_write_full(int fd,
@@ -257,6 +283,12 @@ static uint64_t state_mla_payload_bytes(
         sizeof(uint16_t);
 }
 
+static uint64_t state_index_payload_bytes(
+        uint32_t token_position) {
+    return (uint64_t)K3_ENGINE_MLA_LAYERS *
+        token_position * 128u * sizeof(uint16_t);
+}
+
 static void state_metadata_build(
         const k3_engine *engine,
         k3_state_metadata *metadata) {
@@ -274,6 +306,8 @@ static void state_metadata_build(
         K3_ENGINE_KDA_CONV_BYTES;
     metadata->mla_bytes =
         state_mla_payload_bytes(engine->token_position);
+    metadata->index_bytes =
+        state_index_payload_bytes(engine->token_position);
     metadata->attn_res_bytes =
         (uint64_t)8u * K3_ENGINE_HIDDEN *
         sizeof(uint16_t);
@@ -281,6 +315,7 @@ static void state_metadata_build(
         metadata->kda_state_bytes +
         metadata->kda_conv_bytes +
         metadata->mla_bytes +
+        metadata->index_bytes +
         metadata->attn_res_bytes;
     metadata->file_bytes =
         K3_STATE_HEADER_BYTES + metadata->payload_bytes;
@@ -356,6 +391,9 @@ static void state_header_encode(
     state_put_u64(
         header + K3_STATE_OFF_ATTN_RES_BYTES,
         metadata->attn_res_bytes);
+    state_put_u64(
+        header + K3_STATE_OFF_INDEX_BYTES,
+        metadata->index_bytes);
     uint64_t table[256];
     state_crc64_table(table);
     const uint64_t header_crc = state_crc64_update(
@@ -430,10 +468,14 @@ static bool state_header_decode(
         header + K3_STATE_OFF_MLA_BYTES);
     metadata->attn_res_bytes = state_get_u64(
         header + K3_STATE_OFF_ATTN_RES_BYTES);
+    metadata->index_bytes = state_get_u64(
+        header + K3_STATE_OFF_INDEX_BYTES);
     metadata->file_bytes = file_bytes;
     const uint64_t expected_mla_bytes =
         state_mla_payload_bytes(
             metadata->token_position);
+    const uint64_t expected_index_bytes =
+        state_index_payload_bytes(metadata->token_position);
     const uint64_t expected_attn_res_bytes =
         (uint64_t)8u * K3_ENGINE_HIDDEN *
         sizeof(uint16_t);
@@ -441,6 +483,7 @@ static bool state_header_decode(
         K3_ENGINE_KDA_STATE_BYTES +
         K3_ENGINE_KDA_CONV_BYTES +
         expected_mla_bytes +
+        expected_index_bytes +
         expected_attn_res_bytes;
     if ((metadata->flags &
          ~K3_STATE_FLAG_Q8_PROJECTIONS) != 0u ||
@@ -458,6 +501,7 @@ static bool state_header_decode(
         metadata->kda_conv_bytes !=
             K3_ENGINE_KDA_CONV_BYTES ||
         metadata->mla_bytes != expected_mla_bytes ||
+        metadata->index_bytes != expected_index_bytes ||
         metadata->attn_res_bytes !=
             expected_attn_res_bytes ||
         metadata->payload_bytes !=
@@ -698,6 +742,11 @@ extern "C" bool k3_engine_export_state(
     const uint64_t mla_occupied_bytes =
         (uint64_t)engine->token_position *
         K3_ENGINE_MLA_CACHE_DIM * sizeof(uint16_t);
+    const uint64_t index_layer_bytes =
+        engine->dsa_memory.index_layer_bytes;
+    const uint64_t index_occupied_bytes =
+        (uint64_t)engine->token_position *
+        engine->model_profile.dsa.index_head_dim * sizeof(uint16_t);
     uint8_t header[K3_STATE_HEADER_BYTES];
     if (!writer.host) {
         engine_error(error, error_size,
@@ -729,6 +778,17 @@ extern "C" bool k3_engine_export_state(
                 (const uint8_t *)engine->mla_cache +
                     (uint64_t)layer * mla_layer_bytes,
                 mla_occupied_bytes, "MLA rows",
+                error, error_size)) {
+            goto done;
+        }
+    }
+    for (uint32_t layer = 0u;
+         layer < K3_ENGINE_MLA_LAYERS; layer++) {
+        if (!state_writer_device(
+                &writer,
+                (const uint8_t *)engine->index_key_cache +
+                    (uint64_t)layer * index_layer_bytes,
+                index_occupied_bytes, "DSA index-key rows",
                 error, error_size)) {
             goto done;
         }
@@ -908,10 +968,15 @@ extern "C" bool k3_engine_import_state(
     hip_status = hipMemset(
         engine->mla_cache, 0,
         engine->mla_cache_bytes);
+    if (hip_status == hipSuccess) {
+        hip_status = hipMemset(
+            engine->index_key_cache, 0,
+            engine->index_key_cache_bytes);
+    }
     if (hip_status != hipSuccess) {
         engine_error(
             error, error_size,
-            "K3 state-import MLA clear failed: %s",
+            "K3 state-import MLA/indexer clear failed: %s",
             hipGetErrorString(hip_status));
         goto done;
     }
@@ -942,6 +1007,18 @@ extern "C" bool k3_engine_import_state(
                     (uint64_t)layer * mla_layer_bytes,
                 mla_occupied_bytes, "MLA rows",
                 error, error_size)) {
+            goto done;
+        }
+    }
+    for (uint32_t layer = 0u;
+         layer < K3_ENGINE_MLA_LAYERS; layer++) {
+        if (!state_reader_device(
+                &reader,
+                (uint8_t *)engine->index_key_cache +
+                    (uint64_t)layer *
+                        engine->dsa_memory.index_layer_bytes,
+                metadata.index_bytes / K3_ENGINE_MLA_LAYERS,
+                "DSA index-key rows", error, error_size)) {
             goto done;
         }
     }

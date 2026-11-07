@@ -35,7 +35,7 @@ static double elapsed_seconds(struct timespec start,
 
 int main(int argc, char **argv) {
     const char *root = argc > 1 ? argv[1] :
-        "/srv/modelstore/models/moonshotai__Kimi-K3";
+        "/srv/modelstore/models/moonshotai__Kimi-K3.1-Pro";
     bool q8_projections = true;
     if (argc > 2) {
         if (strcmp(argv[2], "q8") == 0) {

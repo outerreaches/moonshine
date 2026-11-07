@@ -9,6 +9,11 @@
 #include "k3_rocm_ops.h"
 #include "k3_safetensors.h"
 
+#include "k31_dsa_memory.h"
+#include "k31_dsa_rocm.h"
+#include "k31_identity.h"
+#include "k31_model.h"
+
 #include <hip/hip_runtime.h>
 
 #include <errno.h>
@@ -52,6 +57,8 @@ enum {
     K3_ENGINE_MLA_LATENT = 512,
     K3_ENGINE_MLA_CACHE_DIM = 576,
     K3_ENGINE_MLA_SCRATCH_COUNT = 8,
+    K3_ENGINE_DSA_SCRATCH_COUNT = 3,
+    K31_DSA_DENSE_MIN_ROWS = 768,
     K3_ENGINE_VOCAB = 163840,
 };
 
@@ -109,6 +116,12 @@ enum {
     A_MLA_VALUE,
     A_MLA_GATE,
     A_MLA_GATED,
+};
+
+enum {
+    A_DSA_QUERY,
+    A_DSA_RAW_KEY,
+    A_DSA_HEAD_WEIGHTS,
 };
 
 typedef struct {
@@ -204,12 +217,19 @@ struct k3_engine {
     void *kda_conv;
     void *mla_cache;
     uint64_t mla_cache_bytes;
+    void *index_key_cache;
+    uint64_t index_key_cache_bytes;
+    void *dsa_topk_workspace;
+    size_t dsa_topk_workspace_bytes;
+    k31_model_profile model_profile;
+    k31_dsa_memory_plan dsa_memory;
     uint8_t *mla_packed_keys;
     void *workspace;
     uint64_t workspace_bytes;
     void *scratch[K3_ENGINE_SCRATCH_COUNT];
     void *moe_scratch[K3_ENGINE_MOE_SCRATCH_COUNT];
     void *mla_scratch[K3_ENGINE_MLA_SCRATCH_COUNT];
+    void *dsa_scratch[K3_ENGINE_DSA_SCRATCH_COUNT];
     void *attn_res_blocks;
     void *token_buffer[2];
     uint32_t *route_ids_host;
@@ -250,7 +270,8 @@ struct k3_engine {
 };
 
 static uint64_t engine_model_layout_crc64(
-    const k3_st_model *model);
+    const k3_st_model *model,
+    const k31_model_profile *profile);
 static bool rollback_decode_diagnostics_capture(k3_engine *engine);
 static bool rollback_prefill_diagnostics_capture(k3_engine *engine);
 
@@ -270,7 +291,7 @@ static bool validate_bundle_static_model(
         char *error,
         size_t error_size) {
     if (!engine || engine->model.shard_count != 1u ||
-        engine->model.tensor_count != K3_BUNDLE_STATIC_TENSORS ||
+        engine->model.tensor_count != engine->bundle.static_tensor_count ||
         engine->model.shards[0].file_bytes !=
             engine->bundle.static_file_bytes) {
         engine_error(error, error_size,
@@ -300,7 +321,6 @@ static bool validate_bundle_static_model(
         payload_bytes += tensor->byte_length;
     }
     if (embeddings != 1u ||
-        payload_bytes != K3_BUNDLE_STATIC_PAYLOAD_BYTES ||
         payload_bytes != engine->bundle.static_payload_bytes) {
         engine_error(error, error_size,
                      "standalone bundle static payload mismatch");
@@ -408,6 +428,8 @@ static bool residency_preflight(
         uint64_t extra_staging_bytes,
         uint64_t cache_bytes,
         uint64_t mla_cache_bytes,
+        uint64_t index_key_cache_bytes,
+        size_t dsa_topk_workspace_bytes,
         uint64_t workspace_bytes,
         uint16_t staging_slots,
         char *error,
@@ -430,6 +452,8 @@ static bool residency_preflight(
         K3_ENGINE_KDA_STATE_BYTES +
         K3_ENGINE_KDA_CONV_BYTES +
         mla_cache_bytes +
+        index_key_cache_bytes +
+        dsa_topk_workspace_bytes +
         K3_ENGINE_MLA_PACKED_BYTES +
         workspace_bytes;
     const uint64_t mapped_staging_bytes =
@@ -588,6 +612,13 @@ extern "C" void k3_engine_destroy(k3_engine *engine) {
     free(engine->staging_device);
     free(engine->staging_host);
     if (engine->workspace) (void)hipFree(engine->workspace);
+    if (engine->dsa_topk_workspace) {
+        (void)hipFree(engine->dsa_topk_workspace);
+    }
+    if (engine->index_key_cache) (void)hipFree(engine->index_key_cache);
+    for (uint32_t i = 0; i < K3_ENGINE_DSA_SCRATCH_COUNT; i++) {
+        if (engine->dsa_scratch[i]) (void)hipFree(engine->dsa_scratch[i]);
+    }
     for (uint32_t i = 0; i < 2u; i++) {
         if (engine->token_buffer[i]) {
             (void)hipFree(engine->token_buffer[i]);
@@ -796,6 +827,23 @@ static bool allocate_decode_scratch(k3_engine *engine,
             return false;
         }
     }
+    const uint64_t dsa_sizes[K3_ENGINE_DSA_SCRATCH_COUNT] = {
+        (uint64_t)engine->model_profile.dsa.index_num_heads *
+            engine->model_profile.dsa.index_head_dim * sizeof(uint16_t),
+        (uint64_t)engine->model_profile.dsa.index_head_dim *
+            sizeof(uint16_t),
+        (uint64_t)engine->model_profile.dsa.index_num_heads *
+            sizeof(uint16_t),
+    };
+    for (uint32_t i = 0; i < K3_ENGINE_DSA_SCRATCH_COUNT; i++) {
+        status = hipMalloc(&engine->dsa_scratch[i], dsa_sizes[i]);
+        if (status != hipSuccess) {
+            engine_error(error, error_size,
+                         "DSA scratch %u allocation failed: %s",
+                         i, hipGetErrorString(status));
+            return false;
+        }
+    }
     status = hipHostMalloc(
         (void **)&engine->route_ids_host,
         K3_ENGINE_TOP_K * sizeof(*engine->route_ids_host),
@@ -877,14 +925,41 @@ extern "C" bool k3_engine_create(
     if (stats) memset(stats, 0, sizeof(*stats));
     uint64_t mla_cache_bytes = 0u;
     uint64_t workspace_bytes = 0u;
-    if (!out || !model_root ||
-        !context_memory_bytes(
+    k31_model_profile model_profile;
+    k31_dsa_memory_plan dsa_memory;
+    size_t dsa_topk_workspace_bytes = 0u;
+    char config_path[4096];
+    const int config_path_length = snprintf(
+        config_path, sizeof(config_path), "%s/config.json",
+        model_root ? model_root : "");
+    if (!out || !model_root || config_path_length < 0 ||
+        (size_t)config_path_length >= sizeof(config_path)) {
+        engine_error(error, error_size,
+                     "invalid K3.1 engine model path");
+        return false;
+    }
+    if (!k31_model_profile_load(
+            &model_profile, config_path, error, error_size)) {
+        return false;
+    }
+    if (!context_memory_bytes(
             context, &mla_cache_bytes, &workspace_bytes) ||
+        !k31_dsa_memory_plan_build(
+            context, model_profile.dsa_layer_count,
+            K3_ENGINE_MLA_CACHE_DIM, model_profile.dsa.index_head_dim,
+            model_profile.dsa.index_num_heads,
+            K3_ENGINE_HEADS, K3_ENGINE_MLA_LATENT,
+            model_profile.dsa.index_topk, &dsa_memory) ||
+        !k31_dsa_topk_workspace_bytes(
+            context, NULL, &dsa_topk_workspace_bytes) ||
         experts_per_layer == 0u || staging_slots == 0u ||
         staging_slots > UINT16_MAX) {
         engine_error(error, error_size,
-                     "invalid K3 engine configuration");
+                     "invalid K3.1 engine configuration or model profile");
         return false;
+    }
+    if (workspace_bytes < dsa_memory.attention_workspace_bytes) {
+        workspace_bytes = dsa_memory.attention_workspace_bytes;
     }
     struct timespec startup_start;
     struct timespec startup_end;
@@ -899,7 +974,11 @@ extern "C" bool k3_engine_create(
     engine->experts_per_layer = experts_per_layer;
     engine->staging_slots = staging_slots;
     engine->context = context;
+    engine->model_profile = model_profile;
+    engine->dsa_memory = dsa_memory;
     engine->mla_cache_bytes = mla_cache_bytes;
+    engine->index_key_cache_bytes = dsa_memory.index_cache_bytes;
+    engine->dsa_topk_workspace_bytes = dsa_topk_workspace_bytes;
     engine->workspace_bytes = workspace_bytes;
     engine->q8_projections = q8_projections;
     bool bundle_present = false;
@@ -910,21 +989,19 @@ extern "C" bool k3_engine_create(
     }
     if (bundle_present) {
         if (!k3_bundle_load(
-                &engine->bundle, model_root, error, error_size) ||
-            !k3_st_model_open_file(
-                &engine->model, engine->bundle.static_path,
-                error, error_size)) {
+                &engine->bundle, model_root, error, error_size)) {
             k3_engine_destroy(engine);
             return false;
         }
-        engine->model_open = true;
-        if (!validate_bundle_static_model(engine, error, error_size)) {
+        if (engine->bundle.layers != K3_ENGINE_MOE_LAYERS ||
+            engine->bundle.experts_per_layer != K3_ENGINE_EXPERTS ||
+            engine->bundle.experts !=
+                K3_ENGINE_MOE_LAYERS * K3_ENGINE_EXPERTS) {
+            engine_error(error, error_size,
+                         "standalone bundle routed geometry is not K3.1");
             k3_engine_destroy(engine);
             return false;
         }
-        engine->bundle_mode = true;
-        engine->model_layout_crc64 =
-            engine->bundle.source_model_layout_crc64;
         const char *legacy = getenv("MOONSHINE_EXPERT_STORE");
         const char *override = getenv("MOONSHINE_MZG2_STORE");
         if ((legacy && legacy[0] != '\0' &&
@@ -937,8 +1014,26 @@ extern "C" bool k3_engine_create(
             k3_engine_destroy(engine);
             return false;
         }
+        int static_fd = -1;
+        if (!k3_bundle_open_verified_static(
+                &engine->bundle, &static_fd, error, error_size) ||
+            !k3_st_model_open_file_fd(
+                &engine->model, engine->bundle.static_path, static_fd,
+                error, error_size)) {
+            k3_engine_destroy(engine);
+            return false;
+        }
+        engine->model_open = true;
+        if (!validate_bundle_static_model(engine, error, error_size)) {
+            k3_engine_destroy(engine);
+            return false;
+        }
+        engine->bundle_mode = true;
+        engine->model_layout_crc64 =
+            engine->bundle.source_model_layout_crc64;
         if (!k3_mzg2_store_open_path(
                 &engine->mzg2_store, engine->bundle.mzg2_path,
+                engine->bundle.source_manifest_sha256,
                 error, error_size)) {
             k3_engine_destroy(engine);
             return false;
@@ -954,7 +1049,8 @@ extern "C" bool k3_engine_create(
         }
         engine->model_open = true;
         engine->model_layout_crc64 =
-            engine_model_layout_crc64(&engine->model);
+            k31_model_layout_crc64(
+                &engine->model, &engine->model_profile);
         if (!k3_mzg_store_open_optional(
                 &engine->mzg_store, model_root,
                 K3_ENGINE_MOE_LAYERS, K3_ENGINE_EXPERTS,
@@ -1011,6 +1107,8 @@ extern "C" bool k3_engine_create(
                         K3_ENGINE_EXPERT_BYTES :
                     0u,
             engine->cache_bytes, engine->mla_cache_bytes,
+            engine->index_key_cache_bytes,
+            engine->dsa_topk_workspace_bytes,
             engine->workspace_bytes, staging_slots,
             error, error_size)) {
         k3_engine_destroy(engine);
@@ -1054,6 +1152,12 @@ extern "C" bool k3_engine_create(
         !hip_allocate_zero(
             &engine->mla_cache, engine->mla_cache_bytes,
             "MLA token cache", error, error_size) ||
+        !hip_allocate_zero(
+            &engine->index_key_cache, engine->index_key_cache_bytes,
+            "DSA index-key cache", error, error_size) ||
+        !hip_allocate_zero(
+            &engine->dsa_topk_workspace, engine->dsa_topk_workspace_bytes,
+            "DSA top-k workspace", error, error_size) ||
         !hip_allocate_zero(
             (void **)&engine->mla_packed_keys,
             K3_ENGINE_MLA_PACKED_BYTES,
@@ -1179,10 +1283,16 @@ extern "C" bool k3_engine_create(
     clock_gettime(CLOCK_MONOTONIC, &startup_end);
     measured.cache_slots = (uint32_t)cache_slots;
     measured.cache_bytes = engine->cache_bytes;
+    measured.index_cache_bytes = engine->index_key_cache_bytes;
+    measured.dsa_workspace_bytes =
+        engine->dsa_topk_workspace_bytes +
+        engine->dsa_memory.attention_workspace_bytes;
     measured.state_bytes =
         K3_ENGINE_KDA_STATE_BYTES +
         K3_ENGINE_KDA_CONV_BYTES +
         engine->mla_cache_bytes +
+        engine->index_key_cache_bytes +
+        engine->dsa_topk_workspace_bytes +
         K3_ENGINE_MLA_PACKED_BYTES +
         engine->workspace_bytes;
     measured.staging_slots = staging_slots;
@@ -1613,6 +1723,57 @@ static bool launch_kda_attention(
     return true;
 }
 
+static bool launch_dsa_index_scores(
+        k3_engine *engine,
+        void *scores,
+        void *dot_products,
+        const void *index_q,
+        const void *index_cache,
+        const void *head_weights,
+        uint32_t visible_tokens) {
+    const uint32_t index_heads = engine->model_profile.dsa.index_num_heads;
+    const uint32_t index_dim = engine->model_profile.dsa.index_head_dim;
+    if (visible_tokens < K31_DSA_DENSE_MIN_ROWS) {
+        return k31_dsa_index_scores_f32(
+            scores, index_q, index_cache, head_weights, NULL, NULL,
+            1u, visible_tokens, index_heads, index_dim, NULL);
+    }
+    return k3_rocm_blas_bf16_gemm_f32(
+               engine->blas, dot_products, index_cache, index_q,
+               index_heads, visible_tokens, index_dim, NULL) &&
+           k31_dsa_index_reduce_f32(
+               scores, dot_products, head_weights, NULL, NULL,
+               visible_tokens, index_heads, index_dim, NULL);
+}
+
+static bool launch_dsa_value_attention(
+        k3_engine *engine,
+        void *latent,
+        void *scores,
+        void *probabilities,
+        void *gathered,
+        const void *absorbed_q,
+        const void *cache,
+        const void *selected_ids,
+        uint32_t selected_count) {
+    if (selected_count < K31_DSA_DENSE_MIN_ROWS) {
+        return k31_dsa_sparse_attention_bf16(
+            latent, scores, probabilities, absorbed_q, cache, selected_ids,
+            selected_count, K3_ENGINE_HEADS, K3_ENGINE_MLA_CACHE_DIM,
+            K3_ENGINE_MLA_LATENT, 0.07216878364870322f, NULL);
+    }
+    if (selected_ids &&
+        !k3_rocm_gather_rows_bf16(
+            gathered, cache, selected_ids, selected_count,
+            K3_ENGINE_MLA_CACHE_DIM, NULL)) {
+        return false;
+    }
+    return k3_rocm_blas_mla_attention_bf16(
+        engine->blas, latent, scores, probabilities, absorbed_q,
+        selected_ids ? gathered : cache,
+        K3_ENGINE_HEADS, selected_count, NULL);
+}
+
 static bool launch_mla_attention(
         k3_engine *engine,
         uint32_t layer,
@@ -1632,82 +1793,131 @@ static bool launch_mla_attention(
     MLA_WEIGHT(kv_b, "self_attn.kv_b_proj.weight");
     MLA_WEIGHT(gate, "self_attn.g_proj.weight");
     MLA_WEIGHT(o_proj, "self_attn.o_proj.weight");
+    MLA_WEIGHT(index_q, "self_attn.indexer.wq_b.weight");
+    MLA_WEIGHT(index_key, "self_attn.indexer.wk.weight");
+    MLA_WEIGHT(index_weights, "self_attn.indexer.weights_proj.weight");
+    MLA_WEIGHT(index_norm, "self_attn.indexer.k_norm.weight");
+    MLA_WEIGHT(index_bias, "self_attn.indexer.k_norm.bias");
 #undef MLA_WEIGHT
     const uint32_t mla_index =
         layer == 92u ? 23u : layer / 4u;
-    const uint64_t cache_layer_bytes =
-        (uint64_t)engine->context * K3_ENGINE_MLA_CACHE_DIM *
-        sizeof(uint16_t);
+    uint64_t mla_offset = 0u;
+    uint64_t index_offset = 0u;
+    if (!k31_dsa_cache_offsets(
+            &engine->dsa_memory, mla_index, engine->token_position,
+            &mla_offset, &index_offset)) {
+        engine_error(error, error_size,
+                     "layer-%u DSA cache addressing failed", layer);
+        return false;
+    }
     uint8_t *cache = (uint8_t *)engine->mla_cache +
-        (uint64_t)mla_index * cache_layer_bytes;
-    uint16_t *cache_row =
-        (uint16_t *)cache +
-        (uint64_t)engine->token_position *
-            K3_ENGINE_MLA_CACHE_DIM;
+        (uint64_t)mla_index * engine->dsa_memory.mla_layer_bytes;
+    uint16_t *cache_row = (uint16_t *)(
+        (uint8_t *)engine->mla_cache + mla_offset);
+    uint8_t *index_cache = (uint8_t *)engine->index_key_cache +
+        (uint64_t)mla_index * engine->dsa_memory.index_layer_bytes;
+    uint16_t *index_row = (uint16_t *)(
+        (uint8_t *)engine->index_key_cache + index_offset);
     uint8_t *packed_key =
         engine->mla_packed_keys +
         (uint64_t)mla_index *
             K3_ENGINE_MLA_PACKED_ELEMENTS *
             sizeof(uint16_t);
     uint8_t *workspace = (uint8_t *)engine->workspace;
-    void *scores = workspace;
-    void *probabilities = workspace +
+    void *index_scores = workspace;
+    void *selected_ids = workspace +
+        (uint64_t)engine->context * sizeof(float);
+    void *scores = (uint8_t *)selected_ids +
+        (uint64_t)engine->model_profile.dsa.index_topk * sizeof(uint32_t);
+    void *probabilities = (uint8_t *)scores +
         (uint64_t)K3_ENGINE_HEADS *
-            engine->context * sizeof(float);
-    void *latent = workspace +
-        (uint64_t)K3_ENGINE_HEADS * engine->context *
-            (sizeof(float) + sizeof(uint16_t));
-    if (!k3_static_weight_gemv_bf16(
-            q_a, engine->mla_scratch[A_MLA_Q_A],
-            normalized, NULL) ||
-        !k3_rocm_rms_norm_bf16(
-            engine->mla_scratch[A_MLA_Q_A_NORM],
-            engine->mla_scratch[A_MLA_Q_A],
-            q_a_norm->data, 1u, K3_ENGINE_MLA_Q_LORA,
-            1e-5f, NULL) ||
-        !k3_static_weight_gemv_bf16(
-            q_b, engine->mla_scratch[A_MLA_Q],
-            engine->mla_scratch[A_MLA_Q_A_NORM], NULL) ||
-        !k3_static_weight_gemv_bf16(
-            kv_a, engine->mla_scratch[A_MLA_KV],
-            normalized, NULL) ||
-        !k3_rocm_rms_norm_bf16(
-            cache_row, engine->mla_scratch[A_MLA_KV],
-            kv_a_norm->data, 1u, K3_ENGINE_MLA_LATENT,
-            1e-5f, NULL) ||
-        hipMemcpyAsync(
-            cache_row + K3_ENGINE_MLA_LATENT,
-            (const uint16_t *)engine->mla_scratch[A_MLA_KV] +
-                K3_ENGINE_MLA_LATENT,
-            64u * sizeof(uint16_t),
-            hipMemcpyDeviceToDevice, NULL) != hipSuccess ||
-        !k3_rocm_mla_absorb_q_bf16(
-            engine->mla_scratch[A_MLA_ABSORBED_Q],
-            engine->mla_scratch[A_MLA_Q],
-            packed_key, K3_ENGINE_HEADS, NULL) ||
-        !k3_rocm_blas_mla_attention_bf16(
-            engine->blas, latent, scores, probabilities,
-            engine->mla_scratch[A_MLA_ABSORBED_Q],
-            cache, K3_ENGINE_HEADS,
-            engine->token_position + 1u, NULL) ||
-        !k3_rocm_mla_decompress_v_bf16(
-            engine->mla_scratch[A_MLA_VALUE],
-            latent, kv_b->data, K3_ENGINE_HEADS, NULL) ||
-        !k3_static_weight_gemv_bf16(
-            gate, engine->mla_scratch[A_MLA_GATE],
-            normalized, NULL) ||
-        !k3_rocm_sigmoid_mul_bf16(
-            engine->mla_scratch[A_MLA_GATED],
-            engine->mla_scratch[A_MLA_VALUE],
-            engine->mla_scratch[A_MLA_GATE],
-            K3_ENGINE_KDA_INNER, NULL) ||
-        !k3_static_weight_gemv_bf16(
-            o_proj, attention,
-            engine->mla_scratch[A_MLA_GATED], NULL)) {
-        engine_error(error, error_size,
-                     "layer-%u MLA launch failed", layer);
-        return false;
+            engine->model_profile.dsa.index_topk * sizeof(float);
+    void *latent = (uint8_t *)probabilities +
+        (uint64_t)K3_ENGINE_HEADS *
+            engine->model_profile.dsa.index_topk * sizeof(uint16_t);
+    void *gathered = (uint8_t *)latent +
+        (uint64_t)K3_ENGINE_HEADS * K3_ENGINE_MLA_LATENT * sizeof(uint16_t);
+    void *index_dots = (uint8_t *)gathered +
+        (uint64_t)engine->model_profile.dsa.index_topk *
+            K3_ENGINE_MLA_CACHE_DIM * sizeof(uint16_t);
+    const uint32_t selected_count =
+        engine->token_position + 1u < engine->model_profile.dsa.index_topk ?
+            engine->token_position + 1u : engine->model_profile.dsa.index_topk;
+    const bool needs_topk =
+        engine->token_position + 1u > engine->model_profile.dsa.index_topk;
+#define DSA_DECODE_STEP(label, expression)                                  \
+    do {                                                                    \
+        if (!(expression)) {                                                \
+            const hipError_t step_status = hipStreamSynchronize(NULL);       \
+            engine_error(error, error_size,                                 \
+                         "layer-%u DSA %s failed: %s",                      \
+                         layer, label, hipGetErrorString(step_status));       \
+            return false;                                                   \
+        }                                                                   \
+    } while (0)
+    DSA_DECODE_STEP("q_a", k3_static_weight_gemv_bf16(
+        q_a, engine->mla_scratch[A_MLA_Q_A], normalized, NULL));
+    DSA_DECODE_STEP("q_a_norm", k3_rocm_rms_norm_bf16(
+        engine->mla_scratch[A_MLA_Q_A_NORM], engine->mla_scratch[A_MLA_Q_A],
+        q_a_norm->data, 1u, K3_ENGINE_MLA_Q_LORA, 1e-5f, NULL));
+    DSA_DECODE_STEP("q_b", k3_static_weight_gemv_bf16(
+        q_b, engine->mla_scratch[A_MLA_Q], engine->mla_scratch[A_MLA_Q_A_NORM],
+        NULL));
+    DSA_DECODE_STEP("kv_a", k3_static_weight_gemv_bf16(
+        kv_a, engine->mla_scratch[A_MLA_KV], normalized, NULL));
+    DSA_DECODE_STEP("cache_norm", k3_rocm_rms_norm_bf16(
+        cache_row, engine->mla_scratch[A_MLA_KV], kv_a_norm->data,
+        1u, K3_ENGINE_MLA_LATENT, 1e-5f, NULL));
+    DSA_DECODE_STEP("cache_tail", hipMemcpyAsync(
+        cache_row + K3_ENGINE_MLA_LATENT,
+        (const uint16_t *)engine->mla_scratch[A_MLA_KV] + K3_ENGINE_MLA_LATENT,
+        64u * sizeof(uint16_t), hipMemcpyDeviceToDevice, NULL) == hipSuccess);
+    if (needs_topk) {
+        DSA_DECODE_STEP("index_q", k3_static_weight_gemv_bf16(
+            index_q, engine->dsa_scratch[A_DSA_QUERY],
+            engine->mla_scratch[A_MLA_Q_A_NORM], NULL));
     }
+    DSA_DECODE_STEP("index_key", k3_static_weight_gemv_bf16(
+        index_key, engine->dsa_scratch[A_DSA_RAW_KEY], normalized, NULL));
+    if (needs_topk) {
+        DSA_DECODE_STEP("index_weights", k3_static_weight_gemv_bf16(
+            index_weights, engine->dsa_scratch[A_DSA_HEAD_WEIGHTS],
+            normalized, NULL));
+    }
+    DSA_DECODE_STEP("index_layernorm", k31_dsa_layer_norm_bf16(
+        index_row, engine->dsa_scratch[A_DSA_RAW_KEY], index_norm->data,
+        index_bias->data, 1u, engine->model_profile.dsa.index_head_dim,
+        1e-5f, NULL));
+    DSA_DECODE_STEP("absorb_q", k3_rocm_mla_absorb_q_bf16(
+        engine->mla_scratch[A_MLA_ABSORBED_Q], engine->mla_scratch[A_MLA_Q],
+        packed_key, K3_ENGINE_HEADS, NULL));
+    if (needs_topk) {
+        DSA_DECODE_STEP("index_scores", launch_dsa_index_scores(
+            engine, index_scores, index_dots,
+            engine->dsa_scratch[A_DSA_QUERY], index_cache,
+            engine->dsa_scratch[A_DSA_HEAD_WEIGHTS],
+            engine->token_position + 1u));
+        DSA_DECODE_STEP("topk", k31_dsa_topk_f32(
+            selected_ids, index_scores, engine->token_position + 1u,
+            engine->model_profile.dsa.index_topk,
+            engine->dsa_topk_workspace, engine->dsa_topk_workspace_bytes,
+            NULL));
+    }
+    DSA_DECODE_STEP("attention", launch_dsa_value_attention(
+        engine, latent, scores, probabilities, gathered,
+        engine->mla_scratch[A_MLA_ABSORBED_Q], cache,
+        needs_topk ? selected_ids : NULL, selected_count));
+    DSA_DECODE_STEP("decompress_v", k3_rocm_mla_decompress_v_bf16(
+        engine->mla_scratch[A_MLA_VALUE], latent, kv_b->data,
+        K3_ENGINE_HEADS, NULL));
+    DSA_DECODE_STEP("gate", k3_static_weight_gemv_bf16(
+        gate, engine->mla_scratch[A_MLA_GATE], normalized, NULL));
+    DSA_DECODE_STEP("output_gate", k3_rocm_sigmoid_mul_bf16(
+        engine->mla_scratch[A_MLA_GATED], engine->mla_scratch[A_MLA_VALUE],
+        engine->mla_scratch[A_MLA_GATE], K3_ENGINE_KDA_INNER, NULL));
+    DSA_DECODE_STEP("o_proj", k3_static_weight_gemv_bf16(
+        o_proj, attention, engine->mla_scratch[A_MLA_GATED], NULL));
+#undef DSA_DECODE_STEP
     return true;
 }
 
@@ -1945,8 +2155,9 @@ static bool decode_routed_layer(
                      layer);
         return false;
     }
-    const bool is_mla = layer % 4u == 3u || layer == 92u;
-    if (!(is_mla ?
+    const bool is_dsa =
+        engine->model_profile.attention_by_layer[layer] == K31_ATTENTION_DSA;
+    if (!(is_dsa ?
           launch_mla_attention(
               engine, layer, engine->scratch[S_NORM],
               engine->scratch[S_ATTENTION],
@@ -1956,6 +2167,15 @@ static bool decode_routed_layer(
               engine->scratch[S_ATTENTION],
               error, error_size))) {
         return false;
+    }
+    if (is_dsa && diagnostics &&
+        engine->token_position + 1u > engine->model_profile.dsa.index_topk) {
+        const uint32_t visible = engine->token_position + 1u;
+        engine->decode_stats.dsa_indexer_calls++;
+        engine->decode_stats.dsa_topk_calls++;
+        engine->decode_stats.dsa_selected_rows +=
+            visible < engine->model_profile.dsa.index_topk ?
+                visible : engine->model_profile.dsa.index_topk;
     }
     if ((block_boundary ?
          hipMemcpyAsync(
@@ -3256,6 +3476,11 @@ extern "C" bool k3_engine_reset_state(
         status = hipMemset(
             engine->mla_cache, 0,
             engine->mla_cache_bytes);
+    }
+    if (status == hipSuccess) {
+        status = hipMemset(
+            engine->index_key_cache, 0,
+            engine->index_key_cache_bytes);
     }
     if (status == hipSuccess) {
         status = hipMemset(

@@ -1,6 +1,7 @@
 #include "k3_openai.h"
 
 #include "k3_json.h"
+#include "moonshine_version.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,7 +24,7 @@ int main(void) {
     char error[512];
     static const char request_json[] =
         "{"
-        "\"model\":\"moonshine\","
+        "\"model\":\"moonshotai/Kimi-K3.1-Pro\","
         "\"messages\":["
         "{\"role\":\"developer\",\"content\":\"Be concise.\"},"
         "{\"role\":\"user\",\"content\":\"First\"},"
@@ -48,6 +49,12 @@ int main(void) {
     k3_json_document response_document;
     memset(&response_document, 0, sizeof(response_document));
 
+    CHECK(strcmp(MOONSHINE_MODEL_ID, "moonshotai/Kimi-K3.1-Pro") == 0 &&
+          strcmp(MOONSHINE_SYSTEM_FINGERPRINT,
+                 "moonshine-k3.1-pro-q8-greedy") == 0 &&
+          strcmp(MOONSHINE_VERSION, "0.3.0-k3.1-research-preview") == 0,
+          "K3.1 Pro server identity constants changed");
+
     CHECK(k3_openai_parse_chat_request(
               request_json, sizeof(request_json) - 1u,
               TEST_MAX_OUTPUT_TOKENS,
@@ -71,7 +78,7 @@ int main(void) {
           "generation parameters");
 
     static const char agent_request_json[] =
-        "{\"model\":\"moonshine\",\"messages\":["
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":["
         "{\"role\":\"user\",\"content\":\"Check two cities\"},"
         "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":["
         "{\"id\":\"call_a\",\"type\":\"function\",\"function\":{"
@@ -96,6 +103,10 @@ int main(void) {
     memset(&compatibility_request, 0, sizeof(compatibility_request));
     k3_openai_chat_request medium_request;
     memset(&medium_request, 0, sizeof(medium_request));
+    k3_openai_chat_request high_request;
+    memset(&high_request, 0, sizeof(high_request));
+    k3_openai_chat_request max_request;
+    memset(&max_request, 0, sizeof(max_request));
     k3_openai_chat_request default_request;
     memset(&default_request, 0, sizeof(default_request));
     k3_openai_chat_request over_limit_request;
@@ -121,7 +132,7 @@ int main(void) {
               "\"parameters\":{\"type\":\"object\"}},\"type\":\"function\"}]") == 0,
           "tool schema canonicalization");
     static const char specific_request_json[] =
-        "{\"model\":\"moonshine\",\"messages\":[{\"role\":\"user\","
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":[{\"role\":\"user\","
         "\"content\":\"Use weather\"}],\"tools\":["
         "{\"type\":\"function\",\"function\":{\"name\":\"get_time\","
         "\"parameters\":{\"type\":\"object\"}}},"
@@ -143,7 +154,7 @@ int main(void) {
           "specific tool_choice filtering");
 
     static const char schema_request_json[] =
-        "{\"model\":\"moonshine\",\"messages\":[{\"role\":\"user\","
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":[{\"role\":\"user\","
         "\"content\":\"Return a greeting record\"}],"
         "\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{"
         "\"name\":\"greeting_record\",\"strict\":true,\"schema\":{"
@@ -181,7 +192,7 @@ int main(void) {
           error);
 
     static const char compatibility_json[] =
-        "{\"model\":\"moonshine\",\"messages\":[{\"role\":\"user\","
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":[{\"role\":\"user\","
         "\"content\":\"x\"}],\"max_completion_tokens\":null,"
         "\"max_tokens\":65536}";
     CHECK(k3_openai_parse_chat_request(
@@ -193,29 +204,50 @@ int main(void) {
           "null max_completion_tokens did not fall back to max_tokens");
 
     static const char medium_reasoning_json[] =
-        "{\"model\":\"moonshine\",\"messages\":[{\"role\":\"user\","
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":[{\"role\":\"user\","
         "\"content\":\"x\"}],\"reasoning_effort\":\"medium\"}";
-    CHECK(k3_openai_parse_chat_request(
+    CHECK(!k3_openai_parse_chat_request(
               medium_reasoning_json, strlen(medium_reasoning_json),
               TEST_MAX_OUTPUT_TOKENS,
               &medium_request, error, sizeof(error)),
-          error);
-    CHECK(strcmp(medium_request.reasoning_effort, "medium") == 0,
-          "medium reasoning effort was not preserved");
+          "K3 medium reasoning effort was accepted");
+    CHECK(strcmp(error, "reasoning_effort must be low, high, or max") == 0,
+          "medium reasoning effort rejection did not describe K3.1 contract");
+
+    static const char high_reasoning_json[] =
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":[{\"role\":\"user\","
+        "\"content\":\"x\"}],\"reasoning_effort\":\"high\"}";
+    CHECK(k3_openai_parse_chat_request(
+              high_reasoning_json, strlen(high_reasoning_json),
+              TEST_MAX_OUTPUT_TOKENS,
+              &high_request, error, sizeof(error)) &&
+          strcmp(high_request.reasoning_effort, "high") == 0,
+          "high reasoning effort was not preserved");
+
+    static const char max_reasoning_json[] =
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":[{\"role\":\"user\","
+        "\"content\":\"x\"}],\"reasoning_effort\":\"max\"}";
+    CHECK(k3_openai_parse_chat_request(
+              max_reasoning_json, strlen(max_reasoning_json),
+              TEST_MAX_OUTPUT_TOKENS,
+              &max_request, error, sizeof(error)) &&
+          strcmp(max_request.reasoning_effort, "max") == 0,
+          "max reasoning effort was not preserved");
 
     static const char null_limits_json[] =
-        "{\"model\":\"moonshine\",\"messages\":[{\"role\":\"user\","
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":[{\"role\":\"user\","
         "\"content\":\"x\"}],\"max_completion_tokens\":null,"
         "\"max_tokens\":null}";
     CHECK(k3_openai_parse_chat_request(
               null_limits_json, strlen(null_limits_json), 64u,
               &default_request, error, sizeof(error)),
           error);
-    CHECK(default_request.max_tokens == 64u,
-          "default output cap was not clamped to the server limit");
+    CHECK(default_request.max_tokens == 64u &&
+          strcmp(default_request.reasoning_effort, "max") == 0,
+          "default output cap or reasoning effort changed");
 
     static const char over_limit_json[] =
-        "{\"model\":\"moonshine\",\"messages\":[{\"role\":\"user\","
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":[{\"role\":\"user\","
         "\"content\":\"x\"}],\"max_tokens\":65537}";
     CHECK(!k3_openai_parse_chat_request(
               over_limit_json, strlen(over_limit_json),
@@ -287,6 +319,18 @@ int main(void) {
               response_json, response_size,
               error, sizeof(error)),
           error);
+    CHECK(k3_json_string_equal(
+              &response_document,
+              k3_json_object_get(
+                  &response_document, response_document.root, "model"),
+              "moonshotai/Kimi-K3.1-Pro") &&
+          k3_json_string_equal(
+              &response_document,
+              k3_json_object_get(
+                  &response_document, response_document.root,
+                  "system_fingerprint"),
+              "moonshine-k3.1-pro-q8-greedy"),
+          "nonstreaming K3.1 Pro response identity");
     const int32_t choices = k3_json_object_get(
         &response_document, response_document.root, "choices");
     const int32_t choice = k3_json_array_get(
@@ -424,56 +468,77 @@ int main(void) {
           "an empty result passed tool_choice=required");
     result.tool_calls = NULL;
 
+    static const char image_url_json[] =
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":[{\"role\":\"user\","
+        "\"content\":[{\"type\":\"text\",\"text\":\"Describe this\"},"
+        "{\"type\":\"image_url\",\"image_url\":{"
+        "\"url\":\"https://example.invalid/image.png\"}}]}]}";
+    k3_openai_chat_request multimodal_request;
+    memset(&multimodal_request, 0, sizeof(multimodal_request));
+    CHECK(!k3_openai_parse_chat_request(
+              image_url_json, strlen(image_url_json),
+              TEST_MAX_OUTPUT_TOKENS,
+              &multimodal_request, error, sizeof(error)),
+          "image_url content was accepted by the text-only API");
+    CHECK(strstr(error, "image_url") != NULL &&
+          strstr(error, "only text content") != NULL,
+          "image_url rejection did not identify the text-only contract");
+    k3_openai_chat_request_free(&multimodal_request);
+
     static const char *invalid[] = {
-        "{\"model\":\"moonshine\",\"messages\":[]}",
-        "{\"model\":\"moonshine\",\"messages\":["
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":[]}",
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":["
         "{\"role\":\"assistant\",\"content\":\"x\"}]}",
-        "{\"model\":\"moonshine\",\"messages\":["
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":["
         "{\"role\":\"user\",\"content\":\"x\"}],\"n\":2}",
-        "{\"model\":\"moonshine\",\"messages\":["
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":["
         "{\"role\":\"user\",\"content\":\"x\"}],"
         "\"tools\":[{\"type\":\"function\"}]}",
-        "{\"model\":\"moonshine\",\"messages\":["
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":["
         "{\"role\":\"user\",\"content\":\"x\"}],"
         "\"tool_choice\":\"required\"}",
-        "{\"model\":\"moonshine\",\"messages\":["
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":["
         "{\"role\":\"user\",\"content\":\"x\"}],"
         "\"parallel_tool_calls\":\"false\"}",
-        "{\"model\":\"moonshine\",\"messages\":["
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":["
         "{\"role\":\"user\",\"content\":\"x\"}],"
         "\"reasoning_effort\":\"ultra\"}",
-        "{\"model\":\"moonshine\",\"messages\":["
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":["
+        "{\"role\":\"user\",\"content\":["
+        "{\"type\":\"input_audio\",\"input_audio\":{"
+        "\"data\":\"AA==\",\"format\":\"wav\"}}]}]}",
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":["
         "{\"role\":\"user\",\"content\":\"x\"}],"
         "\"response_format\":{\"type\":\"json_schema\","
         "\"json_schema\":{\"name\":\"x\",\"schema\":{}}}}",
-        "{\"model\":\"moonshine\",\"messages\":["
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":["
         "{\"role\":\"user\",\"content\":\"x\"}],"
         "\"response_format\":{\"type\":\"json_schema\","
         "\"json_schema\":{\"name\":\"x\",\"schema\":{"
         "\"type\":\"string\",\"minLength\":1}}}}",
-        "{\"model\":\"moonshine\",\"messages\":["
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":["
         "{\"role\":\"user\",\"content\":\"x\"}],"
         "\"response_format\":{\"type\":\"json_schema\","
         "\"json_schema\":{\"name\":\"x\",\"schema\":{"
         "\"type\":\"object\",\"required\":[\"missing\"]}}}}",
-        "{\"model\":\"moonshine\",\"messages\":["
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":["
         "{\"role\":\"user\",\"content\":\"x\"}],"
         "\"response_format\":{\"type\":\"json_schema\","
         "\"json_schema\":{\"name\":\"x\",\"schema\":{"
         "\"type\":\"array\"}}}}",
-        "{\"model\":\"moonshine\",\"messages\":["
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":["
         "{\"role\":\"user\",\"content\":\"x\"}],"
         "\"response_format\":{\"type\":\"json_schema\","
         "\"json_schema\":{\"name\":\"bad name\",\"schema\":{"
         "\"type\":\"string\"}}}}",
-        "{\"model\":\"moonshine\",\"messages\":["
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":["
         "{\"role\":\"user\",\"content\":\"x\"}],"
         "\"response_format\":{\"type\":\"json_schema\","
         "\"json_schema\":{\"name\":\"x\",\"schema\":{"
         "\"type\":\"object\",\"properties\":{"
         "\"value\":{\"type\":\"string\"},"
         "\"value\":{\"type\":\"number\"}}}}}}",
-        "{\"model\":\"moonshine\",\"messages\":["
+        "{\"model\":\"moonshotai/Kimi-K3.1-Pro\",\"messages\":["
         "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":["
         "{\"id\":\"a\",\"type\":\"function\",\"function\":{"
         "\"name\":\"f\",\"arguments\":\"{}\"}}]},"
@@ -492,7 +557,7 @@ int main(void) {
         k3_openai_chat_request_free(&bad);
     }
 
-    printf("K3 OpenAI request/response codec: PASS\n");
+    printf("K3.1 OpenAI request/response codec: PASS\n");
     exit_code = 0;
 
 cleanup:
@@ -506,6 +571,8 @@ cleanup:
     k3_openai_chat_request_free(&schema_request);
     k3_openai_chat_request_free(&compatibility_request);
     k3_openai_chat_request_free(&medium_request);
+    k3_openai_chat_request_free(&high_request);
+    k3_openai_chat_request_free(&max_request);
     k3_openai_chat_request_free(&default_request);
     k3_openai_chat_request_free(&over_limit_request);
     return exit_code;

@@ -104,6 +104,16 @@ bool k3_st_model_open_file(k3_st_model *model,
                            size_t       error_size);
 
 /*
+ * Parse one SafeTensors file from an already verified descriptor. Ownership of
+ * fd transfers to the model on every call, including failure.
+ */
+bool k3_st_model_open_file_fd(k3_st_model *model,
+                              const char  *path,
+                              int          fd,
+                              char        *error,
+                              size_t       error_size);
+
+/*
  * Open an explicit, caller-ordered list of shard paths as one model. Needed by
  * checkpoints whose shard filenames do not follow the numbered
  * model-NNNNN-of-NNNNN family, so that the shard set has to come from the

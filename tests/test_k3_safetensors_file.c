@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define CHECK(condition, message) do { \
@@ -29,6 +30,8 @@ static bool write_full(int fd, const void *data, size_t bytes) {
 int main(void) {
     int result = 0;
     char path[] = "/tmp/k3-static-safetensors-XXXXXX";
+    char link_path[128] = {0};
+    char fifo_path[128] = {0};
     int fd = mkstemp(path);
     k3_st_model model;
     memset(&model, 0, sizeof(model));
@@ -72,6 +75,18 @@ int main(void) {
     k3_st_read_release(&read);
     k3_st_model_close(&model);
 
+    snprintf(link_path, sizeof(link_path), "%s.link", path);
+    CHECK(symlink(path, link_path) == 0,
+          "create single-file symlink fixture");
+    CHECK(!k3_st_model_open_file(&model, link_path, error, sizeof(error)),
+          "single-file symlink accepted");
+    unlink(link_path);
+    snprintf(fifo_path, sizeof(fifo_path), "%s.fifo", path);
+    CHECK(mkfifo(fifo_path, 0600) == 0,
+          "create single-file FIFO fixture");
+    CHECK(!k3_st_model_open_file(&model, fifo_path, error, sizeof(error)),
+          "single-file FIFO accepted");
+    unlink(fifo_path);
     CHECK(!k3_st_model_open_file(&model, "/no/such/static.safetensors",
                                  error, sizeof(error)),
           "missing single-file model accepted");
@@ -81,6 +96,8 @@ cleanup:
     if (fd >= 0) close(fd);
     k3_st_read_release(&read);
     k3_st_model_close(&model);
+    if (link_path[0]) unlink(link_path);
+    if (fifo_path[0]) unlink(fifo_path);
     unlink(path);
     return result;
 }

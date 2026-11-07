@@ -161,7 +161,7 @@ static double seconds_between(struct timespec start, struct timespec end) {
 
 int main(int argc, char **argv) {
     const char *root = argc > 1 ? argv[1] :
-        "/srv/modelstore/models/moonshotai__Kimi-K3";
+        "/srv/modelstore/models/moonshotai__Kimi-K3.1-Pro";
     int device_count = 0;
     HIP_CHECK(hipGetDeviceCount(&device_count));
     if (device_count == 0) {

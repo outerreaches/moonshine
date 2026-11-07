@@ -1,5 +1,10 @@
 # 128K configured-context qualification
 
+> **Historical Kimi K3 record.** This is not evidence for the K3.1 Pro 0.3.0
+> cutover. K3.1 has a separate BF16 DSA index-key cache and current natural-text
+> evidence only through 63,971 tokens; every capacity claim below requires new
+> real-weight qualification.
+
 Date: 2026-07-31
 
 This qualification extends the accepted Q8/32 single-node configuration from

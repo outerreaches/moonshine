@@ -39,8 +39,8 @@ class MoonshineFixtureHandler(BaseHTTPRequestHandler):
                 "id": "chatcmpl-moonshine-sdk-1",
                 "object": "chat.completion.chunk",
                 "created": 1785567600,
-                "model": "moonshine",
-                "system_fingerprint": "moonshine-q8-greedy",
+                "model": "moonshotai/Kimi-K3.1-Pro",
+                "system_fingerprint": "moonshine-k3.1-pro-q8-greedy",
                 "choices": [{
                     "index": 0,
                     "delta": {
@@ -55,8 +55,8 @@ class MoonshineFixtureHandler(BaseHTTPRequestHandler):
                 "id": "chatcmpl-moonshine-sdk-1",
                 "object": "chat.completion.chunk",
                 "created": 1785567600,
-                "model": "moonshine",
-                "system_fingerprint": "moonshine-q8-greedy",
+                "model": "moonshotai/Kimi-K3.1-Pro",
+                "system_fingerprint": "moonshine-k3.1-pro-q8-greedy",
                 "choices": [{
                     "index": 0,
                     "delta": {"reasoning_content": "Need weather."},
@@ -67,8 +67,8 @@ class MoonshineFixtureHandler(BaseHTTPRequestHandler):
                 "id": "chatcmpl-moonshine-sdk-1",
                 "object": "chat.completion.chunk",
                 "created": 1785567600,
-                "model": "moonshine",
-                "system_fingerprint": "moonshine-q8-greedy",
+                "model": "moonshotai/Kimi-K3.1-Pro",
+                "system_fingerprint": "moonshine-k3.1-pro-q8-greedy",
                 "choices": [{
                     "index": 0,
                     "delta": {
@@ -89,8 +89,8 @@ class MoonshineFixtureHandler(BaseHTTPRequestHandler):
                 "id": "chatcmpl-moonshine-sdk-1",
                 "object": "chat.completion.chunk",
                 "created": 1785567600,
-                "model": "moonshine",
-                "system_fingerprint": "moonshine-q8-greedy",
+                "model": "moonshotai/Kimi-K3.1-Pro",
+                "system_fingerprint": "moonshine-k3.1-pro-q8-greedy",
                 "choices": [{
                     "index": 0,
                     "delta": {},
@@ -133,7 +133,7 @@ def main() -> None:
             timeout=10.0,
         )
         stream = client.chat.completions.create(
-            model="moonshine",
+            model="moonshotai/Kimi-K3.1-Pro",
             messages=[{"role": "user", "content": "Weather in Toronto?"}],
             tools=[{
                 "type": "function",
@@ -150,7 +150,7 @@ def main() -> None:
             }],
             tool_choice="required",
             parallel_tool_calls=False,
-            reasoning_effort="medium",
+            reasoning_effort="high",
             max_completion_tokens=64,
             stream=True,
         )
@@ -182,8 +182,8 @@ def main() -> None:
             raise AssertionError("the SDK request did not enable streaming")
         if request.get("parallel_tool_calls") is not False:
             raise AssertionError("the SDK lost parallel_tool_calls=false")
-        if request.get("reasoning_effort") != "medium":
-            raise AssertionError("the SDK lost reasoning_effort=medium")
+        if request.get("reasoning_effort") != "high":
+            raise AssertionError("the SDK lost reasoning_effort=high")
         if "".join(reasoning) != "Need weather.":
             raise AssertionError("reasoning_content was not preserved")
         if len(calls) != 1:

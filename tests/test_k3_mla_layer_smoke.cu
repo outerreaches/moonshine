@@ -381,7 +381,7 @@ static bool launch_layer(
 
 int main(int argc, char **argv) {
     const char *root = argc > 1 ? argv[1] :
-        "/srv/modelstore/models/moonshotai__Kimi-K3";
+        "/srv/modelstore/models/moonshotai__Kimi-K3.1-Pro";
     int device_count = 0;
     HIP_CHECK(hipGetDeviceCount(&device_count));
     if (device_count == 0) {

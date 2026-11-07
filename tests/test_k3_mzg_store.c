@@ -56,7 +56,7 @@ static void fill_pattern(uint8_t *destination, size_t bytes,
 
 int main(int argc, char **argv) {
     const char *root = argc > 1 ? argv[1] :
-        "/srv/modelstore/models/moonshotai__Kimi-K3";
+        "/srv/modelstore/models/moonshotai__Kimi-K3.1-Pro";
     const uint32_t layers =
         argc > 2 ? (uint32_t)strtoul(argv[2], NULL, 10) : 92u;
     const uint32_t experts =

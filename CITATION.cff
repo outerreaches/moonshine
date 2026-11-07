@@ -1,20 +1,23 @@
 cff-version: 1.2.0
 message: "If you use Moonshine in research, please cite this software."
-title: "Moonshine: a Kimi K3 inference engine for AMD Strix Halo"
+title: "Moonshine: a Kimi K3.1 Pro research-preview inference engine for AMD Strix Halo"
 type: software
 authors:
   - name: "Moonshine contributors"
-version: "0.2.0-research-preview"
-date-released: 2026-08-01
+version: "0.3.0-k3.1-research-preview"
+date-released: 2026-11-06
 license: MIT
 repository-code: "https://github.com/outerreaches/moonshine"
 abstract: >-
-  An experimental single-node SafeTensors/ROCm inference engine for Kimi K3
-  on 128 GB AMD Strix Halo, with NVMe-streamed MXFP4 experts and layer-major
-  prefill.
+  An experimental single-node SafeTensors/ROCm inference-engine cutover for the
+  pinned Kimi K3.1 Pro checkpoint, with BF16 Gated DSA and NVMe-streamed routed
+  experts. Real generation, state recovery, and natural-context retrieval pass
+  through 64K tokens; production deployment and longer contexts are not yet
+  qualified.
 keywords:
-  - Kimi K3
+  - Kimi K3.1 Pro
   - ROCm
   - Strix Halo
+  - sparse attention
   - mixture of experts
   - inference

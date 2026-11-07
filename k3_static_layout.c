@@ -15,6 +15,7 @@ bool k3_static_weight_is_q8_candidate(const k3_st_tensor *tensor) {
         strstr(tensor->name, ".block_sparse_moe.experts.") ||
         strstr(tensor->name, "embed_tokens.weight") ||
         strstr(tensor->name, "lm_head.weight") ||
+        strstr(tensor->name, ".self_attn.indexer.") ||
         strstr(tensor->name, ".block_sparse_moe.gate.") ||
         strstr(tensor->name, "_res_proj.weight") ||
         strstr(tensor->name, "output_attn_res_proj.weight")) {

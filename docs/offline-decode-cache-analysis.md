@@ -1,5 +1,9 @@
 # Offline decode-cache analysis
 
+> The analyzer and its portable synthetic fixtures remain available in the K3.1
+> preview. Existing accepted traces and golden results are historical Kimi K3
+> evidence, not a qualified K3.1 cache policy or deployment profile.
+
 `tools/analyze_decode_cache.py` validates and analyzes one committed decode-
 diagnostics capture without starting Moonshine or using a GPU. It is a
 standard-library-only tool for deterministic qualification reports, not a

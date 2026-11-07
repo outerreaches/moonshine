@@ -1,4 +1,6 @@
 #include "k3_engine.h"
+#include "k31_dsa_memory.h"
+#include "k31_dsa_rocm.h"
 
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_runtime.h>
@@ -26,14 +28,10 @@
         }                                                                   \
     } while (0)
 
-static const uint64_t K3_EXPECTED_STATIC_BYTES =
-    UINT64_C(59345729536);
 static const uint64_t K3_EXPECTED_CACHE_BYTES =
     UINT64_C(51659145216);
 static const uint64_t K3_FIXED_STATE_BYTES =
     UINT64_C(756547584);
-static const uint64_t K3_CONTEXT_STATE_BYTES_PER_TOKEN =
-    UINT64_C(28224);
 static const uint64_t K3_EXPECTED_STAGING_BYTES =
     UINT64_C(280821760);
 static const uint64_t K3_EXPECTED_MZG2_OUTPUT_BYTES =
@@ -78,7 +76,7 @@ int main(int argc, char **argv) {
         return 2;
     }
     const char *root = argc > 1 ? argv[1] :
-        "/srv/modelstore/models/moonshotai__Kimi-K3";
+        "/srv/modelstore/models/moonshotai__Kimi-K3.1-Pro";
     uint32_t context = 8192u;
     if (argc > 2) {
         char *end = NULL;
@@ -109,17 +107,37 @@ int main(int argc, char **argv) {
               &engine, root, context, 32u, 16u, true,
               &stats, error, sizeof(error)),
           error);
-    CHECK(stats.static_store.resident_bytes ==
-              K3_EXPECTED_STATIC_BYTES,
-          "engine static tier byte ledger");
+    const k3_static_weight *indexer_weight = k3_engine_find_weight(
+        engine, "language_model.model.layers.3.self_attn.indexer.wq_b.weight");
+    CHECK(indexer_weight && indexer_weight->kind == K3_STATIC_WEIGHT_BF16,
+          "DSA indexer weights are not source BF16");
     CHECK(stats.cache_bytes == K3_EXPECTED_CACHE_BYTES &&
               stats.cache_slots == 2944u,
           "engine cache byte ledger");
+    k31_dsa_memory_plan dsa_plan;
+    CHECK(k31_dsa_memory_plan_build(
+              context, 24, 576, 128, 32, 96, 512, 2048, &dsa_plan),
+          "build expected DSA memory plan");
+    size_t topk_workspace_bytes = 0u;
+    CHECK(k31_dsa_topk_workspace_bytes(
+              context, NULL, &topk_workspace_bytes),
+          "query expected DSA top-k workspace");
+    const uint64_t dense_workspace_bytes =
+        (uint64_t)context * 96u * (sizeof(float) + sizeof(uint16_t)) +
+        96u * 512u * sizeof(uint16_t);
+    const uint64_t shared_workspace_bytes =
+        dense_workspace_bytes > dsa_plan.attention_workspace_bytes ?
+            dense_workspace_bytes : dsa_plan.attention_workspace_bytes;
     const uint64_t expected_state_bytes =
-        K3_FIXED_STATE_BYTES +
-        (uint64_t)context * K3_CONTEXT_STATE_BYTES_PER_TOKEN;
+        K3_FIXED_STATE_BYTES + dsa_plan.mla_cache_bytes +
+        dsa_plan.index_cache_bytes + shared_workspace_bytes +
+        topk_workspace_bytes;
     CHECK(stats.state_bytes == expected_state_bytes,
-          "engine attention-state byte ledger");
+          "engine DSA attention-state byte ledger");
+    CHECK(stats.index_cache_bytes == dsa_plan.index_cache_bytes &&
+          stats.dsa_workspace_bytes ==
+              dsa_plan.attention_workspace_bytes + topk_workspace_bytes,
+          "engine DSA-specific memory ledger");
     CHECK(stats.staging_bytes ==
               K3_EXPECTED_STAGING_BYTES *
                   (stats.mzg_expert_store ? 2u : 1u) +

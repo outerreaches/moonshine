@@ -14,7 +14,6 @@ extern "C" {
 #endif
 
 enum {
-    K3_BUNDLE_STATIC_TENSORS = 2460,
     K3_BUNDLE_LAYERS = 92,
     K3_BUNDLE_EXPERTS_PER_LAYER = 896,
     K3_BUNDLE_EXPERTS = 82432,
@@ -22,14 +21,19 @@ enum {
     K3_BUNDLE_EXPERT_TENSORS = 6,
 };
 
-#define K3_BUNDLE_STATIC_PAYLOAD_BYTES UINT64_C(113509540864)
 #define K3_BUNDLE_EXPERT_BYTES UINT64_C(17547264)
-#define K3_BUNDLE_MODEL_LAYOUT_CRC64 UINT64_C(0xd17f7f2aad23c9c9)
 
 typedef struct {
     char static_path[PATH_MAX];
+    char static_sha256[65];
     char mzg2_path[PATH_MAX];
+    char mzg2_manifest_path[PATH_MAX];
+    char mzg2_manifest_sha256[65];
+    char source_manifest_sha256[65];
     uint64_t source_model_layout_crc64;
+    uint32_t layers;
+    uint32_t experts_per_layer;
+    uint32_t experts;
     uint64_t static_payload_bytes;
     uint64_t static_file_bytes;
     uint32_t static_tensor_count;
@@ -44,6 +48,11 @@ bool k3_bundle_load(k3_bundle *bundle,
                     const char *root,
                     char *error,
                     size_t error_size);
+
+bool k3_bundle_open_verified_static(const k3_bundle *bundle,
+                                    int *static_fd,
+                                    char *error,
+                                    size_t error_size);
 
 #ifdef __cplusplus
 }

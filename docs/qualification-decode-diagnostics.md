@@ -1,5 +1,9 @@
 # Decode-diagnostics qualification
 
+> **Historical Kimi K3 record.** This PASS does not qualify K3.1 Pro 0.3.0 or
+> its additional DSA index-cache state. Repeat all applicable gates with real
+> K3.1 weights before using this as current release evidence.
+
 Date: 2026-08-11
 
 Status: **PASS for implementation commit
