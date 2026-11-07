@@ -1601,6 +1601,22 @@ extern "C" bool k3_rocm_mxfp4_gemv_bf16(void       *output,
         rows, columns, stream_pointer);
 }
 
+extern "C" bool k3_rocm_mxfp4_gemv_rows_bf16(
+        void *output, const void *packed, const void *scales, const void *input,
+        uint32_t vector_count, uint32_t rows, uint32_t columns, void *stream_pointer) {
+    if (!output || !packed || !scales || !input || vector_count == 0u ||
+        vector_count > 65535u || rows == 0u || columns == 0u || columns % 32u != 0u)
+        return false;
+    // Reuse the exact kernel already used by the baseline. Its blockIdx.y
+    // addressing supports multiple input vectors without changing reduction,
+    // contraction or rounding. No new arithmetic kernel is introduced here.
+    hipLaunchKernelGGL(k3_mxfp4_gemv_kernel, dim3(rows, vector_count),
+                      dim3(K3_ROCM_MXFP4_THREADS), 0, (hipStream_t)stream_pointer,
+                      (hip_bfloat16 *)output, (const uint8_t *)packed,
+                      (const uint8_t *)scales, (const hip_bfloat16 *)input, columns);
+    return hipGetLastError() == hipSuccess;
+}
+
 template <uint32_t BatchTile>
 static bool k3_launch_mxfp4_gemm_tiled_bf16(
         void       *output,

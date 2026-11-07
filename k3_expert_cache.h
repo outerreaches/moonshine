@@ -57,6 +57,16 @@ bool k3_expert_cache_plan(k3_expert_cache *cache,
                           char *error,
                           size_t error_size);
 
+/* Opt-in planning only: evict the nonselected expert with farthest next use.
+ * next_use indexes logical IDs; equal distances evict the oldest entry.
+ * Caller supplies bounded, already-known future routes, not predictions.
+ * Current selection is protected throughout planning. No pointer is retained.
+ * Existing plan() semantics and all default consumers remain unchanged. */
+bool k3_expert_cache_plan_next_use(
+    k3_expert_cache *cache, uint16_t layer, const uint16_t *expert_ids,
+    uint16_t expert_count, const uint32_t *next_use, uint16_t id_count,
+    k3_expert_cache_access *accesses, char *error, size_t error_size);
+
 bool k3_expert_cache_commit(k3_expert_cache *cache,
                             uint16_t layer,
                             char *error,

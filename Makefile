@@ -1,4 +1,5 @@
 CC ?= cc
+CXX ?= c++
 AR ?= ar
 HIPCC ?= $(shell command -v hipcc 2>/dev/null || echo /opt/rocm/bin/hipcc)
 ROCM_HOME ?= /opt/rocm
@@ -29,6 +30,82 @@ MOONSHINE_DECODE_CACHE_SOURCE_CAPACITY ?=
 MOONSHINE_DECODE_CACHE_FRESH_EMPTY_SOURCE ?= 0
 MOONSHINE_DECODE_CACHE_CAPACITIES ?= 24 26 28 30 31 32 34 36 40
 MOONSHINE_CACHE_ANALYZER_GOLDEN_RUN ?=
+GLM53_OFFICIAL_ROOT ?=
+
+GLM53_OBJS := \
+	glm53_arch_math.o \
+	glm53_architecture.o \
+	glm53_dense_ops.o \
+	glm53_engine_plan.o \
+	glm53_expert_plan.o \
+	glm53_expert_stream.o \
+	glm53_fp8_dynamic.o \
+	glm53_fp8_oracle.o \
+	glm53_kda_aux_ops.o \
+	glm53_kda_gate_ops.o \
+	glm53_kda_ops.o \
+	glm53_manifest.o \
+	glm53_mhc_ops.o \
+	glm53_official_tensor.o \
+	glm53_phase5c.o \
+	glm53_process_memory.o \
+	glm53_residency.o \
+	glm53_rocm_ops.o \
+	glm53_state_oracle.o \
+	glm53_vector_ops.o \
+	glm53_static_bindings.o \
+	glm53_static_layout.o \
+	glm53_static_loader.o \
+	glm53_weights.o
+
+MIMO26_CPU_TESTS := \
+	tests/test_mimo26_architecture \
+	tests/test_mimo26_manifest \
+	tests/test_mimo26_fp8 \
+	tests/test_mimo26_router \
+	tests/test_mimo26_ops \
+	tests/test_mimo26_attention \
+	tests/test_mimo26_kv \
+	tests/test_mimo26_expert_cache
+
+GLM53_CPU_TESTS := \
+	tests/test_glm53_arch_math \
+	tests/test_glm53_architecture \
+	tests/test_glm53_engine_plan \
+	tests/test_glm53_expert_plan \
+	tests/test_glm53_expert_stream \
+	tests/test_glm53_fp8_dynamic \
+	tests/test_glm53_fp8_oracle \
+	tests/test_glm53_manifest \
+	tests/test_glm53_official_tensor \
+	tests/test_glm53_process_memory \
+	tests/test_glm53_residency \
+	tests/test_glm53_state_oracle \
+	tests/test_glm53_static_bindings \
+	tests/test_glm53_static_layout \
+	tests/test_glm53_weights
+
+GLM53_ROCM_TESTS := \
+	tests/test_glm53_dense_ops \
+	tests/test_glm53_fp8_dynamic_rocm \
+	tests/test_glm53_kda_aux_ops \
+	tests/test_glm53_kda_gate_ops \
+	tests/test_glm53_kda_ops \
+	tests/test_glm53_mhc_ops \
+	tests/test_glm53_phase5c \
+	tests/test_glm53_rocm_ops \
+	tests/test_glm53_static_loader \
+	tests/test_glm53_vector_ops
+
+GLM53_OFFICIAL_TESTS := \
+	tests/test_glm53_architecture_official \
+	tests/test_glm53_official_components \
+	tests/test_glm53_official_kda \
+	tests/test_glm53_official_projection \
+	tests/test_glm53_phase5a_official \
+	tests/test_glm53_phase5b_expert_official \
+	tests/test_glm53_phase5b_loader_official \
+	tests/test_glm53_phase5c_mhc_official
 
 K3_OBJS := \
 	k3_chat.o \
@@ -121,9 +198,13 @@ CHAT_TESTS := \
 	tests/test_k3_prefix_checkpoint \
 	tests/test_k3_long_context
 
-ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS)
+ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS) \
+	$(MIMO26_CPU_TESTS) \
+	$(GLM53_CPU_TESTS) $(GLM53_ROCM_TESTS) $(GLM53_OFFICIAL_TESTS)
 
 .PHONY: all help tests test test-cpu check-model \
+	test-mimo26-schema test-mimo26-checkpoint mimo26-budget \
+	mimo26-layer-parity \
 	test-model-layout test-model-components test-engine-init \
 	test-engine-hello test-chat-hello test-state-checkpoint test-tokenizer \
 	test-prefill-2 test-prefill-scale test-prefill-kda-blas \
@@ -136,16 +217,48 @@ ALL_TESTS := $(CPU_TESTS) $(ASSET_TESTS) $(ROCM_TESTS) $(CHAT_TESTS)
 	bench-k31-dsa \
 	test-static-q8-screen test-mzg-transcoder test-mzg2-bundle \
 	test-k31-checkpoint test-placement test-k31-bundle-roundtrip \
-	test-reduction-qualification test-openai-sdk clean
+	test-reduction-qualification test-openai-sdk \
+	test-glm53-phase2 test-glm53-phase3 test-glm53-phase4 \
+	test-glm53-phase4-official test-glm53-phase5a \
+	test-glm53-phase5a-official test-glm53-phase5b \
+	test-glm53-phase5b-official test-glm53-phase5b-full \
+	test-glm53-phase5c test-glm53-phase5c-official \
+	test-glm53-phase5d-kda clean
 
 all: libmoonshine.a moonshine-chat moonshine-server
 
 help:
 	@echo "Moonshine targets:"
-	@echo "  make                         Build library, chat client, and API server"
+	@echo ""
+	@echo "  THREE MODEL LANES. 'make' builds the Kimi K3 binaries ONLY."
+	@echo "    Kimi K3           moonshine-chat, moonshine-server   (default build)"
+	@echo "    MiMo V2.6 Flash   tools/mimo26_server                (build explicitly)"
+	@echo "    GLM 5.3 Flash     no servable binary in this tree    (components only)"
+	@echo ""
+	@echo "  make                         Build library, chat client, and API server (K3)"
 	@echo "  make moonshine-chat          Build the interactive deterministic client"
 	@echo "  make moonshine-server        Build the OpenAI-compatible one-slot server"
 	@echo "  make tests                   Build every test binary"
+	@echo ""
+	@echo " MiMo V2.6 Flash:"
+	@echo "  make tools/mimo26_server     Build the MiMo OpenAI-compatible server"
+	@echo "  make tests/test_mimo26_attention_deep"
+	@echo "                               Deep-history attention, bit-exact to 131072"
+	@echo "                               MIMO26_DEEP_BENCH=<n> / _DECOMPOSE=<n> to profile"
+	@echo "  make tests/test_mimo26_finish_reason"
+	@echo "                               Stop reasons stay inside the OpenAI schema"
+	@echo "  make tests/test_mimo26_worker_overrides"
+	@echo "                               Strict env overrides and assigned defaults"
+	@echo "  See RELEASING.md for packaging, activation and signing (mimo26_package.py)."
+	@echo ""
+	@echo " GLM 5.3 Flash (components only, not servable from this tree):"
+	@echo "  make test-glm53-phase2 .. test-glm53-phase5d-kda"
+	@echo "                               Phase-gated component tests"
+	@echo "  make test-glm53-phase4-official GLM53_OFFICIAL_ROOT=/path/to/official"
+	@echo "                               Regenerates its weight-derived goldens;"
+	@echo "                               see docs/glm53-phase4-goldens.md"
+	@echo ""
+	@echo " All lanes -- general and Kimi K3 tests:"
 	@echo "  make test-cpu                Run portable tests without ROCm or weights"
 	@echo "  make test                    Run model-free CPU/ROCm tests"
 	@echo "  make bench-k31-dsa          Profile DSA kernels at real 8K shapes"
@@ -197,7 +310,7 @@ help:
 	@echo "                               Run the MXFP4 reduction-change gate bundle"
 	@echo "  make clean                  Remove local build products"
 
-libmoonshine.a: $(K3_OBJS)
+libmoonshine.a: $(K3_OBJS) $(GLM53_OBJS)
 	$(AR) rcs $@ $^
 
 tests: $(ALL_TESTS)
@@ -245,6 +358,111 @@ k31_model.o: k31_model.c k31_model.h k3_json.h
 k3_safetensors.o: k3_safetensors.c k3_safetensors.h
 k3_sha256.o: k3_sha256.c k3_sha256.h
 k3_tokenizer.o: k3_tokenizer.c k3_tokenizer.h
+glm53_arch_math.o: glm53_arch_math.c glm53_arch_math.h
+glm53_arch_math.o: CFLAGS += -fno-fast-math
+glm53_architecture.o: glm53_architecture.c glm53_architecture.h \
+	k3_safetensors.h
+glm53_engine_plan.o: glm53_engine_plan.c glm53_engine_plan.h
+glm53_expert_stream.o: glm53_expert_stream.c glm53_expert_stream.h \
+	glm53_expert_plan.h k3_safetensors.h
+glm53_expert_plan.o: glm53_expert_plan.c glm53_expert_plan.h k3_safetensors.h
+glm53_fp8_dynamic.o: glm53_fp8_dynamic.c glm53_fp8_dynamic.h
+glm53_fp8_dynamic.o: CFLAGS += -fno-fast-math
+glm53_fp8_oracle.o: glm53_fp8_oracle.c glm53_fp8_oracle.h
+glm53_fp8_oracle.o: CFLAGS += -fno-fast-math
+tests/test_mimo26_fp8.o: CFLAGS += -fno-fast-math
+glm53_manifest.o: glm53_manifest.c glm53_manifest.h k3_json.h \
+	k3_safetensors.h
+glm53_official_tensor.o: glm53_official_tensor.c glm53_official_tensor.h \
+	k3_safetensors.h
+glm53_process_memory.o: glm53_process_memory.c glm53_process_memory.h
+glm53_residency.o: glm53_residency.c glm53_residency.h
+glm53_rocm_ops.o: glm53_rocm_ops.cu glm53_rocm_ops.h
+glm53_rocm_ops.o tests/test_glm53_fp8_dynamic_rocm.o \
+	tests/test_glm53_phase5b_expert_official.o \
+	tests/test_glm53_rocm_ops.o tests/test_glm53_official_projection.o: \
+	HIPFLAGS += -fno-fast-math
+glm53_state_oracle.o: glm53_state_oracle.c glm53_state_oracle.h
+glm53_state_oracle.o: CFLAGS += -fno-fast-math
+glm53_static_layout.o: glm53_static_layout.c glm53_static_layout.h \
+	glm53_weights.h
+glm53_static_loader.o: glm53_static_loader.cu glm53_static_loader.h \
+	glm53_static_layout.h k3_safetensors.h
+glm53_weights.o: glm53_weights.c glm53_weights.h glm53_architecture.h \
+	glm53_expert_plan.h glm53_manifest.h k3_safetensors.h
+
+tests/test_glm53_arch_math.o: tests/test_glm53_arch_math.c glm53_arch_math.h
+tests/test_glm53_architecture.o: tests/test_glm53_architecture.c \
+	glm53_architecture.h
+tests/test_glm53_engine_plan.o: tests/test_glm53_engine_plan.c \
+	glm53_engine_plan.h
+tests/test_glm53_expert_stream.o: tests/test_glm53_expert_stream.c \
+	glm53_expert_stream.h
+tests/test_glm53_architecture_official.o: \
+	tests/test_glm53_architecture_official.c glm53_architecture.h \
+	glm53_manifest.h k3_safetensors.h
+tests/test_glm53_expert_plan.o: tests/test_glm53_expert_plan.c \
+	glm53_expert_plan.h
+tests/test_glm53_fp8_dynamic.o: tests/test_glm53_fp8_dynamic.c \
+	glm53_fp8_dynamic.h
+tests/test_glm53_fp8_dynamic.o: CFLAGS += -fno-fast-math
+tests/test_glm53_fp8_oracle.o: tests/test_glm53_fp8_oracle.c \
+	glm53_fp8_oracle.h
+tests/test_glm53_manifest.o: tests/test_glm53_manifest.c glm53_manifest.h
+tests/test_glm53_official_components.o: \
+	tests/test_glm53_official_components.c glm53_arch_math.h
+tests/test_glm53_official_kda.o: tests/test_glm53_official_kda.c \
+	glm53_state_oracle.h
+tests/test_glm53_official_projection.o: \
+	tests/test_glm53_official_projection.cu glm53_fp8_oracle.h \
+	glm53_manifest.h glm53_official_tensor.h glm53_rocm_ops.h k3_safetensors.h
+tests/test_glm53_official_tensor.o: tests/test_glm53_official_tensor.c \
+	glm53_official_tensor.h
+tests/test_glm53_state_oracle.o: tests/test_glm53_state_oracle.c \
+	glm53_state_oracle.h
+tests/test_glm53_weights.o: tests/test_glm53_weights.c glm53_weights.h \
+	glm53_architecture.h glm53_engine_plan.h
+tests/test_glm53_process_memory.o: tests/test_glm53_process_memory.c \
+	glm53_process_memory.h
+tests/test_glm53_static_layout.o: tests/test_glm53_static_layout.c \
+	glm53_static_layout.h glm53_weights.h
+tests/test_glm53_static_loader.o: tests/test_glm53_static_loader.cu \
+	glm53_static_loader.h glm53_static_layout.h
+tests/test_glm53_static_bindings.o: tests/test_glm53_static_bindings.c \
+	glm53_static_bindings.h glm53_static_loader.h glm53_static_layout.h \
+	glm53_weights.h
+tests/test_glm53_phase5b_loader_official.o: \
+	tests/test_glm53_phase5b_loader_official.cu glm53_static_loader.h \
+	glm53_static_layout.h glm53_process_memory.h glm53_weights.h
+tests/test_glm53_phase5c_mhc_official.o: \
+	tests/test_glm53_phase5c_mhc_official.cu glm53_mhc_ops.h \
+	glm53_vector_ops.h glm53_process_memory.h glm53_weights.h
+tests/test_glm53_phase5a_official.o: \
+	tests/test_glm53_phase5a_official.c glm53_weights.h \
+	glm53_expert_stream.h glm53_engine_plan.h
+tests/test_glm53_residency.o: tests/test_glm53_residency.c glm53_residency.h
+tests/test_glm53_rocm_ops.o: tests/test_glm53_rocm_ops.cu \
+	glm53_rocm_ops.h glm53_fp8_oracle.h k3_rocm_ops.h
+tests/test_glm53_vector_ops.o: tests/test_glm53_vector_ops.cu \
+	glm53_vector_ops.h
+tests/test_glm53_kda_aux_ops.o: tests/test_glm53_kda_aux_ops.cu \
+	glm53_kda_aux_ops.h
+tests/test_glm53_kda_gate_ops.o: tests/test_glm53_kda_gate_ops.cu \
+	glm53_kda_gate_ops.h
+tests/test_glm53_kda_ops.o: tests/test_glm53_kda_ops.cu glm53_kda_ops.h
+glm53_kda_aux_ops.o: glm53_kda_aux_ops.cu glm53_kda_aux_ops.h
+glm53_kda_gate_ops.o: glm53_kda_gate_ops.cu glm53_kda_gate_ops.h
+glm53_kda_ops.o: glm53_kda_ops.cu glm53_kda_ops.h
+
+glm53_kda_aux_ops.o glm53_kda_gate_ops.o glm53_kda_ops.o \
+	tests/test_glm53_kda_aux_ops.o tests/test_glm53_kda_gate_ops.o \
+	tests/test_glm53_kda_ops.o: HIPFLAGS += -fno-fast-math
+glm53_mhc_ops.o: glm53_mhc_ops.cu glm53_mhc_ops.h
+tests/test_glm53_dense_ops.o: tests/test_glm53_dense_ops.cu \
+	glm53_dense_ops.h glm53_rocm_ops.h glm53_vector_ops.h
+tests/test_glm53_phase5c.o: tests/test_glm53_phase5c.cu glm53_phase5c.h \
+	glm53_static_bindings.h
+
 tests/test_k3_bundle.o: tests/test_k3_bundle.c k3_bundle.h
 tests/test_k3_chat_session.o: tests/test_k3_chat_session.c k3_chat.h
 tests/test_k3_long_context.o: tests/test_k3_long_context.c k3_chat.h
@@ -287,6 +505,276 @@ tools/screen_static_q8: tools/screen_static_q8.o k3_q8_codec.o \
 		k3_static_layout.o k3_safetensors.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
+tests/test_glm53_arch_math: tests/test_glm53_arch_math.o glm53_arch_math.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+mimo26_architecture.o: mimo26_architecture.c mimo26_architecture.h \
+	k3_safetensors.h
+tests/test_mimo26_architecture.o: tests/test_mimo26_architecture.c \
+	mimo26_architecture.h k3_safetensors.h
+tests/test_mimo26_official.o: tests/test_mimo26_official.c \
+	mimo26_manifest.h mimo26_architecture.h k3_safetensors.h
+tests/test_mimo26_official: tests/test_mimo26_official.o \
+		mimo26_manifest.o mimo26_architecture.o k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tools/mimo26_dump_ops.o: tools/mimo26_dump_ops.c \
+	mimo26_attention.h mimo26_ops.h mimo26_router.h
+tools/mimo26_dump_ops.o: CFLAGS += -fno-fast-math
+tools/mimo26_dump_ops: tools/mimo26_dump_ops.o mimo26_ops.o \
+		mimo26_router.o mimo26_attention.o mimo26_architecture.o \
+		k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tools/mimo26_dump_rope.o: tools/mimo26_dump_rope.c \
+	mimo26_attention.h mimo26_ops.h
+tools/mimo26_dump_rope.o: CFLAGS += -fno-fast-math
+tools/mimo26_dump_rope: tools/mimo26_dump_rope.o mimo26_attention.o \
+		mimo26_ops.o mimo26_architecture.o k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_mimo26_expert_cache.o: tests/test_mimo26_expert_cache.c \
+	k3_expert_cache.h mimo26_architecture.h mimo26_manifest.h \
+	mimo26_router.h
+tests/test_mimo26_expert_cache: tests/test_mimo26_expert_cache.o \
+		k3_expert_cache.o mimo26_manifest.o mimo26_architecture.o \
+		mimo26_router.o k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tools/mimo26_dump_weights.o: tools/mimo26_dump_weights.c \
+	mimo26_weights.h mimo26_manifest.h mimo26_architecture.h \
+	mimo26_router.h
+tools/mimo26_dump_weights: tools/mimo26_dump_weights.o \
+		mimo26_weights.o mimo26_manifest.o mimo26_architecture.o \
+		mimo26_attention.o mimo26_ops.o mimo26_router.o \
+		glm53_fp8_oracle.o k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tools/mimo26_run.o: tools/mimo26_run.c mimo26_worker.h
+tools/mimo26_run: tools/mimo26_run.o mimo26_worker.o mimo26_layer.o \
+		mimo26_weights.o mimo26_kv.o mimo26_manifest.o \
+		mimo26_architecture.o mimo26_attention.o mimo26_ops.o \
+		mimo26_router.o k3_expert_cache.o glm53_fp8_oracle.o \
+		k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+mimo26_worker.o: mimo26_worker.c mimo26_worker.h mimo26_layer.h \
+	mimo26_weights.h mimo26_manifest.h mimo26_ops.h k3_expert_cache.h
+mimo26_worker.o: CFLAGS += -fno-fast-math
+mimo26_layer.o: mimo26_layer.c mimo26_layer.h mimo26_weights.h \
+	mimo26_kv.h mimo26_router.h mimo26_ops.h mimo26_architecture.h
+mimo26_layer.o: CFLAGS += -fno-fast-math
+tests/test_mimo26_layer_parity.o: tests/test_mimo26_layer_parity.c \
+	mimo26_layer.h mimo26_weights.h mimo26_manifest.h mimo26_ops.h \
+	mimo26_architecture.h
+tests/test_mimo26_layer_parity.o: CFLAGS += -fno-fast-math
+tests/test_mimo26_layer_parity: tests/test_mimo26_layer_parity.o \
+		mimo26_layer.o mimo26_weights.o mimo26_kv.o mimo26_manifest.o \
+		mimo26_architecture.o mimo26_attention.o mimo26_ops.o \
+		mimo26_router.o glm53_fp8_oracle.o k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+mimo26_server_slot.o: mimo26_server_slot.c mimo26_server_slot.h
+tests/test_mimo26_server_slot.o: tests/test_mimo26_server_slot.c \
+	mimo26_server_slot.h
+tests/test_mimo26_server_slot: tests/test_mimo26_server_slot.o \
+		mimo26_server_slot.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+# Quarantine and recovery, against the real slot state machine.
+#
+# Both of these existed and passed but had no rule, so `make` fell through to
+# its builtin and linked with $(CC), which cannot link a hipcc object. A gate
+# that cannot be built is a gate nobody runs -- the 2026-09-25 qualification
+# recorded quarantine as "not covered" when in fact it was covered and
+# unbuildable.
+#
+# The recovery gate includes mimo26_server.cu whole and mocks only the two
+# worker reset entry points, so --gc-sections is what drops the HTTP server
+# and leaves the slot machine as the sole external dependency.
+tests/mimo26_server_recovery_gate: tests/mimo26_server_recovery_gate.cu \
+		mimo26_server_slot.o
+	$(HIPCC) $(HIPFLAGS) -ffunction-sections -fdata-sections -o $@ \
+		tests/mimo26_server_recovery_gate.cu -x none mimo26_server_slot.o \
+		-Wl,--gc-sections $(LDLIBS)
+
+tests/test_mimo26_retention_fault_model: \
+		tests/test_mimo26_retention_fault_model.c k3_expert_cache.o
+	$(CC) $(CFLAGS) -I. -o $@ $^ $(LDLIBS)
+
+tests/mimo26_prefix_reuse_gate: tests/mimo26_prefix_reuse_gate.o \
+		mimo26_gpu_worker.o mimo26_rocm_layer.o mimo26_rocm_ops.o \
+		k3_rocm_ops.o mimo26_weights.o mimo26_kv.o mimo26_manifest.o \
+		mimo26_architecture.o mimo26_attention.o mimo26_ops.o \
+		mimo26_router.o mimo26_tokenizer.o glm53_fp8_oracle.o \
+		k3_safetensors.o k3_json.o k3_io_uring.o k3_expert_cache.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS) $(ICU_LDLIBS)
+
+tests/test_mimo26_qualify.o: tests/test_mimo26_qualify.c mimo26_worker.h
+tests/test_mimo26_qualify.o: CFLAGS += -fno-fast-math
+tests/test_mimo26_qualify: tests/test_mimo26_qualify.o \
+		mimo26_worker.o mimo26_layer.o mimo26_weights.o mimo26_kv.o \
+		mimo26_manifest.o mimo26_architecture.o mimo26_attention.o \
+		mimo26_ops.o mimo26_router.o k3_expert_cache.o \
+		glm53_fp8_oracle.o k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+mimo26_weights.o: mimo26_weights.c mimo26_weights.h \
+	mimo26_architecture.h mimo26_attention.h mimo26_ops.h \
+	mimo26_router.h glm53_fp8_oracle.h k3_safetensors.h
+mimo26_weights.o: CFLAGS += -fno-fast-math
+mimo26_kv.o: mimo26_kv.c mimo26_kv.h mimo26_attention.h \
+	mimo26_architecture.h
+tests/test_mimo26_kv.o: tests/test_mimo26_kv.c mimo26_kv.h \
+	mimo26_architecture.h mimo26_ops.h
+tests/test_mimo26_kv: tests/test_mimo26_kv.o mimo26_kv.o \
+		mimo26_attention.o mimo26_ops.o mimo26_architecture.o \
+		k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+mimo26_attention.o: mimo26_attention.c mimo26_attention.h \
+	mimo26_architecture.h mimo26_ops.h
+mimo26_attention.o: CFLAGS += -fno-fast-math
+tests/test_mimo26_attention.o: tests/test_mimo26_attention.c \
+	mimo26_attention.h mimo26_ops.h
+tests/test_mimo26_attention.o: CFLAGS += -fno-fast-math
+tests/test_mimo26_attention: tests/test_mimo26_attention.o \
+		mimo26_attention.o mimo26_ops.o mimo26_architecture.o \
+		k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+mimo26_ops.o: mimo26_ops.c mimo26_ops.h
+mimo26_ops.o: CFLAGS += -fno-fast-math
+tests/test_mimo26_ops.o: tests/test_mimo26_ops.c mimo26_ops.h \
+	glm53_arch_math.h
+tests/test_mimo26_ops.o: CFLAGS += -fno-fast-math
+tests/test_mimo26_ops: tests/test_mimo26_ops.o mimo26_ops.o \
+		glm53_arch_math.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+mimo26_router.o: mimo26_router.c mimo26_router.h
+mimo26_router.o: CFLAGS += -fno-fast-math
+tests/test_mimo26_router.o: tests/test_mimo26_router.c \
+	mimo26_router.h glm53_arch_math.h
+tests/test_mimo26_router.o: CFLAGS += -fno-fast-math
+tests/test_mimo26_router: tests/test_mimo26_router.o mimo26_router.o \
+		glm53_arch_math.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_mimo26_fp8.o: tests/test_mimo26_fp8.c \
+	glm53_fp8_oracle.h mimo26_architecture.h
+tests/test_mimo26_fp8: tests/test_mimo26_fp8.o glm53_fp8_oracle.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+mimo26_manifest.o: mimo26_manifest.c mimo26_manifest.h \
+	mimo26_architecture.h k3_safetensors.h k3_json.h
+tests/test_mimo26_manifest.o: tests/test_mimo26_manifest.c \
+	mimo26_manifest.h mimo26_architecture.h k3_safetensors.h
+tests/test_mimo26_manifest: tests/test_mimo26_manifest.o \
+		mimo26_manifest.o mimo26_architecture.o k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_mimo26_architecture: tests/test_mimo26_architecture.o \
+		mimo26_architecture.o k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_architecture: tests/test_glm53_architecture.o \
+		glm53_architecture.o k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_architecture_official: \
+		tests/test_glm53_architecture_official.o glm53_architecture.o \
+		glm53_manifest.o k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_engine_plan: tests/test_glm53_engine_plan.o \
+		glm53_engine_plan.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_expert_plan: tests/test_glm53_expert_plan.o \
+		glm53_expert_plan.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_expert_stream: tests/test_glm53_expert_stream.o \
+		glm53_expert_stream.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_fp8_dynamic: tests/test_glm53_fp8_dynamic.o \
+		glm53_fp8_dynamic.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_fp8_oracle: tests/test_glm53_fp8_oracle.o \
+		glm53_fp8_oracle.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_manifest: tests/test_glm53_manifest.o glm53_manifest.o \
+		k3_json.o k3_safetensors.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_official_tensor: tests/test_glm53_official_tensor.o \
+		glm53_official_tensor.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_process_memory: tests/test_glm53_process_memory.o \
+		glm53_process_memory.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_residency: tests/test_glm53_residency.o glm53_residency.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_state_oracle: tests/test_glm53_state_oracle.o \
+		glm53_state_oracle.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_static_bindings: tests/test_glm53_static_bindings.o \
+		glm53_static_bindings.o glm53_static_loader.o glm53_static_layout.o \
+		glm53_weights.o glm53_architecture.o glm53_expert_plan.o \
+		glm53_manifest.o k3_safetensors.o k3_json.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_glm53_vector_ops: tests/test_glm53_vector_ops.o glm53_vector_ops.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_glm53_kda_aux_ops: tests/test_glm53_kda_aux_ops.o glm53_kda_aux_ops.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_glm53_kda_gate_ops: tests/test_glm53_kda_gate_ops.o glm53_kda_gate_ops.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_glm53_kda_ops: tests/test_glm53_kda_ops.o glm53_kda_ops.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_glm53_mhc_ops: tests/test_glm53_mhc_ops.o glm53_mhc_ops.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_glm53_dense_ops: tests/test_glm53_dense_ops.o glm53_dense_ops.o \
+		glm53_rocm_ops.o glm53_vector_ops.o glm53_fp8_dynamic.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_glm53_phase5c: tests/test_glm53_phase5c.o glm53_phase5c.o \
+		glm53_dense_ops.o glm53_mhc_ops.o glm53_rocm_ops.o \
+		glm53_vector_ops.o glm53_fp8_dynamic.o k3_rocm_ops.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_glm53_static_layout: tests/test_glm53_static_layout.o \
+		glm53_static_layout.o glm53_weights.o glm53_architecture.o \
+		glm53_expert_plan.o glm53_manifest.o k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_weights: tests/test_glm53_weights.o glm53_weights.o \
+		glm53_architecture.o glm53_expert_plan.o glm53_manifest.o \
+		k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_phase5a_official: \
+		tests/test_glm53_phase5a_official.o glm53_weights.o \
+		glm53_expert_stream.o glm53_engine_plan.o glm53_architecture.o \
+		glm53_expert_plan.o glm53_manifest.o k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_fp8_dynamic_rocm: \
+		tests/test_glm53_fp8_dynamic_rocm.o glm53_rocm_ops.o \
+		glm53_fp8_dynamic.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_glm53_rocm_ops: tests/test_glm53_rocm_ops.o glm53_rocm_ops.o \
+		glm53_fp8_oracle.o k3_rocm_ops.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_glm53_static_loader: tests/test_glm53_static_loader.o \
+		glm53_static_loader.o k3_safetensors.o k3_json.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_glm53_phase5b_expert_official: \
+		tests/test_glm53_phase5b_expert_official.o glm53_rocm_ops.o \
+		glm53_fp8_dynamic.o glm53_weights.o glm53_expert_stream.o \
+		glm53_architecture.o glm53_expert_plan.o glm53_manifest.o \
+		k3_safetensors.o k3_json.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_glm53_phase5b_loader_official: \
+		tests/test_glm53_phase5b_loader_official.o glm53_static_loader.o \
+		glm53_static_bindings.o glm53_static_layout.o glm53_phase5c.o \
+		glm53_dense_ops.o glm53_mhc_ops.o glm53_rocm_ops.o \
+		glm53_vector_ops.o glm53_fp8_dynamic.o glm53_process_memory.o \
+		glm53_weights.o glm53_architecture.o glm53_expert_plan.o \
+		glm53_manifest.o k3_rocm_ops.o k3_safetensors.o k3_json.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_glm53_phase5c_mhc_official: \
+		tests/test_glm53_phase5c_mhc_official.o glm53_mhc_ops.o \
+		glm53_vector_ops.o glm53_process_memory.o glm53_weights.o \
+		glm53_architecture.o glm53_expert_plan.o glm53_manifest.o \
+		k3_safetensors.o k3_json.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_glm53_official_components: \
+		tests/test_glm53_official_components.o glm53_arch_math.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_official_kda: tests/test_glm53_official_kda.o \
+		glm53_state_oracle.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+tests/test_glm53_official_projection: \
+		tests/test_glm53_official_projection.o glm53_rocm_ops.o \
+		glm53_fp8_oracle.o glm53_official_tensor.o glm53_manifest.o \
+		k3_safetensors.o k3_json.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+
 tests/test_k3_bundle: tests/test_k3_bundle.o k3_bundle.o k3_json.o k3_sha256.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
@@ -304,6 +792,84 @@ tests/test_k31_model: tests/test_k31_model.o k31_model.o k3_json.o
 
 tests/test_k3_expert_cache: tests/test_k3_expert_cache.o k3_expert_cache.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+tests/test_mimo26_next_use_cache.o: tests/test_mimo26_next_use_cache.c k3_expert_cache.h
+tests/test_mimo26_next_use_cache: tests/test_mimo26_next_use_cache.o k3_expert_cache.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+tests/test_mimo26_expert_group_plan.o: tests/test_mimo26_expert_group_plan.c mimo26_expert_group_plan.h k3_expert_cache.h
+tests/test_mimo26_expert_group_plan: tests/test_mimo26_expert_group_plan.o k3_expert_cache.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+.PHONY: test-mimo26-expert-group-plan
+test-mimo26-expert-group-plan: tests/test_mimo26_expert_group_plan
+	./tests/test_mimo26_expert_group_plan
+
+.PHONY: test-mimo26-next-use-cache
+test-mimo26-next-use-cache: tests/test_mimo26_next_use_cache
+	./tests/test_mimo26_next_use_cache
+
+tests/test_mimo26_server_options: tests/test_mimo26_server_options.c \
+	mimo26_server_options.h mimo26_gpu_worker.h
+	$(CC) $(CFLAGS) -I. -o $@ $<
+tests/test_mimo26_finish_reason: tests/test_mimo26_finish_reason.c \
+	mimo26_server_slot.c mimo26_server_slot.h
+	$(CC) $(CFLAGS) -I. -o $@ tests/test_mimo26_finish_reason.c mimo26_server_slot.c
+
+# Compile the actual server callback into a CPU-only socket regression;
+# unused GPU entry points are discarded, not linked or initialized.
+tests/mimo26_server_prefill_gate: tests/mimo26_server_prefill_gate.cu \
+	mimo26_server.cu mimo26_server_options.h mimo26_server_slot.h \
+	mimo26_gpu_worker.h mimo26_tokenizer.h k3_json.h mimo26_server_slot.c k3_json.c
+	$(CXX) -O1 -g -ffunction-sections -fdata-sections -I. -x c++ \
+		tests/mimo26_server_prefill_gate.cu mimo26_server_slot.c k3_json.c \
+		-Wl,--gc-sections -o $@
+
+.PHONY: test-mimo26-server-options
+test-mimo26-server-options: tests/test_mimo26_server_options tests/mimo26_server_prefill_gate
+	./tests/test_mimo26_server_options
+	./tests/mimo26_server_prefill_gate
+
+# Request-option parsing only: the real parse_chat, no GPU and no sockets.
+# Unlike the transport gate, this one actually calls parse_chat, so the JSON
+# reader cannot be discarded by --gc-sections and has to be linked in.
+tests/mimo26_chat_options_gate: tests/mimo26_chat_options_gate.cu mimo26_server.cu \
+	mimo26_server_options.h mimo26_server_slot.h mimo26_gpu_worker.h mimo26_tokenizer.h \
+	k3_json.h k3_json.c
+	$(CXX) -O1 -g -ffunction-sections -fdata-sections -pthread -I. -x c++ $< \
+		-x c k3_json.c -Wl,--gc-sections -o $@
+
+.PHONY: test-mimo26-chat-options
+test-mimo26-chat-options: tests/mimo26_chat_options_gate
+	./tests/mimo26_chat_options_gate
+
+tests/mimo26_transport_gate: tests/mimo26_transport_gate.cu mimo26_server.cu \
+	mimo26_server_options.h mimo26_server_slot.h mimo26_gpu_worker.h mimo26_tokenizer.h k3_json.h
+	$(CXX) -O1 -g -ffunction-sections -fdata-sections -pthread -I. -x c++ $< \
+		-Wl,--gc-sections -o $@
+
+.PHONY: test-mimo26-transport
+test-mimo26-transport: tests/mimo26_transport_gate
+	./tests/mimo26_transport_gate
+
+tests/mimo26_server_controls_gate: tests/mimo26_server_controls_gate.cu mimo26_server.cu \
+	mimo26_server_options.h mimo26_server_slot.h mimo26_gpu_worker.h mimo26_tokenizer.h k3_json.h \
+	mimo26_server_slot.c k3_json.c
+	$(CXX) -O1 -g -ffunction-sections -fdata-sections -I. -x c++ $< \
+		mimo26_server_slot.c k3_json.c -Wl,--gc-sections -o $@
+
+.PHONY: test-mimo26-server-controls
+test-mimo26-server-controls: tests/mimo26_server_controls_gate
+	./tests/mimo26_server_controls_gate
+
+tests/mimo26_server_retention_gate: tests/mimo26_server_retention_gate.cu mimo26_server.cu \
+	mimo26_server_options.h mimo26_server_slot.h mimo26_gpu_worker.h mimo26_tokenizer.h k3_json.h \
+	mimo26_server_slot.c
+	$(CXX) -O1 -g -ffunction-sections -fdata-sections -I. -x c++ $< \
+		mimo26_server_slot.c -Wl,--gc-sections -o $@
+
+.PHONY: test-mimo26-server-retention
+test-mimo26-server-retention: tests/mimo26_server_retention_gate
+	./tests/mimo26_server_retention_gate
 
 tests/test_k3_json: tests/test_k3_json.o k3_json.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
@@ -360,6 +926,128 @@ $(ROCM_TESTS): %: %.o libmoonshine.a
 
 bench-k31-dsa: tools/bench_k31_dsa
 	./tools/bench_k31_dsa
+test-glm53-phase2: $(GLM53_CPU_TESTS)
+	./tests/test_glm53_manifest
+	./tests/test_glm53_expert_plan
+	./tests/test_glm53_residency
+
+test-glm53-phase3: tests/test_glm53_fp8_oracle $(GLM53_ROCM_TESTS)
+	./tests/test_glm53_fp8_oracle
+	./tests/test_glm53_rocm_ops
+
+test-glm53-phase4: tests/test_glm53_arch_math \
+		tests/test_glm53_architecture tests/test_glm53_official_tensor \
+		tests/test_glm53_state_oracle
+	./tests/test_glm53_arch_math
+	./tests/test_glm53_architecture
+	./tests/test_glm53_official_tensor
+	./tests/test_glm53_state_oracle
+
+test-glm53-phase5a: tests/test_glm53_engine_plan \
+		tests/test_glm53_expert_stream tests/test_glm53_weights
+	./tests/test_glm53_engine_plan
+	./tests/test_glm53_expert_stream
+	./tests/test_glm53_weights
+
+test-glm53-phase5a-official: tests/test_glm53_phase5a_official
+	@test -n "$(GLM53_OFFICIAL_ROOT)" || \
+		(echo "set GLM53_OFFICIAL_ROOT to the verified official artifact" >&2; exit 2)
+	./tests/test_glm53_phase5a_official "$(GLM53_OFFICIAL_ROOT)"
+
+test-glm53-phase5d-kda: tests/test_glm53_kda_aux_ops \
+		tests/test_glm53_kda_gate_ops tests/test_glm53_kda_ops
+	./tests/test_glm53_kda_aux_ops
+	./tests/test_glm53_kda_gate_ops
+	./tests/test_glm53_kda_ops
+
+test-glm53-phase5c: tests/test_glm53_static_bindings \
+		tests/test_glm53_vector_ops tests/test_glm53_mhc_ops \
+		tests/test_glm53_dense_ops tests/test_glm53_phase5c
+	./tests/test_glm53_static_bindings
+	./tests/test_glm53_vector_ops
+	./tests/test_glm53_mhc_ops
+	./tests/test_glm53_dense_ops
+	./tests/test_glm53_phase5c
+
+test-glm53-phase5c-official: tests/test_glm53_phase5c_mhc_official
+	@test -n "$(GLM53_OFFICIAL_ROOT)" || \
+		(echo "set GLM53_OFFICIAL_ROOT to the verified official artifact" >&2; exit 2)
+	./tests/test_glm53_phase5c_mhc_official "$(GLM53_OFFICIAL_ROOT)"
+
+test-glm53-phase5b: tests/test_glm53_fp8_dynamic \
+		tests/test_glm53_fp8_dynamic_rocm tests/test_glm53_process_memory \
+		tests/test_glm53_static_layout tests/test_glm53_static_loader
+	./tests/test_glm53_fp8_dynamic
+	./tests/test_glm53_fp8_dynamic_rocm
+	./tests/test_glm53_process_memory
+	./tests/test_glm53_static_layout
+	./tests/test_glm53_static_loader
+
+test-glm53-phase5b-official: tests/test_glm53_phase5b_expert_official \
+		tests/test_glm53_phase5b_loader_official
+	@test -n "$(GLM53_OFFICIAL_ROOT)" || \
+		(echo "set GLM53_OFFICIAL_ROOT to the verified official artifact" >&2; exit 2)
+	./tests/test_glm53_phase5b_expert_official "$(GLM53_OFFICIAL_ROOT)"
+	./tests/test_glm53_phase5b_loader_official "$(GLM53_OFFICIAL_ROOT)"
+
+test-glm53-phase5b-full: tests/test_glm53_phase5b_loader_official
+	@test -n "$(GLM53_OFFICIAL_ROOT)" || \
+		(echo "set GLM53_OFFICIAL_ROOT to the verified official artifact" >&2; exit 2)
+	./tests/test_glm53_phase5b_loader_official "$(GLM53_OFFICIAL_ROOT)" full
+
+# Phase-4 goldens are derived from official zai-org/GLM-5.3-Flash weights, so the
+# repository carries their provenance and digests but not their bytes. These two
+# regenerate from the caller's own checkpoint; both generators refuse a source
+# whose identity does not match the pin.
+tests/fixtures/glm53_phase4_components.bin: \
+		tests/generate_glm53_phase4_component_fixture.py
+	@test -n "$(GLM53_OFFICIAL_ROOT)" || \
+		(echo "set GLM53_OFFICIAL_ROOT to regenerate $@" >&2; exit 2)
+	$(PYTHON) $< "$(GLM53_OFFICIAL_ROOT)" $@ \
+		tests/fixtures/glm53_phase4_components.json
+
+tests/fixtures/glm53_phase4_kda_v1.bin: \
+		tests/generate_glm53_phase4_kda_fixture.py
+	@test -n "$(GLM53_OFFICIAL_ROOT)" || \
+		(echo "set GLM53_OFFICIAL_ROOT to regenerate $@" >&2; exit 2)
+	$(PYTHON) $< "$(GLM53_OFFICIAL_ROOT)" --output $@
+
+test-glm53-phase4-official: tests/test_glm53_architecture_official \
+		tests/test_glm53_official_components tests/test_glm53_official_kda \
+		tests/test_glm53_official_projection \
+		tests/verify_glm53_phase4_reference.py \
+		tests/fixtures/glm53_phase4_reference.json \
+		tests/fixtures/glm53_phase4_kda_v1.json \
+		tests/fixtures/glm53_phase4_kda_v1.bin \
+		tests/fixtures/glm53_phase4_components.json \
+		tests/fixtures/glm53_phase4_components.bin
+	@test -n "$(GLM53_OFFICIAL_ROOT)" || \
+		(echo "set GLM53_OFFICIAL_ROOT to the verified official artifact" >&2; exit 2)
+	$(PYTHON) tests/verify_glm53_phase4_reference.py \
+		"$(GLM53_OFFICIAL_ROOT)" \
+		tests/fixtures/glm53_phase4_reference.json \
+		tests/fixtures/glm53_official_projection_f32.bin \
+		tests/fixtures/glm53_phase4_kda_v1.json \
+		tests/fixtures/glm53_phase4_kda_v1.bin \
+		tests/fixtures/glm53_phase4_components.json \
+		tests/fixtures/glm53_phase4_components.bin
+	./tests/test_glm53_architecture_official "$(GLM53_OFFICIAL_ROOT)"
+	./tests/test_glm53_official_components \
+		tests/fixtures/glm53_phase4_components.bin
+	./tests/test_glm53_official_kda \
+		tests/fixtures/glm53_phase4_kda_v1.bin
+	@# The projection golden has no in-tree generator: nothing here reproduces the
+	@# reduction order its digest pins. Skip loudly rather than fail the other
+	@# four checks, and name what a reconstruction has to match.
+	@if [ -f tests/fixtures/glm53_official_projection_f32.bin ]; then \
+		./tests/test_glm53_official_projection "$(GLM53_OFFICIAL_ROOT)" \
+			tests/fixtures/glm53_official_projection_f32.bin; \
+	else \
+		echo "SKIP test_glm53_official_projection: golden absent"; \
+		echo "     derived from official weights, so not committed, and no"; \
+		echo "     generator in this tree reproduces it -- see"; \
+		echo "     docs/glm53-phase4-goldens.md"; \
+	fi
 
 test-cache-analyzer:
 	PYTHONDONTWRITEBYTECODE=1 \
@@ -384,6 +1072,270 @@ test-mzg-transcoder:
 	PYTHONDONTWRITEBYTECODE=1 \
 		$(PYTHON) -m unittest -v tests/test_transcode_mzg.py
 
+test-mimo26-schema: tools/mimo26_dump_rope tools/mimo26_dump_ops tests/test_mimo26_architecture \
+		tests/test_mimo26_manifest tests/test_mimo26_server_slot
+	./tests/test_mimo26_architecture
+	./tests/test_mimo26_manifest
+	./tests/test_mimo26_server_slot
+	./tests/test_mimo26_fp8
+	./tests/test_mimo26_router
+	./tests/test_mimo26_ops
+	./tests/test_mimo26_attention
+	./tests/test_mimo26_kv
+	./tests/test_mimo26_expert_cache
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/test_mimo26_rope_vs_torch.py
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/test_mimo26_ops_vs_reference.py
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/test_mimo26_audit.py
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/test_mimo26_tokenizer.py
+
+# Full-metadata audit against a real checkpoint. Header-only and read-only;
+# requires MIMO26_ROOT to point at an official download.
+test-mimo26-checkpoint: tests/test_mimo26_official \
+		tools/mimo26_dump_weights tests/test_mimo26_tokenizer_c
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/audit_mimo26_checkpoint.py \
+		$(MIMO26_ROOT)
+	./tests/test_mimo26_official $(MIMO26_ROOT)
+	MIMO26_ROOT=$(MIMO26_ROOT) PYTHONDONTWRITEBYTECODE=1 \
+		$(PYTHON) tests/test_mimo26_tokenizer.py
+	MIMO26_ROOT=$(MIMO26_ROOT) ./tests/test_mimo26_tokenizer_c
+	MIMO26_ROOT=$(MIMO26_ROOT) PYTHONDONTWRITEBYTECODE=1 \
+		$(PYTHON) tests/test_mimo26_weights_vs_reference.py
+
+# Layer parity against the reference. Needs a checkpoint and a fixture
+# from tools/mimo26_reference_layer.py, so it is separate from the
+# checkpoint schema target.
+mimo26-layer-parity: tests/test_mimo26_layer_parity
+	@for layer in 0 1 5; do \
+	  PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tools/mimo26_reference_layer.py \
+	    --root $(MIMO26_ROOT) --layer $$layer --tokens 1 \
+	    --out mimo26-layer$$layer.bin >/dev/null 2>&1 || exit 1; \
+	  ./tests/test_mimo26_layer_parity $(MIMO26_ROOT) \
+	    mimo26-layer$$layer.bin || exit 1; \
+	  rm -f mimo26-layer$$layer.bin; \
+	done
+
+# M4 operational qualification: determinism, cache-independence, rollback,
+# reset, fault containment and the memory guard, against a real checkpoint.
+# About a minute per decoded token on CPU, so it is not part of test-mimo26.
+mimo26-qualify: tests/test_mimo26_qualify
+	MIMO26_ROOT=$(MIMO26_ROOT) ./tests/test_mimo26_qualify
+
+tools/mimo26_eval.o: tools/mimo26_eval.c mimo26_worker.h
+tools/mimo26_eval.o: CFLAGS += -fno-fast-math
+tools/mimo26_eval: tools/mimo26_eval.o \
+		mimo26_worker.o mimo26_layer.o mimo26_weights.o mimo26_kv.o \
+		mimo26_manifest.o mimo26_architecture.o mimo26_attention.o \
+		mimo26_ops.o mimo26_router.o k3_expert_cache.o \
+		glm53_fp8_oracle.o k3_safetensors.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+tests/test_mimo26_gpu_mxfp4.o: tests/test_mimo26_gpu_mxfp4.cu \
+	k3_rocm_ops.h k3_safetensors.h mimo26_weights.h mimo26_ops.h \
+	mimo26_manifest.h mimo26_architecture.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/test_mimo26_gpu_mxfp4: tests/test_mimo26_gpu_mxfp4.o \
+		k3_rocm_ops.o mimo26_weights.o mimo26_manifest.o \
+		mimo26_architecture.o mimo26_attention.o mimo26_ops.o \
+		mimo26_router.o glm53_fp8_oracle.o k3_safetensors.o k3_json.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+
+mimo26_rocm_ops.o: mimo26_rocm_ops.cu mimo26_rocm_ops.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/test_mimo26_gpu_ops.o: tests/test_mimo26_gpu_ops.cu \
+	mimo26_rocm_ops.h k3_rocm_ops.h mimo26_ops.h mimo26_router.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/test_mimo26_gpu_ops: tests/test_mimo26_gpu_ops.o \
+		mimo26_rocm_ops.o k3_rocm_ops.o mimo26_ops.o mimo26_router.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+
+tests/test_mimo26_gpu_attention.o: tests/test_mimo26_gpu_attention.cu \
+	mimo26_rocm_ops.h mimo26_attention.h mimo26_ops.h mimo26_architecture.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/test_mimo26_gpu_attention: tests/test_mimo26_gpu_attention.o \
+		mimo26_rocm_ops.o mimo26_attention.o mimo26_ops.o \
+		mimo26_architecture.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_mimo26_attention_deep.o: tests/test_mimo26_attention_deep.cu \
+		mimo26_attention.h mimo26_gpu_worker.h \
+		mimo26_rocm_ops.h mimo26_ops.h mimo26_architecture.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/test_mimo26_kv_footprint.o: tests/test_mimo26_kv_footprint.cu \
+		mimo26_attention.h mimo26_gpu_worker.h mimo26_architecture.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/test_mimo26_kv_footprint: tests/test_mimo26_kv_footprint.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_mimo26_attention_deep: tests/test_mimo26_attention_deep.o \
+		mimo26_rocm_ops.o mimo26_attention.o mimo26_ops.o \
+		mimo26_architecture.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+
+# G3: MiMo attention on the GPU, bit-exact against the CPU oracle.
+mimo26-gpu-attention: tests/test_mimo26_gpu_attention
+	./tests/test_mimo26_gpu_attention
+
+# G2: MiMo's own GPU primitives, where its contracts diverge from K3's.
+mimo26-gpu-ops: tests/test_mimo26_gpu_ops
+	./tests/test_mimo26_gpu_ops
+
+tools/mimo26_gpu_bench.o: tools/mimo26_gpu_bench.cu k3_rocm_ops.h
+	$(HIPCC) $(HIPFLAGS) -I. -c -o $@ $<
+tools/mimo26_gpu_bench: tools/mimo26_gpu_bench.o k3_rocm_ops.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+
+mimo26_rocm_layer.o: mimo26_rocm_layer.cu mimo26_rocm_layer.h \
+	mimo26_rocm_ops.h k3_rocm_ops.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/test_mimo26_gpu_layer.o: tests/test_mimo26_gpu_layer.cu \
+	mimo26_rocm_layer.h mimo26_rocm_ops.h mimo26_layer.h mimo26_weights.h \
+	mimo26_kv.h mimo26_manifest.h mimo26_attention.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/test_mimo26_gpu_layer: tests/test_mimo26_gpu_layer.o \
+		mimo26_rocm_layer.o mimo26_rocm_ops.o k3_rocm_ops.o \
+		mimo26_layer.o mimo26_weights.o mimo26_kv.o mimo26_manifest.o \
+		mimo26_architecture.o mimo26_attention.o mimo26_ops.o \
+		mimo26_router.o glm53_fp8_oracle.o k3_safetensors.o k3_json.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+
+# G4: a whole layer on the GPU against the CPU layer, on real weights.
+mimo26-gpu-layer: tests/test_mimo26_gpu_layer
+	MIMO26_ROOT=$(MIMO26_ROOT) ./tests/test_mimo26_gpu_layer
+
+mimo26_gpu_worker.o: mimo26_gpu_worker.cu mimo26_gpu_worker.h mimo26_expert_group_plan.h \
+	mimo26_rocm_layer.h mimo26_rocm_ops.h k3_rocm_ops.h mimo26_weights.h \
+	mimo26_kv.h mimo26_manifest.h mimo26_attention.h k3_expert_cache.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tools/mimo26_gpu_run.o: tools/mimo26_gpu_run.cu mimo26_gpu_worker.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tools/mimo26_gpu_run: tools/mimo26_gpu_run.o mimo26_gpu_worker.o \
+		mimo26_rocm_layer.o mimo26_rocm_ops.o k3_rocm_ops.o \
+		mimo26_weights.o mimo26_kv.o mimo26_manifest.o \
+		mimo26_architecture.o mimo26_attention.o mimo26_ops.o \
+		mimo26_router.o glm53_fp8_oracle.o k3_safetensors.o k3_json.o \
+		k3_io_uring.o k3_expert_cache.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+
+tests/test_mimo26_gpu_qualify.o: tests/test_mimo26_gpu_qualify.cu \
+	mimo26_gpu_worker.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/test_mimo26_gpu_qualify: tests/test_mimo26_gpu_qualify.o \
+		mimo26_gpu_worker.o mimo26_rocm_layer.o mimo26_rocm_ops.o \
+		k3_rocm_ops.o mimo26_weights.o mimo26_kv.o mimo26_manifest.o \
+		mimo26_architecture.o mimo26_attention.o mimo26_ops.o \
+		mimo26_router.o glm53_fp8_oracle.o k3_safetensors.o k3_json.o \
+		k3_io_uring.o k3_expert_cache.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+
+# GPU operational qualification, mirroring mimo26-qualify on the CPU.
+mimo26-gpu-qualify: tests/test_mimo26_gpu_qualify
+	MIMO26_ROOT=$(MIMO26_ROOT) ./tests/test_mimo26_gpu_qualify
+
+mimo26_server.o: mimo26_server.cu mimo26_gpu_worker.h \
+	mimo26_server_slot.h mimo26_server_options.h mimo26_tokenizer.h k3_json.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tools/mimo26_server: mimo26_server.o mimo26_server_slot.o \
+		mimo26_tokenizer.o mimo26_gpu_worker.o mimo26_rocm_layer.o \
+		mimo26_rocm_ops.o k3_rocm_ops.o mimo26_weights.o mimo26_kv.o \
+		mimo26_manifest.o mimo26_architecture.o mimo26_attention.o \
+		mimo26_ops.o mimo26_router.o glm53_fp8_oracle.o \
+		k3_safetensors.o k3_json.o k3_io_uring.o k3_expert_cache.o \
+		k3_prefix_reuse.o k3_prefix_bundle.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS) $(ICU_LDLIBS)
+
+# Sustained mixed-request soak against a running server. Start the server
+# first; this drives it and checks health, refusals and residency after.
+mimo26-soak:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/soak_mimo26_server.py \
+	  $(MIMO26_SERVER_URL) --seconds $(MIMO26_SOAK_SECONDS)
+
+tools/mimo26_context_gate.o: tools/mimo26_context_gate.cu \
+	mimo26_gpu_worker.h mimo26_tokenizer.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tools/mimo26_context_gate: tools/mimo26_context_gate.o mimo26_gpu_worker.o \
+		mimo26_tokenizer.o mimo26_rocm_layer.o mimo26_rocm_ops.o \
+		k3_rocm_ops.o mimo26_weights.o mimo26_kv.o mimo26_manifest.o \
+		mimo26_architecture.o mimo26_attention.o mimo26_ops.o \
+		mimo26_router.o glm53_fp8_oracle.o k3_safetensors.o k3_json.o \
+		k3_io_uring.o k3_expert_cache.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS) $(ICU_LDLIBS)
+
+# Fresh, isolated builds are required when changing the shared scratch ABI.
+MIMO26_EM_GATE_OBJS = mimo26_gpu_worker.o mimo26_tokenizer.o \
+	mimo26_rocm_layer.o mimo26_rocm_ops.o k3_rocm_ops.o mimo26_weights.o \
+	mimo26_kv.o mimo26_manifest.o mimo26_architecture.o mimo26_attention.o \
+	mimo26_ops.o mimo26_router.o glm53_fp8_oracle.o k3_safetensors.o \
+	k3_json.o k3_io_uring.o k3_expert_cache.o
+tests/mimo26_expert_major_gate.o: tests/mimo26_expert_major_gate.cu mimo26_gpu_worker.h mimo26_tokenizer.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/test_mimo26_worker_overrides.o: tests/test_mimo26_worker_overrides.cu mimo26_gpu_worker.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/test_mimo26_worker_overrides: tests/test_mimo26_worker_overrides.o $(MIMO26_EM_GATE_OBJS)
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS) $(ICU_LDLIBS)
+tests/mimo26_expert_major_projection_guard.o: tests/mimo26_expert_major_projection_guard.cu mimo26_rocm_layer.h k3_rocm_ops.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/mimo26_expert_major_gate: tests/mimo26_expert_major_gate.o $(MIMO26_EM_GATE_OBJS)
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS) $(ICU_LDLIBS)
+tests/mimo26_expert_major_repeat_gate: tests/mimo26_expert_major_gate.o $(MIMO26_EM_GATE_OBJS)
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS) $(ICU_LDLIBS)
+tests/mimo26_allocation_guard.o: tests/mimo26_allocation_guard.cu
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/mimo26_allocation_guard_gate.o: tests/mimo26_allocation_guard_gate.cu
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/mimo26_allocation_guard_gate: tests/mimo26_allocation_guard_gate.o tests/mimo26_allocation_guard.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ -Wl,--wrap=hipMalloc -Wl,--wrap=hipFree -Wl,--wrap=hipMemcpy $(ROCM_LDLIBS)
+tests/mimo26_expert_major_guarded_gate: tests/mimo26_expert_major_gate.o tests/mimo26_allocation_guard.o $(MIMO26_EM_GATE_OBJS)
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ -Wl,--wrap=hipMalloc -Wl,--wrap=hipFree -Wl,--wrap=hipMemcpy $(ROCM_LDLIBS) $(ICU_LDLIBS)
+tests/mimo26_expert_major_projection_gate: tests/mimo26_expert_major_gate.o tests/mimo26_expert_major_projection_guard.o $(MIMO26_EM_GATE_OBJS)
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ -Wl,--wrap=k3_rocm_mxfp4_gemm_bf16 -Wl,--wrap=k3_rocm_mxfp4_gemv_rows_bf16 -Wl,--wrap=mimo26_rocm_layer_prefill $(ROCM_LDLIBS) $(ICU_LDLIBS)
+tests/replay_mimo26_projection.o: tests/replay_mimo26_projection.cu k3_rocm_ops.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/replay_mimo26_projection: tests/replay_mimo26_projection.o k3_rocm_ops.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/mimo26_mxfp4_oracle_sweep.o: tests/mimo26_mxfp4_oracle_sweep.cu k3_rocm_ops.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/mimo26_mxfp4_oracle_sweep: tests/mimo26_mxfp4_oracle_sweep.o k3_rocm_ops.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+tests/test_k3_mxfp4_gemv_rows.o: tests/test_k3_mxfp4_gemv_rows.cu k3_rocm_ops.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tests/test_k3_mxfp4_gemv_rows: tests/test_k3_mxfp4_gemv_rows.o k3_rocm_ops.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+
+# The context ladder: prefill latency, retrieval, replay and memory per rung.
+mimo26-context-gate: tools/mimo26_context_gate
+	./tools/mimo26_context_gate $(MIMO26_ROOT) --depths $(MIMO26_DEPTHS)
+
+tools/mimo26_gpu_eval.o: tools/mimo26_gpu_eval.cu mimo26_gpu_worker.h
+	$(HIPCC) $(HIPFLAGS) -fno-fast-math -I. -c -o $@ $<
+tools/mimo26_gpu_eval: tools/mimo26_gpu_eval.o mimo26_gpu_worker.o \
+		mimo26_rocm_layer.o mimo26_rocm_ops.o k3_rocm_ops.o \
+		mimo26_weights.o mimo26_kv.o mimo26_manifest.o \
+		mimo26_architecture.o mimo26_attention.o mimo26_ops.o \
+		mimo26_router.o glm53_fp8_oracle.o k3_safetensors.o k3_json.o \
+		k3_io_uring.o k3_expert_cache.o
+	$(HIPCC) $(HIPFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+
+# The whole GPU gate set, in dependency order.
+mimo26-gpu: mimo26-gpu-ops mimo26-gpu-attention mimo26-gpu-mxfp4 \
+	mimo26-gpu-layer mimo26-gpu-qualify
+
+# G1: the MiMo expert path on the GPU against the verified CPU dequantizer.
+mimo26-gpu-mxfp4: tests/test_mimo26_gpu_mxfp4
+	MIMO26_ROOT=$(MIMO26_ROOT) ./tests/test_mimo26_gpu_mxfp4
+
+# M4 functional-quality gate. Teacher-forced over the corpus frozen in
+# tests/mimo26_eval_spec.json, scored against thresholds frozen with it.
+# Hours on CPU at roughly a minute per token.
+mimo26-eval: tools/mimo26_eval
+	MIMO26_ROOT=$(MIMO26_ROOT) PYTHONDONTWRITEBYTECODE=1 \
+	  $(PYTHON) tests/mimo26_eval_tokens.py > mimo26-eval-tokens.txt
+	./tools/mimo26_eval $(MIMO26_ROOT) < mimo26-eval-tokens.txt \
+	  > mimo26-eval.jsonl
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/score_mimo26_eval.py \
+	  mimo26-eval.jsonl
+
+mimo26-budget:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tools/mimo26_budget.py \
+		$(MIMO26_ROOT)
+
 test-mzg2-bundle:
 	PYTHONDONTWRITEBYTECODE=1 \
 		$(PYTHON) -m unittest -v tests/test_build_mzg2_bundle.py
@@ -399,7 +1351,15 @@ test-placement:
 test-k31-bundle-roundtrip: tests/test_k3_bundle
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) tests/test_k31_bundle_roundtrip.py
 
-test-cpu: $(PORTABLE_CPU_TESTS) test-cache-analyzer \
+# Portable: no ROCm, no hipcc, no weights. Anything linked with $(HIPCC) belongs
+# in `test` or a phase target, not here -- test_glm53_static_bindings was in this
+# list and pulled in glm53_static_loader.o, which is a .cu. That built fine on a
+# developer box with ROCm installed and failed in CI, which is the only place the
+# claim "portable" was ever actually tested.
+test-cpu: $(PORTABLE_CPU_TESTS) test-glm53-phase4 test-glm53-phase5a \
+		tests/test_glm53_fp8_dynamic tests/test_glm53_process_memory \
+		tests/test_glm53_static_layout \
+		test-cache-analyzer \
 	test-prefill-screen-analyzer test-anchor-recovery-analyzer \
 	test-mzg2-bundle test-k31-checkpoint test-placement test-k31-bundle-roundtrip
 	./tests/test_k3_expert_cache
@@ -418,6 +1378,9 @@ test-cpu: $(PORTABLE_CPU_TESTS) test-cache-analyzer \
 	./tests/test_k3_json
 	./tests/test_k3_openai
 	./tests/test_k3_server_slot
+	./tests/test_glm53_fp8_dynamic
+	./tests/test_glm53_process_memory
+	./tests/test_glm53_static_layout
 
 test-decode-cache-replay: tests/test_k3_expert_cache
 	@test -n "$(MOONSHINE_DECODE_TRACE)" || \
@@ -451,6 +1414,11 @@ test-decode-cache-replay: tests/test_k3_expert_cache
 		{ echo "error: capacity sweep must include source capacity"; exit 2; }
 
 test: \
+	test-glm53-phase4 \
+	test-glm53-phase5a \
+	test-glm53-phase5b \
+	test-glm53-phase5c \
+	test-glm53-phase5d-kda \
 	tests/test_k3_expert_cache \
 	tests/test_k31_dsa_rocm \
 	tests/test_k3_prefix_reuse \
@@ -586,4 +1554,11 @@ clean:
 		tools/transcode_mzg2_layer tools/transcode_mzg2_layer.o \
 		tools/bench_k31_dsa tools/bench_k31_dsa.o \
 		tools/screen_static_q8 tools/screen_static_q8.o \
-		$(K3_OBJS) tests/*.o $(ALL_TESTS)
+		$(K3_OBJS) $(GLM53_OBJS) tests/*.o $(ALL_TESTS)
+
+mimo26_tokenizer.o: mimo26_tokenizer.c mimo26_tokenizer.h k3_json.h
+tests/test_mimo26_tokenizer_c.o: tests/test_mimo26_tokenizer_c.c \
+	mimo26_tokenizer.h
+tests/test_mimo26_tokenizer_c: tests/test_mimo26_tokenizer_c.o \
+		mimo26_tokenizer.o k3_json.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS) $(ICU_LDLIBS)

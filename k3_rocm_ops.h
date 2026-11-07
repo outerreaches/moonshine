@@ -51,9 +51,20 @@ bool k3_rocm_mxfp4_gemv_bf16(void       *output,
                              void       *stream);
 
 /*
- * Token-row batch variants preserve the GEMV reduction order independently
- * for every row. Inputs are [vector_count, columns] and outputs are
- * [vector_count, rows]; weights are shared.
+ * Execute the unchanged one-vector kernel on a two-dimensional grid.
+ * This preserves its arithmetic for every input row. It amortizes launches,
+ * but does not explicitly reuse weight loads between vector blocks.
+ */
+bool k3_rocm_mxfp4_gemv_rows_bf16(void *output, const void *packed,
+                                 const void *scales, const void *input,
+                                 uint32_t vector_count, uint32_t rows,
+                                 uint32_t columns, void *stream);
+
+/*
+ * Weight-reuse tiled batch. Inputs are [vector_count, columns], outputs
+ * [vector_count, rows]. NOT bit-exact to GEMV for all real inputs: a captured
+ * MiMo down projection differs by one BF16 step. Use gemv_rows for a strict
+ * GEMV-equivalence contract until tiled arithmetic is separately repaired.
  */
 bool k3_rocm_mxfp4_gemm_bf16(void       *output,
                              const void *packed,
@@ -65,8 +76,8 @@ bool k3_rocm_mxfp4_gemm_bf16(void       *output,
                              void       *stream);
 
 /*
- * Exact-shape tuning entry points. These retain the production reduction
- * order while selecting a 16-, 32-, or 64-vector weight-reuse tile.
+ * Shape tuning entry points selecting a 16-, 32-, or 64-vector weight-reuse
+ * tile. The MXFP4 tiled path has the same equality caveat as gemm above.
  */
 bool k3_rocm_mxfp4_gemm_tiled_bf16(
         void       *output,

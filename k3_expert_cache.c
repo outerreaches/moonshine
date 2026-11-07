@@ -249,6 +249,84 @@ bool k3_expert_cache_plan(k3_expert_cache *cache,
     return true;
 }
 
+bool k3_expert_cache_plan_next_use(
+    k3_expert_cache *cache, uint16_t layer, const uint16_t *expert_ids,
+    uint16_t expert_count, const uint32_t *next_use, uint16_t id_count,
+    k3_expert_cache_access *accesses, char *error, size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (!cache || layer >= cache->layer_count || !expert_ids || !expert_count ||
+        expert_count > cache->capacity || !next_use || !id_count || !accesses ||
+        cache->pending[layer].active) {
+        k3_cache_error(error, error_size, "invalid next-use plan or pending layer");
+        return false;
+    }
+    for (uint16_t i = 0; i < expert_count; ++i) {
+        if (expert_ids[i] >= id_count) {
+            k3_cache_error(error, error_size, "next-use expert ID out of range");
+            return false;
+        }
+        for (uint16_t j = 0; j < i; ++j) if (expert_ids[i] == expert_ids[j]) {
+            k3_cache_error(error, error_size, "duplicate next-use expert ID");
+            return false;
+        }
+    }
+    const k3_cache_entry *current = k3_cache_layer(cache->entries, cache, layer);
+    k3_cache_entry *next = k3_cache_layer(cache->pending_entries, cache, layer);
+    uint16_t count = cache->counts[layer], hits = 0, admissions = 0, evictions = 0;
+    for (uint16_t i = 0; i < count; ++i) if (current[i].expert >= id_count) {
+        k3_cache_error(error, error_size, "resident ID outside next-use table");
+        return false;
+    }
+    memcpy(next, current, (size_t)count * sizeof *next);
+    for (uint16_t rank = 0; rank < expert_count; ++rank) {
+        int old = k3_cache_find(current, cache->counts[layer], expert_ids[rank]);
+        accesses[rank] = (k3_expert_cache_access){
+            .hit = old >= 0, .admit = old < 0,
+            .source_slot = old >= 0 ? k3_cache_global_slot(cache, layer, current[old].slot) : K3_EXPERT_CACHE_NO_SLOT,
+            .destination_slot = K3_EXPERT_CACHE_NO_SLOT};
+        if (old >= 0) { ++hits; continue; }
+        uint16_t slot = 0;
+        if (count == cache->capacity) {
+            int victim = -1;
+            for (uint16_t i = 0; i < count; ++i) {
+                bool selected = false;
+                for (uint16_t j = 0; j < expert_count; ++j)
+                    if (next[i].expert == expert_ids[j]) selected = true;
+                if (!selected && (victim < 0 || next_use[next[i].expert] > next_use[next[victim].expert]))
+                    victim = i;
+            }
+            if (victim < 0) {
+                k3_cache_error(error, error_size, "no unprotected next-use victim");
+                return false;
+            }
+            slot = next[victim].slot;
+            memmove(next + victim, next + victim + 1, (size_t)(count - victim - 1) * sizeof *next);
+            --count; ++evictions;
+        } else {
+            for (; slot < cache->capacity; ++slot) {
+                bool used = false;
+                for (uint16_t i = 0; i < count; ++i) if (next[i].slot == slot) used = true;
+                if (!used) break;
+            }
+            if (slot == cache->capacity) return false;
+        }
+        next[count++] = (k3_cache_entry){expert_ids[rank], slot};
+        accesses[rank].destination_slot = k3_cache_global_slot(cache, layer, slot);
+        ++admissions;
+    }
+    /* Match token-batch recency, after every victim has been selected. */
+    for (uint16_t rank = 0; rank < expert_count; ++rank) {
+        int index = k3_cache_find(next, count, expert_ids[rank]);
+        k3_cache_entry touched = next[index];
+        memmove(next + index, next + index + 1, (size_t)(count - index - 1) * sizeof *next);
+        next[count - 1] = touched;
+    }
+    cache->pending[layer] = (k3_cache_pending){
+        .active = true, .count = count, .accesses = expert_count,
+        .hits = hits, .admissions = admissions, .evictions = evictions};
+    return true;
+}
+
 bool k3_expert_cache_commit(k3_expert_cache *cache,
                             uint16_t layer,
                             char *error,

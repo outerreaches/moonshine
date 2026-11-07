@@ -60,6 +60,28 @@ the current K3.1 model identity.
 Model weights are not included and are not covered by this repository's MIT
 license.
 
+### GLM 5.3 Flash, and model-derived goldens
+
+The GLM 5.3 Flash component work references the official
+[`zai-org/GLM-5.3-Flash`](https://huggingface.co/zai-org/GLM-5.3-Flash) release,
+pinned at revision `04c4e9e95c5da8862dced7e5056455116f83a7e0`, with its
+`config.json` and `model.safetensors.index.json` digests recorded in
+`tests/fixtures/glm53_phase4_reference.json`. Equations were checked against
+Transformers GLM support at `eb4d9e2a64a013bec12289288b85d0b1210ba0aa` and
+llama.cpp PR 27773 at `a771613af20f3dc60247e4b6a3d11516f0664673`.
+
+The Phase-4 golden arrays are computed **by running those official weights**, so
+they are model-derived data governed by the publisher's terms rather than by this
+repository's MIT license, and their bytes are **not committed here**. What is
+committed is the provenance needed to rebuild and then check them: source
+identity, shard and tensor names, digests, synthetic input formulas, tolerances,
+and each golden's SHA-256. See `docs/glm53-phase4-goldens.md` for the
+regeneration rules, and for the one golden that still lacks a generator.
+
+The same line applies to the K3 and MiMo material described below: pinned digests
+and descriptions of a derived representation belong in the repository; bulk
+weight-derived payloads do not.
+
 ## Validation oracles
 
 The following projects informed validation but are not runtime dependencies:
@@ -134,6 +156,32 @@ informed by Meta's [DietGPU](https://github.com/facebookresearch/dietgpu)
 GPU ANS design. The Moonshine implementation is independent K3-specific
 HIP/wave32 code; no DietGPU source is vendored or copied into this repository.
 DietGPU is design prior art, not a runtime dependency.
+
+The 2026-09-22 MiMo CPU size screen (`tests/mimo26_rans_screen.cpp`) adapts
+the maintainer's local GLM byte-rANS screen and Moonshine's MZG2 symbol
+ordering. The same rANS/DietGPU design acknowledgement applies; no new external
+codec source was imported. Unlike the K3 format, this research candidate
+preserves all 16 MXFP4 codes, including both zero encodings, and all 256 scale
+bytes. It is not a K3 MZG2-compatible file format or a qualified GPU decoder.
+Input bytes come from the local official `XiaomiMiMo/MiMo-V2.6-Flash-RL`
+checkpoint at `3b38d063180c3e4aed9691fdc735f3d10b266ee4`; model-derived
+artifacts remain separate from this repository's source license.
+
+The 2026-09-23 test-only MiMo GPU gate (`tests/mimo26_rans_gpu_gate.cu`)
+reuses that CPU histogram normalization/ordering and adapts the local
+`k3_mzg2.cu` wave decoder and 32-bit checksum, extending tables to the full
+16/256 alphabets. The DietGPU acknowledgement above continues to apply.
+No new external codec implementation was imported. Its in-memory prototype
+metadata is not a persistent MiMo format and does not modify the K3 ABI.
+
+The same day's read-only memory investigation consulted Linux's
+[VM sysctl documentation](https://kernel.org/doc/html/v6.10/admin-guide/sysctl/vm.html),
+[GFP allocation documentation](https://cdn.kernel.org/doc/html/latest/core-api/mm-api.html),
+and upstream v7.0 [TTM pool source](https://github.com/torvalds/linux/blob/v7.0/drivers/gpu/drm/ttm/ttm_pool.c)
+to interpret actual host tracepoints. No kernel code was copied or settings
+changed; upstream source is context, not a claim that Ubuntu's running kernel
+is byte-identical. The local trace, not source inspection alone, identifies
+the observed order-10 AMDGPU/TTM reclaim callers.
 
 The historical standalone MZG2 bundle is a derived representation of the pinned
 official Kimi K3 weights: non-routed language tensors retain exact source

@@ -1,0 +1,54 @@
+{
+  "official": {
+    "config_sha256": "bb8f01c42cb92a52ca72e65afb4d5bd8d11aef083cd210e8de25dfb904f23e9f",
+    "index_sha256": "3c3f40366a53c3fd7974b4eab7881a365a98c2a4329150befebab99fe7c18b05",
+    "main_text_tensor_count": 74001,
+    "mtp_tensor_count": 1760,
+    "repository": "zai-org/GLM-5.3-Flash",
+    "revision": "04c4e9e95c5da8862dced7e5056455116f83a7e0",
+    "tensor_count": 76108,
+    "vision_tensor_count": 347
+  },
+  "official_projection": {
+    "columns": 4096,
+    "diagnostic_sequential_f32_sha256": "ae121fe8f8ef4c9017ffa614991ba123841b1a291e2d32b89a4d8d50d601850c",
+    "first_8": [
+      0.16060075163841248,
+      -0.012741511687636375,
+      -0.24690984189510345,
+      0.2515947222709656,
+      -0.5886113047599792,
+      -0.20694327354431152,
+      -0.3180915415287018,
+      -0.4408954679965973
+    ],
+    "input_formula": "BF16-exact x[c] = (((17*c) % 31) - 15) / 32, c=0..4095",
+    "last_8": [
+      -0.45440906286239624,
+      0.2125268578529358,
+      0.18755406141281128,
+      0.13979649543762207,
+      -0.29989394545555115,
+      0.4025675654411316,
+      0.5775325298309326,
+      0.3584621250629425
+    ],
+    "note": "Digest is diagnostic; numeric gates use host oracle and magnitude-aware tolerances.",
+    "reference_f32_file": "tests/fixtures/glm53_official_projection_f32.bin",
+    "reference_f32_sha256": "ae121fe8f8ef4c9017ffa614991ba123841b1a291e2d32b89a4d8d50d601850c",
+    "rows": 512,
+    "scale_name": "model.language_model.layers.3.self_attn.kv_a_proj_with_mqa.weight_scale_inv",
+    "scale_sha256": "d05017223b85257643e47d57ca09956dc865e03e82bdb8804054a252655c9634",
+    "shard": "model-00032-of-00062.safetensors",
+    "weight_name": "model.language_model.layers.3.self_attn.kv_a_proj_with_mqa.weight",
+    "weight_sha256": "b453f3ee6e9783fc0c81936a558894e27c48ec0ccc3e79878605218ad04c6eaa"
+  },
+  "references": {
+    "llama_cpp_pr_27773_commit": "a771613af20f3dc60247e4b6a3d11516f0664673",
+    "transformers_followup_same_glm_math": "83d46aa2a2c47bef8350580f30981c974add0983",
+    "transformers_modeling_sha256": "2092bbb4efa2a8087b74f4a4da37635c503fe1df9ae73f1e6e8342af8b4b8e8b",
+    "transformers_modular_sha256": "666faa54d8ff84d1642f55192b9e9df67a4d1b3a56cd789e4b7b2fb3e7b7a815",
+    "transformers_support_commit": "eb4d9e2a64a013bec12289288b85d0b1210ba0aa"
+  },
+  "schema_version": 1
+}

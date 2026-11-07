@@ -16,6 +16,7 @@ typedef enum {
     K3_ST_DTYPE_BF16,
     K3_ST_DTYPE_F32,
     K3_ST_DTYPE_U8,
+    K3_ST_DTYPE_F8_E4M3,
 } k3_st_dtype;
 
 typedef struct {
@@ -83,6 +84,17 @@ bool k3_st_model_open(k3_st_model *model,
                       size_t       error_size);
 
 /*
+ * Open the same numbered shard family with a five-digit total field:
+ * model-NNNNN-of-NNNNN.safetensors. The existing API intentionally retains
+ * K3's six-digit total field.
+ */
+bool k3_st_model_open_5digit_total(k3_st_model *model,
+                                    const char  *root,
+                                    size_t       shard_count,
+                                    char        *error,
+                                    size_t       error_size);
+
+/*
  * Open one deterministic SafeTensors file as a one-shard model. This is the
  * source-precision static tier used by standalone MZG2 bundles.
  */
@@ -100,6 +112,19 @@ bool k3_st_model_open_file_fd(k3_st_model *model,
                               int          fd,
                               char        *error,
                               size_t       error_size);
+
+/*
+ * Open an explicit, caller-ordered list of shard paths as one model. Needed by
+ * checkpoints whose shard filenames do not follow the numbered
+ * model-NNNNN-of-NNNNN family, so that the shard set has to come from the
+ * index instead. Shard indices in the resulting directory match the order of
+ * the paths argument.
+ */
+bool k3_st_model_open_paths(k3_st_model       *model,
+                            const char *const *paths,
+                            size_t             path_count,
+                            char              *error,
+                            size_t             error_size);
 
 void k3_st_model_close(k3_st_model *model);
 
